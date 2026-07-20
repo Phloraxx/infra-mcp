@@ -1,0 +1,39 @@
+[Unit]
+Description=infra-mcp privileged host agent
+Documentation=https://github.com/Phloraxx/infra-mcp
+After=docker.service
+Requires=docker.service
+
+[Service]
+Type=simple
+User=infra-mcp
+Group=infra-mcp
+SupplementaryGroups=docker
+WorkingDirectory=/opt/infra-mcp
+EnvironmentFile=/etc/infra-mcp/host-agent.env
+Environment=AGENT_SOCKET=/run/infra-mcp/agent.sock
+ExecStart=/usr/bin/node /opt/infra-mcp/apps/host-agent/dist/index.js
+Restart=on-failure
+RestartSec=3
+
+# systemd creates /run/infra-mcp owned by the service user/group.
+RuntimeDirectory=infra-mcp
+RuntimeDirectoryMode=0750
+UMask=0007
+
+# Hardening. The agent only needs local Unix sockets and access to the Docker group.
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectKernelLogs=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+LockPersonality=true
+RestrictAddressFamilies=AF_UNIX
+
+[Install]
+WantedBy=multi-user.target
