@@ -17,17 +17,24 @@ For repeatable production deployments, add and commit a lockfile once dependency
 
 ## 2. Create the host-agent service account
 
-Create a dedicated system user and add it to Docker's group:
+Create a dedicated group and system user explicitly, then grant the user Docker access:
 
 ```bash
-sudo useradd --system --home /nonexistent --shell /usr/sbin/nologin infra-mcp
+sudo groupadd --system infra-mcp
+sudo useradd --system \
+  --gid infra-mcp \
+  --home /nonexistent \
+  --shell /usr/sbin/nologin \
+  infra-mcp
 sudo usermod -aG docker infra-mcp
 getent group infra-mcp
 ```
 
-Record the numeric GID shown by `getent group infra-mcp`; configure that value as `INFRA_MCP_GID` for the MCP container so it can access the Unix socket.
+If the `infra-mcp` user or group already exists, skip the corresponding creation command rather than recreating it.
 
-> Docker-group membership is effectively high privilege. The security boundary is the host agent's fixed operation allowlist; do not expose the agent socket to unrelated containers or users.
+Record the numeric GID shown by `getent group infra-mcp`; configure that value as `INFRA_MCP_GID` for the MCP container so it can traverse `/run/infra-mcp` and access the Unix socket.
+
+> Docker-group membership is effectively root-equivalent privilege on a typical Docker host. The security boundary is the host agent's fixed operation allowlist; do not expose the agent socket to unrelated containers or users.
 
 ## 3. Configure the internal agent token
 
@@ -62,7 +69,7 @@ sudo systemctl enable --now infra-mcp-agent
 sudo systemctl status infra-mcp-agent
 ```
 
-Verify the socket exists:
+Verify the socket exists and is owned by the intended user/group:
 
 ```bash
 sudo ls -l /run/infra-mcp/agent.sock
@@ -70,7 +77,7 @@ sudo ls -l /run/infra-mcp/agent.sock
 
 ## 5. Deploy the MCP gateway in Dokploy
 
-Create a Dokploy application/Compose deployment from this repository using `docker-compose.yml`.
+Create a Dokploy Docker Compose deployment from this repository using `docker-compose.yml`.
 
 Configure:
 
@@ -79,7 +86,7 @@ AGENT_TOKEN=<same generated secret>
 INFRA_MCP_GID=<numeric GID of infra-mcp group>
 ```
 
-The Compose file publishes port 3000 only on the VM loopback interface by default. Do not simply change it to a public unauthenticated port.
+The Compose file publishes port 3000 only on the VM loopback interface by default. This is useful for local verification and a private tunnel. Do not change it to a public unauthenticated bind.
 
 Verify locally on the VM:
 
@@ -93,6 +100,8 @@ Expected response:
 {"status":"ok","service":"infra-mcp"}
 ```
 
+If you later route the service through a Dokploy-managed domain, configure the domain for service `mcp-server` and container port `3000`. Dokploy can add the required Traefik routing/network configuration during deployment. Keep the MCP endpoint authenticated; a public hostname by itself is not an authentication boundary.
+
 ## 6. Connect ChatGPT
 
 The safest first test is to keep the MCP endpoint private and use OpenAI Secure MCP Tunnel. Alternatively, add standards-compliant OAuth before publishing an HTTPS `/mcp` endpoint.
@@ -100,15 +109,17 @@ The safest first test is to keep the MCP endpoint private and use OpenAI Secure 
 Once the MCP endpoint is reachable by ChatGPT:
 
 1. In ChatGPT Web, keep Developer mode enabled.
-2. Open **Settings → Plugins** and create a developer-mode app.
+2. Open **Settings → Apps** (or your workspace's **Workspace Settings → Apps**) and create/test the custom MCP app using the Developer mode controls available on your account.
 3. Suggested app name: `Infra MCP`.
 4. Suggested app description:
 
    `Securely inspect and operate my self-hosted infrastructure, including Linux host health, Docker containers and logs, Dokploy deployments, and OCI resources. Use read-only diagnostics first and request confirmation before consequential operations.`
 
-5. Set the MCP server URL to your HTTPS `/mcp` endpoint, or select the configured secure tunnel connection.
+5. Set the MCP server URL to your HTTPS `/mcp` endpoint, or use the configured Secure MCP Tunnel connection.
 6. After the app connects, confirm that the advertised tools match the expected allowlist.
-7. Set the app permission level to ask before making changes while the integration is new.
+7. Keep consequential/write actions confirmation-gated while the integration is new.
+
+OpenAI's current MCP availability differs by ChatGPT plan/workspace. Read-only MCP access may be available where full write/modify MCP actions are not. Verify that the account/workspace you use supports write actions before relying on tools such as `restart_container`, deploy, update, or reboot.
 
 Test with read-only prompts first:
 
@@ -119,7 +130,7 @@ Show the last 100 log lines from <container-name>.
 Check for failed system services.
 ```
 
-Only after those behave correctly, test the write tool:
+Only after those behave correctly, and only on a ChatGPT plan/workspace that permits MCP write actions, test the write tool:
 
 ```text
 Restart <container-name>.
@@ -127,7 +138,7 @@ Restart <container-name>.
 
 ## 7. Before adding public OAuth
 
-Do not treat a static API key as a ChatGPT authentication solution. ChatGPT MCP integrations use MCP-compatible OAuth for user authorization; the gateway should validate issuer, audience, expiry, and scopes on every authenticated request.
+Do not treat the internal `AGENT_TOKEN` as ChatGPT user authentication. It protects only the local gateway-to-agent hop. For a public remote MCP deployment, use MCP-compatible OAuth and validate issuer, audience, expiry, and scopes on authenticated requests.
 
 Recommended scope split:
 
