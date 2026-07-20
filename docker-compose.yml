@@ -1,0 +1,24 @@
+services:
+  mcp-server:
+    build:
+      context: .
+      dockerfile: apps/mcp-server/Dockerfile
+    restart: unless-stopped
+    environment:
+      PORT: "3000"
+      BIND_HOST: "0.0.0.0"
+      AGENT_SOCKET: /run/infra-mcp/agent.sock
+      AGENT_TOKEN: ${AGENT_TOKEN:?AGENT_TOKEN is required}
+    ports:
+      - "127.0.0.1:3000:3000"
+    volumes:
+      - /run/infra-mcp:/run/infra-mcp
+    group_add:
+      - "${INFRA_MCP_GID:-999}"
+    read_only: true
+    tmpfs:
+      - /tmp
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
