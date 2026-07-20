@@ -49,7 +49,8 @@ infra-mcp/
 ├── deploy/
 │   └── systemd/          # Host-agent service unit
 ├── docs/
-│   └── ARCHITECTURE.md
+│   ├── ARCHITECTURE.md
+│   └── DEPLOYMENT.md
 ├── .env.example
 ├── docker-compose.yml
 ├── package.json
@@ -66,7 +67,7 @@ infra-mcp/
 6. **Read vs. write annotations.** MCP tools advertise read-only/destructive intent so ChatGPT can apply confirmation policies appropriately.
 7. **Secrets stay outside Git.** Runtime secrets belong in Dokploy/environment configuration.
 
-See [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) for the intended trust boundaries and rollout plan.
+See [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) for trust boundaries and [`docs/DEPLOYMENT.md`](docs/DEPLOYMENT.md) for the Oracle VM + Dokploy setup and ChatGPT connection steps.
 
 ## Development
 
@@ -102,6 +103,20 @@ http://localhost:3000/mcp
 ```
 
 For ChatGPT, deploy behind HTTPS or use OpenAI Secure MCP Tunnel. Do not expose a no-auth development endpoint directly to the public Internet.
+
+## ChatGPT app metadata
+
+Suggested app name:
+
+```text
+Infra MCP
+```
+
+Suggested app description:
+
+```text
+Securely inspect and operate my self-hosted infrastructure, including Linux host health, Docker containers and logs, Dokploy deployments, and OCI resources. Use read-only diagnostics first and request confirmation before consequential operations.
+```
 
 ## Deployment direction
 
