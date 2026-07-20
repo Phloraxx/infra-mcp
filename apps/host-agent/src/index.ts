@@ -20,6 +20,7 @@ if (token.length < 32) {
 
 const containerNamePattern = /^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$/;
 const maxRequestBytes = 64 * 1024;
+const maxLogCharacters = 200_000;
 
 function json(res: ServerResponse, status: number, value: unknown): void {
   const payload = JSON.stringify(value);
@@ -28,6 +29,17 @@ function json(res: ServerResponse, status: number, value: unknown): void {
     "content-length": Buffer.byteLength(payload),
   });
   res.end(payload);
+}
+
+function audit(operation: string, details: Record<string, unknown> = {}): void {
+  console.info(
+    JSON.stringify({
+      timestamp: new Date().toISOString(),
+      event: "infra_mcp_operation",
+      operation,
+      ...details,
+    }),
+  );
 }
 
 function isAuthorized(req: IncomingMessage): boolean {
@@ -116,17 +128,31 @@ async function listContainers() {
     containers: stdout
       .split("\n")
       .filter(Boolean)
-      .map((line) => JSON.parse(line) as Record<string, string>),
+      .map((line) => JSON.parse(line) as Record<string, string>)
+      .map((record) => ({
+        id: record.ID,
+        name: record.Names,
+        image: record.Image,
+        state: record.State,
+        status: record.Status,
+        ports: record.Ports,
+        runningFor: record.RunningFor,
+      })),
   };
 }
 
 async function containerLogs(name: string, lines: number) {
   const { stdout, stderr } = await run("docker", ["logs", "--tail", String(lines), name], 20_000);
+  const combined = [stdout, stderr].filter(Boolean).join("\n");
+  const truncated = combined.length > maxLogCharacters;
+  const logs = truncated ? combined.slice(-maxLogCharacters) : combined;
+
   return {
     container: name,
-    lines,
-    logs: [stdout, stderr].filter(Boolean).join("\n").slice(-2_000_000),
-    truncatedToBytes: 2_000_000,
+    requestedLines: lines,
+    logs,
+    truncated,
+    returnedCharacters: logs.length,
   };
 }
 
@@ -158,21 +184,25 @@ async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> 
   }
 
   if (!isAuthorized(req)) {
+    audit("unauthorized_request", { method: req.method, path: url.pathname });
     json(res, 401, { error: "Unauthorized" });
     return;
   }
 
   if (req.method === "GET" && url.pathname === "/v1/system/status") {
+    audit("system_status");
     json(res, 200, await systemStatus());
     return;
   }
 
   if (req.method === "GET" && url.pathname === "/v1/docker/containers") {
+    audit("list_containers");
     json(res, 200, await listContainers());
     return;
   }
 
   if (req.method === "GET" && url.pathname === "/v1/system/failed-services") {
+    audit("failed_services");
     json(res, 200, await failedServices());
     return;
   }
@@ -181,6 +211,7 @@ async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> 
     const body = await readJsonBody(req);
     const name = requireContainerName(body.name);
     const lines = requireLogLines(body.lines);
+    audit("container_logs", { container: name, lines });
     json(res, 200, await containerLogs(name, lines));
     return;
   }
@@ -188,10 +219,12 @@ async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> 
   if (req.method === "POST" && url.pathname === "/v1/docker/restart") {
     const body = await readJsonBody(req);
     const name = requireContainerName(body.name);
+    audit("restart_container", { container: name });
     json(res, 200, await restartContainer(name));
     return;
   }
 
+  audit("not_found", { method: req.method, path: url.pathname });
   json(res, 404, { error: "Not found" });
 }
 
