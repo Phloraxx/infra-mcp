@@ -2,7 +2,6 @@
 Description=infra-mcp privileged host agent
 Documentation=https://github.com/Phloraxx/infra-mcp
 After=docker.service
-Requires=docker.service
 
 [Service]
 Type=simple
@@ -22,6 +21,8 @@ RuntimeDirectoryMode=0750
 UMask=0007
 
 # Hardening. The agent only needs local Unix sockets and access to the Docker group.
+# Docker is ordered before the agent when available, but is deliberately not a
+# hard requirement: host diagnostics should remain reachable if Docker fails.
 NoNewPrivileges=true
 PrivateTmp=true
 PrivateDevices=true
