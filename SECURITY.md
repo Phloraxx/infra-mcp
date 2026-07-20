@@ -18,6 +18,8 @@ The initial MCP gateway intentionally contains no arbitrary shell tool and does 
 - Do not add tools that accept arbitrary shell commands.
 - Keep the MCP endpoint private until standards-compliant authentication is configured, or connect through a secure private tunnel.
 - Use separate, least-privilege credentials for Dokploy and OCI integrations.
+- Treat diagnostic output and container logs as potentially sensitive. Do not log passwords, API keys, tokens, or other secrets in application logs; anything returned by an MCP tool may become part of the ChatGPT conversation/tool context.
+- Keep diagnostic responses bounded. Large or historical log analysis should use a dedicated logging backend with its own access controls rather than unbounded Docker log reads.
 
 ## Reporting vulnerabilities
 
