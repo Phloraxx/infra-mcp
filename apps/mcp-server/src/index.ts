@@ -170,6 +170,18 @@ app.post("/mcp", async (req: Request, res: Response) => {
     sessionIdGenerator: undefined,
   });
 
+  let closed = false;
+  const close = () => {
+    if (closed) return;
+    closed = true;
+    void transport.close();
+    void server.close();
+  };
+
+  // Register cleanup before handling the request so a fast response cannot
+  // close before the listener exists.
+  res.once("close", close);
+
   try {
     await server.connect(transport);
     await transport.handleRequest(req, res, req.body);
@@ -182,11 +194,6 @@ app.post("/mcp", async (req: Request, res: Response) => {
         id: null,
       });
     }
-  } finally {
-    res.on("close", () => {
-      void transport.close();
-      void server.close();
-    });
   }
 });
 
