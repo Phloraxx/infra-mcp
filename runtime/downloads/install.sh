@@ -98,13 +98,15 @@ digest() { if command -v sha256sum >/dev/null 2>&1; then sha256sum "$1" | awk '{
 echo 'Infra MCP · device agent'
 mkdir -p "$BASE"
 NODE="$(command -v node || true)"
-if [ -z "$NODE" ] || ! "$NODE" -e 'process.exit(Number(process.versions.node.split(".")[0])>=22?0:1)' >/dev/null 2>&1; then
+if [ -x "$BASE/node/bin/node" ]; then NODE="$BASE/node/bin/node"; fi
+# macOS uses Node 22, the runtime exercised by the integration suite.
+if [ -z "$NODE" ] || ! "$NODE" -e 'const major=Number(process.versions.node.split(".")[0]);process.exit(major>=22&&(process.platform!=="darwin"||major===22)?0:1)' >/dev/null 2>&1; then
   ARCH="$(uname -m)"
   case "$ARCH" in x86_64) ARCH=x64 ;; arm64|aarch64) ARCH=arm64 ;; *) echo "Unsupported architecture: $ARCH" >&2; exit 1 ;; esac
   PLATFORM=linux; [ "$OS" != Darwin ] || PLATFORM=darwin
   if [ "$OS" = Linux ] && ldd --version 2>&1 | head -n 1 | grep -qi musl; then PLATFORM=linux; ARCH="$ARCH-musl"; fi
   ARCHIVE="node-$NODE_VERSION-$PLATFORM-$ARCH.tar.gz"
-  echo 'Installing a private Node runtime. Administrator access is not required.'
+  echo 'Installing a private Node 22 runtime. Administrator access is not required.'
   download "https://nodejs.org/dist/$NODE_VERSION/$ARCHIVE" "$WORK/node.tar.gz"
   download "https://nodejs.org/dist/$NODE_VERSION/SHASUMS256.txt" "$WORK/SHASUMS256.txt"
   EXPECTED="$(awk -v file="$ARCHIVE" '$2==file {print $1}' "$WORK/SHASUMS256.txt")"
@@ -164,14 +166,14 @@ if [ "$MANUAL" = 1 ]; then
   echo 'Automatic startup was not configured (--manual).'
   exit 0
 fi
-export INFRA_SERVICE_BASE="$BASE" INFRA_SERVICE_NODE="$NODE" INFRA_SERVICE_SYSTEM="$SYSTEM" INFRA_SERVICE_OS="$OS"
+export INFRA_SERVICE_BASE="$BASE" INFRA_SERVICE_NODE="$NODE" INFRA_SERVICE_SYSTEM="$SYSTEM" INFRA_SERVICE_OS="$OS" INFRA_SERVICE_IPV4FIRST="${INFRA_CURL_COMPAT:-0}"
 if [ "$OS" = Darwin ]; then
   mkdir -p "$(dirname "$PLIST")"
   export INFRA_SERVICE_FILE="$PLIST"
   "$NODE" --input-type=module <<'JS'
 import fs from 'node:fs';
 const e=process.env,esc=s=>s.replaceAll('&','&amp;').replaceAll('<','&lt;').replaceAll('>','&gt;').replaceAll('"','&quot;');
-fs.writeFileSync(e.INFRA_SERVICE_FILE,`<?xml version="1.0"?><!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd"><plist version="1.0"><dict><key>Label</key><string>to.phloraxx.infra.agent</string><key>ProgramArguments</key><array><string>${esc(e.INFRA_SERVICE_NODE)}</string><string>${esc(e.INFRA_SERVICE_BASE)}/agent.mjs</string></array><key>WorkingDirectory</key><string>${esc(e.INFRA_SERVICE_BASE)}</string><key>EnvironmentVariables</key><dict><key>PATH</key><string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string><key>INFRA_STARTUP</key><string>${e.INFRA_SERVICE_SYSTEM==='1'?'system-boot':'user-login'}</string></dict><key>RunAtLoad</key><true/><key>KeepAlive</key><true/><key>ThrottleInterval</key><integer>10</integer><key>StandardOutPath</key><string>${esc(e.INFRA_SERVICE_BASE)}/agent.log</string><key>StandardErrorPath</key><string>${esc(e.INFRA_SERVICE_BASE)}/agent.err.log</string></dict></plist>`,{mode:0o600});
+fs.writeFileSync(e.INFRA_SERVICE_FILE,`<?xml version="1.0"?><!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd"><plist version="1.0"><dict><key>Label</key><string>to.phloraxx.infra.agent</string><key>ProgramArguments</key><array><string>${esc(e.INFRA_SERVICE_NODE)}</string>${e.INFRA_SERVICE_IPV4FIRST==='1'?'<string>--dns-result-order=ipv4first</string>':''}<string>${esc(e.INFRA_SERVICE_BASE)}/agent.mjs</string></array><key>WorkingDirectory</key><string>${esc(e.INFRA_SERVICE_BASE)}</string><key>EnvironmentVariables</key><dict><key>PATH</key><string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string><key>INFRA_STARTUP</key><string>${e.INFRA_SERVICE_SYSTEM==='1'?'system-boot':'user-login'}</string></dict><key>RunAtLoad</key><true/><key>KeepAlive</key><true/><key>ThrottleInterval</key><integer>10</integer><key>StandardOutPath</key><string>${esc(e.INFRA_SERVICE_BASE)}/agent.log</string><key>StandardErrorPath</key><string>${esc(e.INFRA_SERVICE_BASE)}/agent.err.log</string></dict></plist>`,{mode:0o600});
 JS
   if [ "$SYSTEM" = 1 ]; then launchctl bootstrap system "$PLIST"; else launchctl bootstrap "gui/$(id -u)" "$PLIST"; fi
 else

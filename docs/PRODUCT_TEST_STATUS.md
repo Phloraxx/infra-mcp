@@ -48,9 +48,20 @@ The first macOS run exposed an agent startup guard that compared a symlink path 
 
 The existing scaffold CI passed as well. These checks do not replace actual installation, permission and reboot tests on the user's devices.
 
+## User Mac installation and reconnect check — 15 October local time
+
+- `souravs-bigmac` paired and connected on ARM64 Darwin 27 with agent 0.3.0.
+- Shell commands and a temporary file write/read/delete passed.
+- The installation directory is mode 700 and the saved credential is mode 600, owned by the agent user.
+- LaunchAgent XML validation and an initial service restart/reconnect passed. User-mode startup is configured after sign-in.
+- A second restart completed an active background job with its before/after output and exit code 0. The replacement agent started during the job, but reconnect took about 3 minutes 40 seconds and logged repeated socket errors.
+- Small side-by-side probes on this Mac opened 1/4 connections using its system Node 26 with IPv4 preferred, and 4/4 using the SHA-256-verified private Node 22.23.3 with IPv4 preferred. This is evidence for choosing the tested runtime on this device, not proof of the underlying network/TLS cause.
+
+The Unix installer now reuses an existing private runtime, selects Node 22 on Mac, and persists the IPv4 preference in the Mac LaunchAgent when compatibility mode is selected. Download-recovery tests, generated LaunchAgent XML/arguments and the Oracle Linux installation suite passed. The remote Mac runtime update did not regain control access. The recovery installer is saved at `~/.infra-mcp/install-runtime-update.sh` and needs a local Terminal invocation; it reuses the saved pairing credential. Successful runtime replacement and subsequent reconnect remain unverified.
+
 ## Not yet verified
 
-- macOS installation, permissions, logout/login and full reboot on the user's Mac.
+- Completion of the Mac runtime recovery, logout/login and full reboot on the user's Mac.
 - Windows installation with and without administrator access, Scheduled Task/Run-key fallback, logout/login and full reboot on Rose.
 - Linux/macOS/Windows system installation. Noninteractive sudo was unavailable on the inspected Oracle session; the privileged installer case was explicitly skipped.
 - Full Oracle VM reboot. Existing services were not rebooted for this release.
@@ -68,5 +79,3 @@ The existing scaffold CI passed as well. These checks do not replace actual inst
 6. Record measured RSS, idle CPU, network traffic, tool latency and response size, including long-running work.
 
 This is a working core release, not completion of the entire multi-device/GUI/phone product.
-
-The generated-command update also passed runtime CI run `38620839252` (Mac/Windows/Linux integration and browser UI) on commit `6f45f04d9d090a2a05cb2db1ae41b41870e9e047`.
