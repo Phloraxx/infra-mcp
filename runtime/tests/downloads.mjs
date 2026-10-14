@@ -39,7 +39,8 @@ printf file-ready > "$out"; printf 200
       let result;
       try{result={...(await exec('/bin/bash',['-c',`set -euo pipefail\n${helper}\ndownload "$TEST_DOWNLOAD_URL" "$TEST_DOWNLOAD_OUT"`],{env})),code:0};}
       catch(e){result={stdout:e.stdout,stderr:e.stderr,code:e.code};}
-      return {...result,count:Number(await fs.readFile(env.TEST_COUNT,'utf8')),flags:(await fs.readFile(env.TEST_FLAGS,'utf8')).trim().split('\n'),output:await fs.readFile(env.TEST_DOWNLOAD_OUT,'utf8').catch(()=>null)};
+      const count=await fs.readFile(env.TEST_COUNT,'utf8').catch(()=>{throw new Error('curl was never invoked: '+result.stdout+' '+result.stderr);});
+      return {...result,count:Number(count),flags:(await fs.readFile(env.TEST_FLAGS,'utf8')).trim().split('\n'),output:await fs.readFile(env.TEST_DOWNLOAD_OUT,'utf8').catch(()=>null)};
     }
     await t.test('TLS reset retries with HTTP 1.1 then IPv4',async()=>{
       const r=await run('tls');assert.equal(r.code,0);assert.equal(r.count,3);assert.equal(r.output,'file-ready');
