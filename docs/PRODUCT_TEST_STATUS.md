@@ -18,6 +18,18 @@ A short 30-command check from Oracle through the public HTTPS domain measured 19
 
 OAuth refresh-token support was added after live connector compatibility exposed a legacy scope mismatch. Access, refresh and dashboard token separation and refresh client binding are tested in the backend suite.
 
+## Cross-platform CI verified
+
+GitHub Actions run `38609102738` on commit `203a35d0580b3f314ae3523f8721360b7bdf5400` passed:
+
+- Complete backend/agent integration on Windows, macOS ARM64 and Ubuntu.
+- PowerShell installer parsing on Windows.
+- Browser UI interaction checks on Ubuntu.
+
+The first macOS run exposed an agent startup guard that compared a symlink path with a real path. The guard now compares canonical paths; the integration test starts the agent through a directory link to retain regression coverage.
+
+The existing scaffold CI passed as well. These checks do not replace actual installation, permission and reboot tests on the user's devices.
+
 ## Not yet verified
 
 - macOS installation, permissions, logout/login and full reboot on the user's Mac.

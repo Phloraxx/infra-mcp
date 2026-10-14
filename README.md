@@ -74,4 +74,4 @@ npm run test:ui  # requires a Playwright browser
 npm run test:install  # Linux user-systemd integration; uses isolated test services
 ```
 
-See [`docs/PRODUCT_TEST_STATUS.md`](docs/PRODUCT_TEST_STATUS.md) for measured coverage and outstanding hardware checks. Cross-platform CI is configured separately from the live Oracle tests; a configured test is not a passed test.
+See [`docs/PRODUCT_TEST_STATUS.md`](docs/PRODUCT_TEST_STATUS.md) for measured coverage and outstanding hardware checks. Backend/agent integration CI passed on Windows, macOS and Linux; Windows installer syntax and dashboard UI CI also passed. Hardware installation and reboot checks remain separate requirements.
