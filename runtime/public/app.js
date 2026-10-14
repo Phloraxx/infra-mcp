@@ -109,8 +109,11 @@ $('copy-endpoint').addEventListener('click', e => copy(state.endpoint, e.target)
 function installCommand() {
   if (!state.paired) return;
   const { base, code } = state.paired, platform = $('pair-platform').value;
-  const command = platform === 'windows' ? `Invoke-WebRequest '${base}/downloads/install-windows.ps1' -OutFile "$env:TEMP\\infra-install.ps1"\npowershell -NoProfile -ExecutionPolicy Bypass -File "$env:TEMP\\infra-install.ps1" -Code ${code}` : `curl -fsSL '${base}/downloads/install.sh' | bash -s -- --code ${code}`;
+  const curlFlags = platform === 'macos' ? '-4 --http1.1 ' : '';
+  const installerEnv = platform === 'macos' ? 'INFRA_CURL_COMPAT=1 ' : '';
+  const command = platform === 'windows' ? `Invoke-WebRequest '${base}/downloads/install-windows.ps1' -OutFile "$env:TEMP\\infra-install.ps1"\npowershell -NoProfile -ExecutionPolicy Bypass -File "$env:TEMP\\infra-install.ps1" -Code ${code}` : `(\n  infra_installer="$(mktemp)" && trap 'rm -f "$infra_installer"' EXIT &&\n  curl ${curlFlags}-fsSL '${base}/downloads/install.sh' -o "$infra_installer" &&\n  ${installerEnv}bash "$infra_installer" --code ${code}\n)`;
   $('install-command').value = command;
+  $('install-command').rows = platform === 'windows' ? 4 : 6;
   $('system-install-help').textContent = platform === 'windows' ? 'In an elevated PowerShell window, add -System to the installer command. This installs a startup task for system shell access; it does not provide desktop access.' : 'Download the installer first, then run it with sudo and --system. This starts a system agent at boot; it does not provide desktop access.';
 }
 async function newPair() { const result = await post('/api/pairing', {}); state.paired = { ...result, before: state.devices.map(d => d.device) }; $('pair-code').textContent = result.code.slice(0, 5) + '-' + result.code.slice(5); $('pair-expiry').textContent = `Expires at ${new Date(result.expiresAt).toLocaleTimeString()}`; $('pair-progress').textContent = 'The installer asks for a device name. Your device will appear here after connection.'; installCommand(); }

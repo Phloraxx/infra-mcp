@@ -50,7 +50,15 @@ const server = http.createServer(async (req, res) => {
     assert.equal(calls.filter(c=>c.op==='shell').length,1);
     await page.screenshot({path:path.join(captures,'desktop.png')});
     await page.getByRole('tab',{name:'Files',exact:true}).click();await page.locator('#file-path').fill('/home/drvij');await page.getByRole('button',{name:'Open directory'}).click();await page.getByRole('button',{name:/test.txt/}).click();await page.locator('#file-content').fill('updated');await page.getByRole('button',{name:'Save file'}).click();await page.getByText('File saved.',{exact:true}).waitFor();assert.equal(saved,'updated');
-    await page.locator('#add-device').click();await page.locator('#pair-dialog').waitFor({state:'visible'});assert.ok(pairingCount===1);await page.locator('#pair-platform').selectOption('windows');assert.match(await page.locator('#install-command').inputValue(),/ExecutionPolicy Bypass/);await page.screenshot({path:path.join(captures,'pairing.png')});await page.locator('#close-pair').click();
+    await page.locator('#add-device').click();await page.locator('#pair-dialog').waitFor({state:'visible'});assert.ok(pairingCount===1);
+    await page.locator('#pair-platform').selectOption('macos');
+    const macCommand=await page.locator('#install-command').inputValue();
+    assert.match(macCommand,/curl -4 --http1\.1 -fsSL/);assert.match(macCommand,/INFRA_CURL_COMPAT=1 bash/);assert.match(macCommand,/--code 12345ABCDE/);assert.match(macCommand,/mktemp/);assert.match(macCommand,/trap 'rm -f/);assert.doesNotMatch(macCommand,/\|\s*bash/);
+    await page.evaluate(()=>{Object.defineProperty(navigator,'clipboard',{configurable:true,value:{writeText:async value=>{window.copiedInstall=value;}}});});
+    await page.locator('#copy-install').click();assert.equal(await page.evaluate(()=>window.copiedInstall),macCommand);
+    await page.screenshot({path:path.join(captures,'pairing.png')});
+    await page.locator('#pair-platform').selectOption('linux');const linuxCommand=await page.locator('#install-command').inputValue();assert.match(linuxCommand,/curl -fsSL/);assert.match(linuxCommand,/--code 12345ABCDE/);assert.doesNotMatch(linuxCommand,/--ipv4|-4 --http1\.1|INFRA_CURL_COMPAT|\|\s*bash/);
+    await page.locator('#pair-platform').selectOption('windows');assert.match(await page.locator('#install-command').inputValue(),/ExecutionPolicy Bypass/);await page.locator('#close-pair').click();
     await page.locator('nav button[data-device="rose"]').click();await page.locator('#offline-banner').waitFor({state:'visible'});assert.equal(await page.locator('#run-command').isDisabled(),true);
     await page.locator('nav button[data-device="oracle"]').click();await page.getByRole('tab',{name:'Console',exact:true}).click();
     await page.setViewportSize({width:390,height:844});await page.screenshot({path:path.join(captures,'mobile.png')});
