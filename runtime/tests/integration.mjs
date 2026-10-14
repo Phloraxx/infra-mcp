@@ -51,7 +51,8 @@ await test('Infra MCP full local journey',async t=>{
     const agentDir=path.join(work,'agent');await fs.mkdir(agentDir);
     for(const [src,dest] of [['index.mjs','agent.mjs'],['jobs.mjs','jobs.mjs']])await fs.copyFile(path.join(root,'agent',src),path.join(agentDir,dest));
     await fs.writeFile(path.join(agentDir,'config.json'),JSON.stringify({...paired,startup:'test'}));
-    function startAgent(){agent=spawn(process.execPath,[path.join(agentDir,'agent.mjs')],{cwd:work,env:{...process.env,CONTROL_SERVER:paired.server,AGENT_TOKEN:paired.token,DEVICE_NAME:'testdevice'},stdio:['ignore','pipe','pipe']});agent.stderr.on('data',x=>output+=x);agent.stdout.on('data',x=>output+=x);}
+    const linkedDir=path.join(work,'agent-link');await fs.symlink(agentDir,linkedDir,'junction');
+    function startAgent(){agent=spawn(process.execPath,[path.join(linkedDir,'agent.mjs')],{cwd:work,env:{...process.env,CONTROL_SERVER:paired.server,AGENT_TOKEN:paired.token,DEVICE_NAME:'testdevice'},stdio:['ignore','pipe','pipe']});agent.stderr.on('data',x=>output+=x);agent.stdout.on('data',x=>output+=x);}
     startAgent();await until(async()=> (await api('/api/overview')).devices.some(d=>d.device==='testdevice'&&d.online));
     await t.test('OAuth DCR, PKCE and MCP discovery; dashboard cookies cannot call MCP',async()=>{
       const reg=await req('/register',{redirect_uris:['https://chatgpt.com/connector/oauth/test'],client_name:'test'},'POST',false);assert.equal(reg.status,201);const c=await reg.json();

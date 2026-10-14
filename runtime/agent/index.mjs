@@ -253,7 +253,7 @@ function startAgent() {
   console.log(`Infra MCP agent 0.3.0 starting as '${DEVICE}'`);
   connect();
 }
-if(process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+if(process.argv[1] && fsSync.realpathSync(process.argv[1]) === fsSync.realpathSync(fileURLToPath(import.meta.url))) {
   if(process.argv[2] === '--job-runner')runJob(process.argv[3]);
   else startAgent();
 }

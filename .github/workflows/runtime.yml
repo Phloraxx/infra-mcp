@@ -1,6 +1,7 @@
 name: Infra MCP runtime
 on:
   push:
+    branches: [main]
     paths: ['runtime/**', '.github/workflows/runtime.yml']
   pull_request:
     paths: ['runtime/**', '.github/workflows/runtime.yml']
