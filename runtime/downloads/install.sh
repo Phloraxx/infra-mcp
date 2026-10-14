@@ -61,7 +61,7 @@ if [ "${INFRA_CURL_COMPAT:-0}" = 1 ]; then CURL_NETWORK_FLAGS=(--ipv4 --http1.1)
 download() {
   local attempt http rc name
   name="${1##*/}"
-  echo "Downloading $name…"
+  echo "Downloading ${name}..."
   for attempt in 1 2 3; do
     rc=0
     http="$(curl -fsSL ${CURL_NETWORK_FLAGS[@]+"${CURL_NETWORK_FLAGS[@]}"} --connect-timeout 15 --max-time 180 "$1" -o "$2" -w '%{http_code}')" || rc=$?
@@ -74,7 +74,7 @@ download() {
       22) case "$http" in 408|429|500|502|503|504) ;; *) echo "Download failed: $name (HTTP $http)." >&2; return 1 ;; esac ;;
       *) echo "Download failed: $name (curl error $rc)." >&2; return 1 ;;
     esac
-    if [ "$attempt" != 3 ]; then echo "Retrying $name ($((attempt+1))/3)…" >&2; sleep "$attempt"; fi
+    if [ "$attempt" != 3 ]; then echo "Retrying ${name} ($((attempt+1))/3)..." >&2; sleep "$attempt"; fi
   done
   echo "Could not download $name after 3 attempts. Check the Mac's network, VPN or proxy, then retry. Pairing has not started." >&2
   return 1
