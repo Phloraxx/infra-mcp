@@ -1,38 +1,17 @@
-# Security Policy
+# Security model
 
-`infra-mcp` is infrastructure-control software. Treat every deployment as security-sensitive.
+Infra MCP intentionally provides owner-authorized shell and filesystem control. A user agent has the permissions of its installation account; a system agent can have root or SYSTEM privileges. This is a personal, single-owner product, not a multi-tenant hosting service.
 
-## Current status
+The active implementation is in `runtime/`. Older scaffold documentation describing an allowlisted diagnostics-only agent does not describe this runtime.
 
-The repository is an early scaffold and is **not ready to expose as an unauthenticated public MCP endpoint**.
+- Keep the gateway behind HTTPS. Its listener binds to loopback.
+- Protect the dashboard with its configured password and the MCP endpoint with OAuth/PKCE. Keep signing secrets stable and outside Git. Access, refresh and dashboard tokens have separate purposes; refresh/dashboard tokens cannot call MCP tools.
+- Pair new devices using an expiring, single-use code. Each device receives a separate credential. Device removal revokes that credential and disconnects its socket.
+- The legacy shared agent token is retained for existing devices during migration; replace those installations with per-device credentials.
+- Restrict local credential files and avoid logging passwords, tokens or signing secrets. Dashboard/API responses omit device credentials.
+- Tools act only on the named connected device. Responses are associated with that device's socket. Local agents use an installation lock to prevent duplicate processes.
+- Command output and file contents can contain sensitive data and become part of the ChatGPT tool context. Output and saved job logs are bounded, but the owner remains responsible for what they request and share.
+- Connection loss does not guarantee a command stopped. Inspect its job status before rerunning it. Arbitrary work is not automatically replayed after a reboot.
+- GUI access still requires the relevant OS permissions and an available user session. Root/SYSTEM access does not bypass protected login screens or Android application isolation.
 
-The initial MCP gateway intentionally contains no arbitrary shell tool and does not mount the Docker socket. The host agent is still privileged through Docker-group membership and must be treated as trusted code.
-
-## Deployment requirements
-
-- Keep `AGENT_TOKEN` secret and use at least 32 random bytes of entropy.
-- Never commit `.env` files or real credentials.
-- Keep `/run/infra-mcp/agent.sock` accessible only to the intended service group/container.
-- Do not expose the host agent over TCP.
-- Do not mount `/var/run/docker.sock` into the MCP gateway.
-- Do not add tools that accept arbitrary shell commands.
-- Keep the MCP endpoint private until standards-compliant authentication is configured, or connect through a secure private tunnel.
-- Use separate, least-privilege credentials for Dokploy and OCI integrations.
-- Treat diagnostic output and container logs as potentially sensitive. Do not log passwords, API keys, tokens, or other secrets in application logs; anything returned by an MCP tool may become part of the ChatGPT conversation/tool context.
-- Keep diagnostic responses bounded. Large or historical log analysis should use a dedicated logging backend with its own access controls rather than unbounded Docker log reads.
-
-## Reporting vulnerabilities
-
-Until a private security-reporting channel is configured for this repository, do not publish credentials, tokens, or live server details in a public GitHub issue. Rotate any credential that may have been exposed.
-
-## High-impact changes
-
-Changes involving any of the following require additional review before deployment:
-
-- Arbitrary command execution.
-- File read/write access outside explicitly allowed paths.
-- Docker `exec`, privileged container creation, volume deletion, or host mounts.
-- Package installation or OS upgrades.
-- VM shutdown/reboot operations.
-- Firewall, IAM, or networking changes.
-- Database backup restoration or destructive database operations.
+Report reproducible security problems privately to the repository owner, with sensitive data removed from logs and screenshots.

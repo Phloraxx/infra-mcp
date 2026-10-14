@@ -1,137 +1,77 @@
-# infra-mcp
+# Infra MCP
 
-Secure MCP gateway for observing and controlling self-hosted infrastructure from ChatGPT. The project is designed to provide narrowly scoped, auditable access to Linux system diagnostics, Docker workloads, Dokploy deployments, and Oracle Cloud Infrastructure (OCI) without exposing an unrestricted shell or the Docker socket directly to the public MCP service.
+A personal device-control product: one MCP endpoint and web console, with small background agents on your computers.
 
-> **Status:** Initial scaffold. Start with read-only diagnostics and container logs, then add carefully scoped write operations after the deployment and authentication path is verified.
+The active implementation is in [`runtime/`](runtime/). The older `apps/` scaffold is retained as historical work and is not the runtime deployed on Oracle.
 
-## Architecture
+## Current release: 0.3.0
 
-```text
-ChatGPT Web
-    |
-    | MCP over HTTPS / Secure MCP Tunnel
-    v
-MCP Gateway (unprivileged container)
-    |
-    | authenticated Unix socket
-    v
-Host Agent (systemd service, allowlisted operations)
-    |
-    +-- Docker / container logs
-    +-- systemd / journal
-    +-- host health and diagnostics
-    |
-    +----------------------+
-                           |
-MCP Gateway ---------------+-- Dokploy API
-                           +-- OCI APIs
-```
+- Oracle-hosted web console with Oracle selected by default, device switching, file editing and saved background-job output.
+- Password sign-in for the web console and OAuth/PKCE for ChatGPT.
+- One-time pairing codes and separate, revocable device credentials.
+- macOS/Linux shell installer and Windows PowerShell installer. User installations need no sudo or administrator access; an official, checksum-verified private Node runtime is downloaded when required.
+- Persistent device identity, single-instance agents, WebSocket reconnect backoff and heartbeat checks.
+- Background jobs retain logs and exit status across an agent restart. Rebooted jobs are reported as interrupted; commands are not blindly replayed.
+- Six MCP tools: `devices`, `shell`, `files`, `process`, `jobs`, `status`.
 
-The MCP gateway never receives arbitrary shell access and does not mount `/var/run/docker.sock`. Privileged host operations are isolated behind a small host agent with explicit allowlists and strict input validation.
+Desktop automation and standalone Android control are **not implemented in this release**. The UI and capability reporting make that limitation explicit.
 
-## Initial capabilities
+## Run the gateway
 
-- System status: uptime, CPU load, memory, and root filesystem usage.
-- Docker: list containers and fetch bounded container logs.
-- Docker actions: restart a named container as an explicit write operation.
-- systemd: inspect failed services.
-- Health endpoints for the MCP gateway and host agent.
-
-Planned integrations include Dokploy deployments, OCI instance lifecycle controls, OCI Vulnerability Scanning/Cloud Guard findings, package/security update workflows, and emergency recovery through OCI Run Command.
-
-## Repository layout
-
-```text
-infra-mcp/
-├── apps/
-│   ├── mcp-server/       # ChatGPT-facing MCP gateway
-│   └── host-agent/       # Privileged host-side allowlisted agent
-├── deploy/
-│   └── systemd/          # Host-agent service unit
-├── docs/
-│   ├── ARCHITECTURE.md
-│   └── DEPLOYMENT.md
-├── .env.example
-├── docker-compose.yml
-├── package.json
-└── tsconfig.base.json
-```
-
-## Security model
-
-1. **No arbitrary shell tool.** MCP tools map to explicit operations only.
-2. **No Docker socket in the MCP container.** Docker access stays in the host agent.
-3. **Unix-socket boundary.** The MCP gateway talks to the host agent through `/run/infra-mcp/agent.sock`.
-4. **Shared agent token.** Requests over the local socket still require an internal bearer token for defense in depth.
-5. **Bounded inputs.** Container names are validated and log output is capped.
-6. **Read vs. write annotations.** MCP tools advertise read-only/destructive intent so ChatGPT can apply confirmation policies appropriately.
-7. **Secrets stay outside Git.** Runtime secrets belong in Dokploy/environment configuration.
-
-See [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) for trust boundaries and [`docs/DEPLOYMENT.md`](docs/DEPLOYMENT.md) for the Oracle VM + Dokploy setup and ChatGPT connection steps.
-
-## Development
-
-Requirements:
-
-- Node.js 22+
-- npm 10+
-- Docker for the MCP gateway image
-- Linux + systemd for the host agent deployment
+Use Node.js 22 or newer:
 
 ```bash
-npm install
-npm run build
+cd runtime
+npm ci --omit=dev
 ```
 
-Run the host agent locally:
+Provide `PUBLIC_BASE`, `OAUTH_USER`, `OAUTH_PASSWORD` and `TOKEN_SIGNING_SECRET` through your service environment. `TOKEN_SIGNING_SECRET` must remain stable across restarts so existing connections and dashboard sessions remain valid. `PORT` defaults to 8787; the gateway binds to loopback. Put it behind an HTTPS reverse proxy or tunnel.
 
 ```bash
-cp .env.example .env
-npm run dev:agent
+npm start
 ```
 
-Run the MCP server in another terminal:
+The web console is at `/`, and the MCP endpoint is `/mcp`. Connect ChatGPT using OAuth authentication. The existing Oracle deployment uses `https://mcp.phloraxx.us.to`.
+
+`AGENT_TOKEN` is supported only as a compatibility path for existing 0.2 agents. New installations use per-device pairing. Avoid distributing the legacy shared token.
+
+## Install a device
+
+Sign in to the console, choose **Add device**, select an OS and copy the installation command. The code expires in ten minutes and can be used once. Device names must be unique. Reinstallation reuses the saved identity unless a new code is explicitly supplied.
+
+### Startup and permission modes
+
+| Mode | Startup | Permission scope |
+|---|---|---|
+| macOS user | LaunchAgent after user login | That user's access |
+| macOS `--system` | LaunchDaemon at boot, after any required disk unlock | System agent; no interactive desktop |
+| Linux user | systemd user service; boot availability requires lingering | That user's access |
+| Linux `--system` | systemd system service at boot | Root shell; no interactive desktop |
+| Windows user | Per-user Scheduled Task, with Run-key fallback | That user's access |
+| Windows `-System` | Startup task as SYSTEM | System shell; no interactive desktop |
+
+Administrator installation does not automatically create a usable GUI session. Sleep, powered-off machines, disk-unlock screens and OS permission restrictions still affect availability.
+
+Unix installer options: `--base URL`, `--code CODE`, `--name NAME`, `--system`, `--manual`, `--uninstall`. For system mode, download the script first and run it with sudo. Windows equivalents are `-Server`, `-Code`, `-Name`, `-System`, `-Uninstall`.
+
+Uninstall removes startup configuration, retains local configuration/job logs, and tells the user to revoke the device in the console.
+
+## Operation and efficiency
+
+The agent needs no npm dependencies on Node 22+. GUI helpers and local models are not started. Gateway state is a small JSON store; no additional database server or message broker is required.
+
+Short commands return bounded output (16,000 characters by default). Long commands should run with `background: true`; their ID can be used with `jobs.read`. Logs are capped at 8 MiB per job. Up to 20 jobs can run concurrently; the most recent 50 finished jobs are retained when another job is started.
+
+Device tokens stay in local files with restricted permissions. Dashboard responses exclude credentials. The gateway routes commands only to the named, authenticated device. A dropped connection does not prove that a command failed: inspect the job before retrying.
+
+## Tests and known gaps
 
 ```bash
-npm run dev:mcp
+cd runtime
+npm ci
+npm test
+npm run test:ui  # requires a Playwright browser
+npm run test:install  # Linux user-systemd integration; uses isolated test services
 ```
 
-The MCP endpoint is exposed at:
-
-```text
-http://localhost:3000/mcp
-```
-
-For ChatGPT, deploy behind HTTPS or use OpenAI Secure MCP Tunnel. Do not expose a no-auth development endpoint directly to the public Internet.
-
-## ChatGPT app metadata
-
-Suggested app name:
-
-```text
-Infra MCP
-```
-
-Suggested app description:
-
-```text
-Securely inspect and operate my self-hosted infrastructure, including Linux host health, Docker containers and logs, Dokploy deployments, and OCI resources. Use read-only diagnostics first and request confirmation before consequential operations.
-```
-
-## Deployment direction
-
-The intended production layout for the current Oracle VM + Dokploy setup is:
-
-- `mcp-server`: deployed as a normal Dokploy application/container.
-- `host-agent`: installed as a systemd service on the VM host.
-- `/run/infra-mcp`: bind-mounted into the MCP container.
-- ChatGPT: connected to the `/mcp` endpoint as a developer-mode app.
-- Authentication: add standards-compliant OAuth before exposing the MCP endpoint publicly; alternatively use a private Secure MCP Tunnel where appropriate.
-
-## Why not OCI Run Command for everything?
-
-OCI Run Command is useful as an emergency/fallback path, but everyday diagnostics such as container logs are better served by the low-latency host agent. The long-term design keeps OCI APIs for VM lifecycle/recovery and uses the local agent for interactive host operations.
-
-## License
-
-No license has been selected yet. Add one before encouraging third-party reuse or contributions.
+See [`docs/PRODUCT_TEST_STATUS.md`](docs/PRODUCT_TEST_STATUS.md) for measured coverage and outstanding hardware checks. Cross-platform CI is configured separately from the live Oracle tests; a configured test is not a passed test.

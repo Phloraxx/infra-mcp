@@ -1,0 +1,22 @@
+{
+  "name": "infra-mcp-runtime",
+  "version": "0.3.0",
+  "private": true,
+  "type": "module",
+  "description": "Personal multi-device MCP gateway and background agent",
+  "engines": { "node": ">=22" },
+  "scripts": {
+    "start": "node server/index.mjs",
+    "agent": "node agent/index.mjs",
+    "test": "node --test tests/integration.mjs",
+    "test:install": "node tests/install.mjs",
+    "test:ui": "node tests/ui.cjs"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "1.32.1",
+    "express": "5.3.0",
+    "ws": "8.22.0",
+    "zod": "4.6.7"
+  },
+  "devDependencies": { "playwright": "1.61.1" }
+}
