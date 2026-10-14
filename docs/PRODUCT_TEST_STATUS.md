@@ -26,6 +26,8 @@ Unix pairing and connection checks now use curl, as the downloads already do. Pa
 
 Oracle Linux ARM64 installation tests passed with a proxy deliberately dropping the first response after the gateway had redeemed the code, and dropping the first connection-status response. Credential recovery, startup, reconnect, reinstallation and uninstall passed. The updated backend suite passed all ten TAP tests. The user's Mac remains offline in Desktop Commander, so a successful installation on that hardware is still unverified.
 
+The fix is deployed to the public domain. The downloaded installer checksum matches the tested source. Live HTTPS sign-in, identical pairing-request recovery, changed-request rejection and revoked-request rejection passed, and the existing ChatGPT connector still executes commands. Updated integration CI on Mac, Windows and Linux, Windows installer syntax, and browser UI checks passed in run `38615913228` on commit `9fce60c18cf83e2732958e81d800b2c37e554818`.
+
 ## Cross-platform CI verified
 
 GitHub Actions run `38609102738` on commit `203a35d0580b3f314ae3523f8721360b7bdf5400` passed:
