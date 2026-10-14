@@ -11,12 +11,12 @@ const work=await fs.mkdtemp(path.join(os.tmpdir(),'infra-install-test-')),port=1
 const password=crypto.randomBytes(16).toString('hex');
 const env={...process.env,PORT:String(port),PUBLIC_BASE:base,OAUTH_PASSWORD:password,TOKEN_SIGNING_SECRET:crypto.randomBytes(32).toString('hex'),AGENT_TOKEN:'test-only',INFRA_DATA_DIR:path.join(work,'data'),OAUTH_CLIENTS_FILE:path.join(work,'clients.json')};
 let logs='',cookie='',report=[];
-let pairDrops=0,statusDrops=0;
+let pairDrops=0,statusDrops=0,downloadDrops=0;
 // Forward pairing to the gateway, then discard its first successful response.
 // This simulates ECONNRESET after a single-use code was already redeemed.
 const flaky=http.createServer((req,res)=>{
   const upstream=http.request(base+req.url,{method:req.method,headers:req.headers},response=>{
-    if(response.statusCode===200&&((req.url==='/pair'&&pairDrops++===0)||(req.url==='/agent-status'&&statusDrops++===0))){response.resume();req.socket.destroy();return;}
+    if(response.statusCode===200&&((req.url==='/downloads/manifest.json'&&downloadDrops++===0)||(req.url==='/pair'&&pairDrops++===0)||(req.url==='/agent-status'&&statusDrops++===0))){response.resume();req.socket.destroy();return;}
     res.writeHead(response.statusCode,response.headers);response.pipe(res);
   });
   upstream.on('error',()=>{res.destroy();});req.pipe(upstream);
@@ -34,6 +34,8 @@ try{
   const code=(await api('/api/pairing',{})).code;
   const first=await exec('/bin/bash',[path.join(root,'downloads/install.sh'),'--base',flakyBase,'--code',code,'--name','install-test'],{env:installEnv,timeout:180000,maxBuffer:1048576});report.push({case:'no-sudo user installation, paths with spaces',ok:true,output:first.stdout.trim()});
   if(pairDrops!==2||statusDrops<2)throw new Error('Installer did not retry dropped pairing/status responses');
+  if(downloadDrops!==2)throw new Error('Installer did not retry the dropped manifest download');
+  report.push({case:'dropped manifest download is retried before pairing',ok:true});
   report.push({case:'connection reset after pairing was committed; same credential recovered, status reset retried',ok:true});
   const mode=(await fs.stat(path.join(installDir,'config.json'))).mode&0o777;if(mode!==0o600)throw new Error('Credential file permissions are incorrect.');
   const job=await api('/api/run',{op:'shell',args:{device:'install-test',command:'printf before; sleep 2; printf after',background:true}});

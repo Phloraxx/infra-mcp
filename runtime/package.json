@@ -8,7 +8,7 @@
   "scripts": {
     "start": "node server/index.mjs",
     "agent": "node agent/index.mjs",
-    "test": "node --test tests/integration.mjs",
+    "test": "node --test tests/integration.mjs tests/downloads.mjs",
     "test:install": "node tests/install.mjs",
     "test:ui": "node tests/ui.cjs"
   },

@@ -56,12 +56,34 @@ case "$BASE_URL" in https://*) ;; http://127.0.0.1:*|http://localhost:*) ;; *) e
 command -v curl >/dev/null || { echo 'curl is required.' >&2; exit 1; }
 WORK="$(mktemp -d)"
 trap 'rm -rf "$WORK"' EXIT
-download() { curl -fsSL --retry 2 --connect-timeout 15 --max-time 180 "$1" -o "$2"; }
+CURL_NETWORK_FLAGS=()
+if [ "${INFRA_CURL_COMPAT:-0}" = 1 ]; then CURL_NETWORK_FLAGS=(--ipv4 --http1.1); fi
+download() {
+  local attempt http rc name
+  name="${1##*/}"
+  echo "Downloading $name…"
+  for attempt in 1 2 3; do
+    rc=0
+    http="$(curl -fsSL ${CURL_NETWORK_FLAGS[@]+"${CURL_NETWORK_FLAGS[@]}"} --connect-timeout 15 --max-time 180 "$1" -o "$2" -w '%{http_code}')" || rc=$?
+    if [ "$rc" = 0 ]; then return 0; fi
+    case "$rc" in
+      5|6|7|16|18|28|35|52|55|56|92)
+        # Keep certificate checks enabled; only change transport negotiation.
+        if [ "$attempt" = 1 ] && [ "${#CURL_NETWORK_FLAGS[@]}" = 0 ]; then CURL_NETWORK_FLAGS=(--http1.1)
+        else CURL_NETWORK_FLAGS=(--ipv4 --http1.1); fi ;;
+      22) case "$http" in 408|429|500|502|503|504) ;; *) echo "Download failed: $name (HTTP $http)." >&2; return 1 ;; esac ;;
+      *) echo "Download failed: $name (curl error $rc)." >&2; return 1 ;;
+    esac
+    if [ "$attempt" != 3 ]; then echo "Retrying $name ($((attempt+1))/3)…" >&2; sleep "$attempt"; fi
+  done
+  echo "Could not download $name after 3 attempts. Check the Mac's network, VPN or proxy, then retry. Pairing has not started." >&2
+  return 1
+}
 # Pairing has a request identifier, so transport failures can be retried safely.
 post_json() {
   local attempt http
   for attempt in 1 2 3; do
-    if http="$(curl -sS --connect-timeout 10 --max-time 20 -H 'Content-Type: application/json' --data-binary "@$2" -o "$3" -w '%{http_code}' "$BASE_URL/$1")"; then
+    if http="$(curl -sS ${CURL_NETWORK_FLAGS[@]+"${CURL_NETWORK_FLAGS[@]}"} --connect-timeout 10 --max-time 20 -H 'Content-Type: application/json' --data-binary "@$2" -o "$3" -w '%{http_code}' "$BASE_URL/$1")"; then
       case "$http" in
         2??) return 0 ;;
         408|500|502|503|504) ;;
@@ -183,7 +205,7 @@ fs.writeFileSync(process.env.INFRA_CHECK_REQUEST,JSON.stringify({device:c.device
 JS
 CONNECTED=0
 for attempt in 1 2 3 4 5 6 7 8; do
-  if curl -fsS --connect-timeout 3 --max-time 8 -H 'Content-Type: application/json' --data-binary "@$WORK/status-request.json" -o "$WORK/status-response.json" "$BASE_URL/agent-status"; then
+  if curl -fsS ${CURL_NETWORK_FLAGS[@]+"${CURL_NETWORK_FLAGS[@]}"} --connect-timeout 3 --max-time 8 -H 'Content-Type: application/json' --data-binary "@$WORK/status-request.json" -o "$WORK/status-response.json" "$BASE_URL/agent-status"; then
     if "$NODE" --input-type=module <<'JS'
 import fs from 'node:fs';
 try{const d=JSON.parse(fs.readFileSync(process.env.INFRA_CHECK_RESPONSE));if(d.online){console.log(`Connected as '${d.device}'.`);process.exit(0);}}catch{}
