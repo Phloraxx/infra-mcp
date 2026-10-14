@@ -34,6 +34,8 @@ The backend and download-failure suites passed all 19 TAP tests on Oracle. The r
 
 macOS CI caught an unbraced filename followed by a Unicode ellipsis in the new progress message. The message now uses braces and ASCII punctuation. Final run `38619032713` on code commit `6f2516b4d0ea695d0f3c66f61fbd99d1aadc0a6c` passed the download tests under macOS's bundled Bash, complete Mac/Windows/Linux integration, Windows installer parsing and browser UI checks. The final deployed script checksum was verified after this correction.
 
+The dashboard's generated Mac command now applies IPv4/HTTP 1.1 to the initial script download and `INFRA_CURL_COMPAT=1` to subsequent installer requests. Unix commands download to a private temporary file before executing, and clean it up on exit. Linux retains normal address-family negotiation. Fixture and live HTTPS browser checks verified the Mac command, its pairing code, the Copy button, Bash syntax and phone-width layout. The live dashboard script checksum matches the tested source at commit `6f45f04d9d090a2a05cb2db1ae41b41870e9e047`.
+
 ## Cross-platform CI verified
 
 GitHub Actions run `38609102738` on commit `203a35d0580b3f314ae3523f8721360b7bdf5400` passed:
@@ -66,3 +68,5 @@ The existing scaffold CI passed as well. These checks do not replace actual inst
 6. Record measured RSS, idle CPU, network traffic, tool latency and response size, including long-running work.
 
 This is a working core release, not completion of the entire multi-device/GUI/phone product.
+
+The generated-command update also passed runtime CI run `38620839252` (Mac/Windows/Linux integration and browser UI) on commit `6f45f04d9d090a2a05cb2db1ae41b41870e9e047`.
