@@ -28,6 +28,12 @@ Oracle Linux ARM64 installation tests passed with a proxy deliberately dropping 
 
 The fix is deployed to the public domain. The downloaded installer checksum matches the tested source. Live HTTPS sign-in, identical pairing-request recovery, changed-request rejection and revoked-request rejection passed, and the existing ChatGPT connector still executes commands. Updated integration CI on Mac, Windows and Linux, Windows installer syntax, and browser UI checks passed in run `38615913228` on commit `9fce60c18cf83e2732958e81d800b2c37e554818`.
 
+A subsequent Mac run failed earlier with curl error 35, before pairing. The download helper now retries transport resets up to three times, names the affected file, and falls back to HTTP 1.1 and then IPv4. `INFRA_CURL_COMPAT=1` applies IPv4/HTTP 1.1 to all installer requests from the start. Certificate verification remains enabled; certificate, disk-write and HTTP 404 failures stop immediately.
+
+The backend and download-failure suites passed all 19 TAP tests on Oracle. The real installer also passed when the manifest response was deliberately dropped, followed by dropped pairing and status responses. Both default and IPv4/HTTP 1.1 requests downloaded the deployed script with the expected checksum. The Mac's actual network reset remains undiagnosed because it is unavailable through remote access; successful hardware installation is still a separate acceptance requirement.
+
+macOS CI caught an unbraced filename followed by a Unicode ellipsis in the new progress message. The message now uses braces and ASCII punctuation. Final run `38619032713` on code commit `6f2516b4d0ea695d0f3c66f61fbd99d1aadc0a6c` passed the download tests under macOS's bundled Bash, complete Mac/Windows/Linux integration, Windows installer parsing and browser UI checks. The final deployed script checksum was verified after this correction.
+
 ## Cross-platform CI verified
 
 GitHub Actions run `38609102738` on commit `203a35d0580b3f314ae3523f8721360b7bdf5400` passed:
