@@ -76,13 +76,28 @@ export function installProduct({ app, agents, rpc, signToken, verifyToken, base,
     if (limited(req, 'pair', 15)) return res.status(429).json({ error: 'Too many attempts. Try again in a minute.' });
     const code = String(req.body?.code || '').replace(/[-\s]/g, '').toUpperCase();
     const p = pairing.get(code), device = String(req.body?.device || '').toLowerCase();
+    const requestId = String(req.body?.requestId || '');
+    const hostname = String(req.body?.hostname || device).slice(0, 120);
+    const platform = String(req.body?.platform || 'unknown').slice(0, 20);
+    res.set('Cache-Control', 'no-store');
     if (!p || p.expiresAt < Date.now()) return res.status(400).json({ error: 'Pairing code expired or was already used. Get a new code from the dashboard.' });
+    if (requestId && !/^[a-zA-Z0-9_-]{16,128}$/.test(requestId)) return res.status(400).json({ error: 'Invalid pairing request identifier.' });
+    // A dropped response can be retried by the same installer until the code expires.
+    // The code still authorizes one device, and a different request cannot reuse it.
+    if (p.used) {
+      const r = records[device];
+      if (requestId && p.used.requestId === requestId && p.used.device === device && p.used.hostname === hostname && p.used.platform === platform && r && !r.revoked && r.tokenHash === hash(p.used.config.token)) return res.json(p.used.config);
+      return res.status(400).json({ error: 'Pairing code expired or was already used. Get a new code from the dashboard.' });
+    }
     if (!/^[a-z0-9][a-z0-9._-]{0,62}$/.test(device)) return res.status(400).json({ error: 'Use a device name with letters, numbers, dots, dashes or underscores (up to 63 characters).' });
     if (records[device] && !records[device].revoked) return res.status(409).json({ error: 'That device name is already paired. Use a different name, or remove the old device first.' });
     const token = crypto.randomBytes(32).toString('base64url');
-    records[device] = { device, tokenHash: hash(token), auth: 'paired', revoked: false, pairedAt: new Date().toISOString(), hostname: String(req.body?.hostname || device).slice(0, 120), platform: String(req.body?.platform || 'unknown').slice(0, 20) };
-    persist(); pairing.delete(code); event('Device paired', device);
-    res.json({ device, token, server: `${base.replace(/^http/, 'ws')}/agent` });
+    records[device] = { device, tokenHash: hash(token), auth: 'paired', revoked: false, pairedAt: new Date().toISOString(), hostname, platform };
+    persist();
+    const config = { device, token, server: `${base.replace(/^http/, 'ws')}/agent` };
+    if (requestId) p.used = { requestId, device, hostname, platform, config }; else pairing.delete(code);
+    event('Device paired', device);
+    res.json(config);
   });
   app.post('/agent-status', (req,res)=>{
     const device=String(req.body?.device||''),r=records[device];

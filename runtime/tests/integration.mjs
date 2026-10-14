@@ -40,13 +40,19 @@ await test('Infra MCP full local journey',async t=>{
       assert.equal((await api('/api/session')).authenticated,true);
     });
     let paired;
-    await t.test('pairing is single-use, validates names, and keeps credentials private',async()=>{
+    let pairRequest;
+    await t.test('pairing is single-use, recovers a dropped response, and keeps credentials private',async()=>{
       const p=await api('/api/pairing',{});
       assert.equal((await req('/pair',{code:p.code,device:'bad name'},'POST',false)).status,400);
-      paired=await api('/pair',{code:p.code,device:'testdevice',platform:'linux'});
+      pairRequest={code:p.code,device:'testdevice',platform:'linux',requestId:crypto.randomUUID()};
+      paired=await api('/pair',pairRequest);
       assert.ok(paired.token);
+      assert.deepEqual(await api('/pair',pairRequest),paired);
+      assert.equal((await req('/pair',{...pairRequest,requestId:crypto.randomUUID()},'POST',false)).status,400);
+      assert.equal((await req('/pair',{...pairRequest,hostname:'different-host'},'POST',false)).status,400);
       assert.equal((await req('/pair',{code:p.code,device:'another'},'POST',false)).status,400);
       const overview=await api('/api/overview');assert.ok(!JSON.stringify(overview).includes(paired.token));assert.ok(!('tokenHash' in overview.devices[0]));
+      assert.equal(overview.events.filter(e=>e.action==='Device paired').length,1);
     });
     const agentDir=path.join(work,'agent');await fs.mkdir(agentDir);
     for(const [src,dest] of [['index.mjs','agent.mjs'],['jobs.mjs','jobs.mjs']])await fs.copyFile(path.join(root,'agent',src),path.join(agentDir,dest));
@@ -96,6 +102,7 @@ await test('Infra MCP full local journey',async t=>{
       const ws=new WebSocket(paired.server);await new Promise(r=>ws.once('open',r));ws.send(JSON.stringify({type:'hello',device:'imposter',token:paired.token}));const code=await new Promise(r=>ws.once('close',r));assert.equal(code,4003);
       await api('/api/devices/testdevice',undefined,'DELETE');await until(async()=> !(await api('/api/overview')).devices.find(d=>d.device==='testdevice').online);
       assert.equal((await req('/agent-status',{device:'testdevice',token:paired.token},'POST',false)).status,401);
+      assert.equal((await req('/pair',pairRequest,'POST',false)).status,400);
     });
   }finally{await client?.close().catch(()=>{});await stop(agent);await stop(server);await fs.rm(work,{recursive:true,force:true});}
 });

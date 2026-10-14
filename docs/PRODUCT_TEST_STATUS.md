@@ -18,6 +18,14 @@ A short 30-command check from Oracle through the public HTTPS domain measured 19
 
 OAuth refresh-token support was added after live connector compatibility exposed a legacy scope mismatch. Access, refresh and dashboard token separation and refresh client binding are tested in the backend suite.
 
+## Installer networking regression
+
+A real Mac attempt downloaded the Unix installer successfully through curl, then Node 26.5.0's pairing fetch failed with `ECONNRESET`. This establishes a dropped TLS connection during pairing; the screenshot does not identify which network component reset it.
+
+Unix pairing and connection checks now use curl, as the downloads already do. Pairing retries carry one random request identifier. The gateway returns the original credential only for an identical retry before the ten-minute code expiry, and rejects reuse by another request, another device, or a revoked device. Pending retry responses are bounded and held in memory; a gateway restart can require a fresh pairing code.
+
+Oracle Linux ARM64 installation tests passed with a proxy deliberately dropping the first response after the gateway had redeemed the code, and dropping the first connection-status response. Credential recovery, startup, reconnect, reinstallation and uninstall passed. The updated backend suite passed all ten TAP tests. The user's Mac remains offline in Desktop Commander, so a successful installation on that hardware is still unverified.
+
 ## Cross-platform CI verified
 
 GitHub Actions run `38609102738` on commit `203a35d0580b3f314ae3523f8721360b7bdf5400` passed:

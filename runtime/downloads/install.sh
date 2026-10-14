@@ -57,6 +57,21 @@ command -v curl >/dev/null || { echo 'curl is required.' >&2; exit 1; }
 WORK="$(mktemp -d)"
 trap 'rm -rf "$WORK"' EXIT
 download() { curl -fsSL --retry 2 --connect-timeout 15 --max-time 180 "$1" -o "$2"; }
+# Pairing has a request identifier, so transport failures can be retried safely.
+post_json() {
+  local attempt http
+  for attempt in 1 2 3; do
+    if http="$(curl -sS --connect-timeout 10 --max-time 20 -H 'Content-Type: application/json' --data-binary "@$2" -o "$3" -w '%{http_code}' "$BASE_URL/$1")"; then
+      case "$http" in
+        2??) return 0 ;;
+        408|500|502|503|504) ;;
+        *) return 2 ;;
+      esac
+    fi
+    if [ "$attempt" != 3 ]; then echo 'Connection interrupted. Retrying…' >&2; sleep "$attempt"; fi
+  done
+  return 1
+}
 digest() { if command -v sha256sum >/dev/null 2>&1; then sha256sum "$1" | awk '{print $1}'; else shasum -a 256 "$1" | awk '{print $1}'; fi; }
 echo 'Infra MCP · device agent'
 mkdir -p "$BASE"
@@ -93,12 +108,24 @@ if [ ! -f "$BASE/config.json" ] || [ -n "$PAIR_CODE" ]; then
     read -r -p "Device name [$DEFAULT_NAME]: " DEVICE_NAME </dev/tty
     DEVICE_NAME="${DEVICE_NAME:-$DEFAULT_NAME}"
   fi
-  export INFRA_PAIR_BASE="$BASE_URL" INFRA_PAIR_CODE="$PAIR_CODE" INFRA_PAIR_NAME="$DEVICE_NAME" INFRA_PAIR_FILE="$WORK/config.json"
+  export INFRA_PAIR_CODE="$PAIR_CODE" INFRA_PAIR_NAME="$DEVICE_NAME" INFRA_PAIR_FILE="$WORK/config.json" INFRA_PAIR_REQUEST="$WORK/pair-request.json"
   "$NODE" --input-type=module <<'JS'
-import fs from 'node:fs';import os from 'node:os';
-const r=await fetch(process.env.INFRA_PAIR_BASE+'/pair',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({code:process.env.INFRA_PAIR_CODE,device:process.env.INFRA_PAIR_NAME,hostname:os.hostname(),platform:process.platform}),signal:AbortSignal.timeout(20000)});
-const config=await r.json();if(!r.ok)throw new Error(config.error||'Pairing failed');fs.writeFileSync(process.env.INFRA_PAIR_FILE,JSON.stringify(config),{mode:0o600});
+import fs from 'node:fs';import os from 'node:os';import crypto from 'node:crypto';
+fs.writeFileSync(process.env.INFRA_PAIR_REQUEST,JSON.stringify({code:process.env.INFRA_PAIR_CODE,device:process.env.INFRA_PAIR_NAME,hostname:os.hostname(),platform:process.platform,requestId:crypto.randomUUID()}),{mode:0o600});
 JS
+  PAIR_RESULT=0
+  post_json pair "$WORK/pair-request.json" "$WORK/config.json" || PAIR_RESULT=$?
+  if [ "$PAIR_RESULT" = 1 ]; then echo 'Could not reach the gateway to pair this device. Check your connection, then get a fresh code from the dashboard and retry.' >&2; exit 1; fi
+  export INFRA_PAIR_RESULT="$PAIR_RESULT"
+  "$NODE" --input-type=module <<'JS'
+import fs from 'node:fs';
+try {
+  const c=JSON.parse(fs.readFileSync(process.env.INFRA_PAIR_FILE));
+  if(process.env.INFRA_PAIR_RESULT!=='0')throw new Error(c.error||'Pairing was refused by the gateway.');
+  if(!c.device||!c.token||!/^wss?:\/\//.test(c.server||''))throw new Error('The gateway returned an invalid pairing response.');
+}catch(e){console.error('Pairing failed: '+(e instanceof SyntaxError?'The gateway returned an unreadable response.':e.message));process.exit(1);}
+JS
+  unset INFRA_PAIR_CODE PAIR_CODE
 fi
 stop_service
 cp "$WORK/agent.mjs" "$BASE/agent.mjs"
@@ -148,13 +175,25 @@ EOF
   if [ "$SYSTEM" = 1 ]; then systemctl daemon-reload; systemctl enable --now "$SERVICE.service"
   else systemctl --user daemon-reload; systemctl --user enable --now "$SERVICE.service"; fi
 fi
-export INFRA_CHECK_FILE="$BASE/config.json" INFRA_CHECK_BASE="$BASE_URL"
+export INFRA_CHECK_FILE="$BASE/config.json" INFRA_CHECK_REQUEST="$WORK/status-request.json" INFRA_CHECK_RESPONSE="$WORK/status-response.json"
 "$NODE" --input-type=module <<'JS'
-import fs from 'node:fs';import {setTimeout} from 'node:timers/promises';
+import fs from 'node:fs';
 const c=JSON.parse(fs.readFileSync(process.env.INFRA_CHECK_FILE));
-for(let i=0;i<8;i++){const r=await fetch(process.env.INFRA_CHECK_BASE+'/agent-status',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({device:c.device,token:c.token}),signal:AbortSignal.timeout(10000)});const d=await r.json();if(d.online){console.log(`Connected as '${c.device}'.`);process.exit(0);}await setTimeout(1500);}
-console.error('Installed, but connection is not confirmed. Inspect the agent log and gateway URL.');process.exit(1);
+fs.writeFileSync(process.env.INFRA_CHECK_REQUEST,JSON.stringify({device:c.device,token:c.token}),{mode:0o600});
 JS
+CONNECTED=0
+for attempt in 1 2 3 4 5 6 7 8; do
+  if curl -fsS --connect-timeout 3 --max-time 8 -H 'Content-Type: application/json' --data-binary "@$WORK/status-request.json" -o "$WORK/status-response.json" "$BASE_URL/agent-status"; then
+    if "$NODE" --input-type=module <<'JS'
+import fs from 'node:fs';
+try{const d=JSON.parse(fs.readFileSync(process.env.INFRA_CHECK_RESPONSE));if(d.online){console.log(`Connected as '${d.device}'.`);process.exit(0);}}catch{}
+process.exit(1);
+JS
+    then CONNECTED=1; break; fi
+  fi
+  [ "$attempt" = 8 ] || sleep 1.5
+done
+if [ "$CONNECTED" != 1 ]; then echo "Installed, but connection is not confirmed. Startup is configured; the agent will reconnect automatically. Inspect $BASE/agent.err.log on Mac or the systemd journal on Linux." >&2; exit 1; fi
 echo "Installed in $BASE"
 if [ "$SYSTEM" = 1 ]; then echo 'Startup: system boot.'
 elif [ "$OS" = Darwin ]; then echo 'Startup: after this Mac user signs in.'
