@@ -29,3 +29,26 @@ jobs:
         run: ./scripts/smoke-v1.sh
       - if: matrix.os == 'ubuntu-latest'
         run: ./scripts/smoke-install-dashboard.sh
+      - name: Build native acceptance binaries
+        if: matrix.os == 'macos-latest' || matrix.os == 'windows-latest'
+        run: cargo build --release -p infra-agent -p infra-cli
+      - name: Upload macOS ARM64 acceptance binaries
+        if: matrix.os == 'macos-latest'
+        uses: actions/upload-artifact@v4
+        with:
+          name: infra-acceptance-macos-aarch64
+          path: |
+            target/release/infra
+            target/release/infra-agent
+          if-no-files-found: error
+          retention-days: 7
+      - name: Upload Windows x64 acceptance binaries
+        if: matrix.os == 'windows-latest'
+        uses: actions/upload-artifact@v4
+        with:
+          name: infra-acceptance-windows-x86_64
+          path: |
+            target/release/infra.exe
+            target/release/infra-agent.exe
+          if-no-files-found: error
+          retention-days: 7

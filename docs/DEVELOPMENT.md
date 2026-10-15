@@ -166,3 +166,9 @@ cargo build --release -p infra-gateway -p infra-agent -p infra-cli
 The burn-in uses a loopback-only gateway and state under `~/.local/share/infra-v1-burnin`, never the live v0.3 gateway. It validates the real startup adapter, including remote shells that lack user-bus environment variables, idempotent reinstall, signed reconnect, MCP exec, and **fresh** PTY input/output after both gateway and agent-controller service restarts. Use `./scripts/burnin-linux-user.sh remove` to remove only the v1 burn-in.
 
 This is intentionally stronger than re-reading a pre-restart transcript: persistence only passes when the same PTY accepts and returns a new marker after the restart.
+
+## PR native acceptance artifacts
+
+The Rust PR matrix builds release-mode `infra` and `infra-agent` binaries after the macOS ARM64 and Windows x64 jobs pass, then uploads them as short-lived GitHub Actions artifacts. These artifacts are for side-by-side real-device acceptance testing before a tagged release; they are not a public release channel and expire automatically.
+
+Use these binaries for Mac/Windows burn-in rather than installing a Rust toolchain on the target machine. Enrollment/state/startup must remain separate from any live v0.3 installation until the acceptance matrix and benchmark are complete.
