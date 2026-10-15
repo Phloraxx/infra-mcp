@@ -7,6 +7,7 @@ use infra_local_state::{
 };
 use serde::Serialize;
 use std::{
+    collections::HashSet,
     fs,
     path::{Path, PathBuf},
     process::{Command, ExitCode},
@@ -109,18 +110,20 @@ async fn run() -> anyhow::Result<ExitCode> {
                 .cloned()
                 .collect::<Vec<_>>();
             ensure_no_args(&unknown)?;
+            let stopped_workers = cleanup_persistent_workers(&state_dir);
             startup::uninstall()?;
             if remove_state && state_dir.exists() {
                 fs::remove_dir_all(&state_dir)
                     .with_context(|| format!("remove {}", state_dir.display()))?;
             }
             println!(
-                "Infra startup registration removed{}.",
+                "Infra startup registration removed{}; stopped {} persistent worker(s).",
                 if remove_state {
                     " and local state deleted"
                 } else {
                     ""
-                }
+                },
+                stopped_workers
             );
             Ok(ExitCode::SUCCESS)
         }
@@ -343,17 +346,86 @@ fn check(name: &'static str, ok: bool, detail: String, fixable: bool) -> DoctorC
     }
 }
 
+fn cleanup_persistent_workers(state_dir: &Path) -> usize {
+    let mut candidates = HashSet::new();
+    collect_worker_pids(
+        &state_dir.join("sessions"),
+        "session.json",
+        "worker_pid",
+        &mut candidates,
+    );
+    collect_worker_pids(
+        &state_dir.join("jobs"),
+        "job.json",
+        "runner_pid",
+        &mut candidates,
+    );
+
+    let system = System::new_all();
+    let mut stopped = 0;
+    for raw_pid in candidates {
+        let pid = Pid::from_u32(raw_pid);
+        let Some(process) = system.process(pid) else {
+            continue;
+        };
+        if !is_infra_agent_process(process) {
+            continue;
+        }
+        let mut descendants = Vec::new();
+        collect_descendants(&system, pid, &mut descendants);
+        for child_pid in descendants.into_iter().rev() {
+            if let Some(child) = system.process(child_pid) {
+                let _ = child.kill();
+            }
+        }
+        let _ = process.kill();
+        stopped += 1;
+    }
+    stopped
+}
+
+fn collect_worker_pids(root: &Path, meta_name: &str, key: &str, out: &mut HashSet<u32>) {
+    let Ok(entries) = fs::read_dir(root) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path().join(meta_name);
+        let Ok(bytes) = fs::read(path) else {
+            continue;
+        };
+        let Ok(value) = serde_json::from_slice::<serde_json::Value>(&bytes) else {
+            continue;
+        };
+        if let Some(pid) = value[key].as_u64().and_then(|pid| u32::try_from(pid).ok()) {
+            out.insert(pid);
+        }
+    }
+}
+
+fn collect_descendants(system: &System, parent: Pid, out: &mut Vec<Pid>) {
+    for (pid, process) in system.processes() {
+        if process.parent() == Some(parent) {
+            collect_descendants(system, *pid, out);
+            out.push(*pid);
+        }
+    }
+}
+
+fn is_infra_agent_process(process: &sysinfo::Process) -> bool {
+    let name = process.name().to_string_lossy().to_ascii_lowercase();
+    let executable = process
+        .exe()
+        .and_then(|path| path.file_name())
+        .map(|name| name.to_string_lossy().to_ascii_lowercase())
+        .unwrap_or_default();
+    name.contains("infra-agent") || executable.contains("infra-agent")
+}
+
 fn process_alive(pid: u32) -> bool {
     let system = System::new_all();
-    system.process(Pid::from_u32(pid)).is_some_and(|process| {
-        let name = process.name().to_string_lossy().to_ascii_lowercase();
-        let executable = process
-            .exe()
-            .and_then(|path| path.file_name())
-            .map(|name| name.to_string_lossy().to_ascii_lowercase())
-            .unwrap_or_default();
-        name.contains("infra-agent") || executable.contains("infra-agent")
-    })
+    system
+        .process(Pid::from_u32(pid))
+        .is_some_and(is_infra_agent_process)
 }
 
 fn gateway_health_url(gateway_ws_url: &str) -> anyhow::Result<Url> {

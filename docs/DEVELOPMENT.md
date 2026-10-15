@@ -151,3 +151,18 @@ Run:
 This builds the v1 gateway, agent and `infra` CLI, starts an isolated loopback gateway, verifies embedded dashboard/bootstrap assets, creates an enrollment, runs `scripts/install.sh` in `--source-dir` development mode with startup intentionally disabled, verifies config and identity persistence, starts the installed agent without the enrollment code, then verifies status/doctor plus sessions/activity APIs. It removes all temporary state and does not register a real service or touch v0.3.
 
 `./scripts/install.sh --source-dir target/debug ...` and the analogous PowerShell `-SourceDir` are development-only paths. Normal release installs download versioned native assets plus `.sha256` sidecars. `.github/workflows/release.yml` defines the expected release asset names for Linux x64/ARM64, macOS Intel/ARM64 and Windows x64/ARM64. A real release must be published and validated before treating the remote bootstrap path as production-ready.
+
+## Linux real-service burn-in
+
+On an actual Linux user session with systemd, build release binaries and run the side-by-side burn-in:
+
+```bash
+cargo build --release -p infra-gateway -p infra-agent -p infra-cli
+./scripts/burnin-linux-user.sh install
+./scripts/burnin-linux-user.sh test
+./scripts/burnin-linux-user.sh status
+```
+
+The burn-in uses a loopback-only gateway and state under `~/.local/share/infra-v1-burnin`, never the live v0.3 gateway. It validates the real startup adapter, including remote shells that lack user-bus environment variables, idempotent reinstall, signed reconnect, MCP exec, and **fresh** PTY input/output after both gateway and agent-controller service restarts. Use `./scripts/burnin-linux-user.sh remove` to remove only the v1 burn-in.
+
+This is intentionally stronger than re-reading a pre-restart transcript: persistence only passes when the same PTY accepts and returns a new marker after the restart.

@@ -40,13 +40,11 @@ pub fn install(agent: &Path, state_dir: &Path) -> anyhow::Result<()> {
         .ok_or_else(|| anyhow!("unit path has no parent"))?;
     fs::create_dir_all(parent)?;
     fs::write(&path, render_systemd_unit(agent, state_dir))?;
-    command_ok(Command::new("systemctl").args(["--user", "daemon-reload"]))?;
-    command_ok(Command::new("systemctl").args([
-        "--user",
-        "enable",
-        "--now",
-        "infra-agent.service",
-    ]))?;
+    command_ok(user_systemctl().args(["daemon-reload"]))?;
+    command_ok(user_systemctl().args(["enable", "infra-agent.service"]))?;
+    // `enable --now` is a no-op for an already-running service. Always restart so an
+    // idempotent reinstall/repair actually switches to the binary that was just installed.
+    command_ok(user_systemctl().args(["restart", "infra-agent.service"]))?;
     Ok(())
 }
 
@@ -96,16 +94,14 @@ pub fn install(agent: &Path, state_dir: &Path) -> anyhow::Result<()> {
 
 #[cfg(target_os = "linux")]
 pub fn uninstall() -> anyhow::Result<()> {
-    let _ = Command::new("systemctl")
-        .args(["--user", "disable", "--now", "infra-agent.service"])
+    let _ = user_systemctl()
+        .args(["disable", "--now", "infra-agent.service"])
         .status();
     let path = linux_unit_path()?;
     if path.exists() {
         fs::remove_file(path)?;
     }
-    let _ = Command::new("systemctl")
-        .args(["--user", "daemon-reload"])
-        .status();
+    let _ = user_systemctl().args(["daemon-reload"]).status();
     Ok(())
 }
 
@@ -135,7 +131,7 @@ pub fn uninstall() -> anyhow::Result<()> {
 
 #[cfg(target_os = "linux")]
 pub fn restart() -> anyhow::Result<()> {
-    command_ok(Command::new("systemctl").args(["--user", "restart", "infra-agent.service"]))
+    command_ok(user_systemctl().args(["restart", "infra-agent.service"]))
 }
 
 #[cfg(target_os = "macos")]
@@ -155,8 +151,8 @@ pub fn restart() -> anyhow::Result<()> {
 #[cfg(target_os = "linux")]
 pub fn status() -> StartupStatus {
     let installed = linux_unit_path().is_ok_and(|path| path.exists());
-    let active = Command::new("systemctl")
-        .args(["--user", "is-active", "--quiet", "infra-agent.service"])
+    let active = user_systemctl()
+        .args(["is-active", "--quiet", "infra-agent.service"])
         .output()
         .is_ok_and(|output| output.status.success());
     StartupStatus {
@@ -225,6 +221,38 @@ pub fn status() -> StartupStatus {
 }
 
 #[cfg(target_os = "linux")]
+fn user_systemctl() -> Command {
+    let mut command = Command::new("systemctl");
+    command.arg("--user");
+    if std::env::var_os("XDG_RUNTIME_DIR").is_none()
+        && let Ok(uid) = current_uid_linux()
+    {
+        let (runtime, bus) = linux_user_bus_values(&uid);
+        command.env("XDG_RUNTIME_DIR", runtime);
+        if std::env::var_os("DBUS_SESSION_BUS_ADDRESS").is_none() {
+            command.env("DBUS_SESSION_BUS_ADDRESS", bus);
+        }
+    }
+    command
+}
+
+#[cfg(target_os = "linux")]
+fn current_uid_linux() -> anyhow::Result<String> {
+    let output = Command::new("id").arg("-u").output()?;
+    if !output.status.success() {
+        return Err(anyhow!("id -u failed"));
+    }
+    Ok(String::from_utf8(output.stdout)?.trim().to_string())
+}
+
+#[cfg(target_os = "linux")]
+fn linux_user_bus_values(uid: &str) -> (String, String) {
+    let runtime = format!("/run/user/{uid}");
+    let bus = format!("unix:path={runtime}/bus");
+    (runtime, bus)
+}
+
+#[cfg(target_os = "linux")]
 fn linux_unit_path() -> anyhow::Result<PathBuf> {
     Ok(home_dir()?.join(".config/systemd/user/infra-agent.service"))
 }
@@ -267,7 +295,7 @@ fn command_ok(command: &mut Command) -> anyhow::Result<()> {
 #[cfg(target_os = "linux")]
 fn render_systemd_unit(agent: &Path, state_dir: &Path) -> String {
     format!(
-        "[Unit]\nDescription=Infra device agent\nAfter=network-online.target\nWants=network-online.target\n\n[Service]\nType=simple\nExecStart={} --state-dir {}\nRestart=always\nRestartSec=2\n\n[Install]\nWantedBy=default.target\n",
+        "[Unit]\nDescription=Infra device agent\nAfter=network-online.target\nWants=network-online.target\n\n[Service]\nType=simple\nExecStart={} --state-dir {}\n# Keep PTY/job workers alive when only the connectivity controller restarts.\nKillMode=process\nRestart=always\nRestartSec=2\n\n[Install]\nWantedBy=default.target\n",
         systemd_quote(agent),
         systemd_quote(state_dir)
     )
@@ -308,6 +336,14 @@ mod tests {
 
     #[cfg(target_os = "linux")]
     #[test]
+    fn linux_user_bus_values_match_systemd_runtime_layout() {
+        let (runtime, bus) = linux_user_bus_values("1001");
+        assert_eq!(runtime, "/run/user/1001");
+        assert_eq!(bus, "unix:path=/run/user/1001/bus");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
     fn systemd_unit_quotes_paths() {
         let unit = render_systemd_unit(
             Path::new("/home/example/Infra Agent/infra-agent"),
@@ -315,6 +351,7 @@ mod tests {
         );
         assert!(unit.contains("ExecStart=\"/home/example/Infra Agent/infra-agent\" --state-dir \"/home/example/state dir\""));
         assert!(unit.contains("Restart=always"));
+        assert!(unit.contains("KillMode=process"));
     }
 
     #[test]

@@ -361,7 +361,9 @@ pub fn run_worker(dir: &Path) -> anyhow::Result<()> {
 
     let output_path = dir.join("output.log");
     let meta_path = dir.to_path_buf();
-    let spool_thread = std::thread::spawn(move || spool_pty(reader, &output_path, &meta_path));
+    let spool_writer = writer.clone();
+    let spool_thread =
+        std::thread::spawn(move || spool_pty(reader, &output_path, &meta_path, spool_writer));
     let status = child.wait()?;
     alive.store(false, Ordering::Relaxed);
     let _ = control_thread.join();
@@ -453,16 +455,97 @@ fn handle_control(
     let _ = stream.flush();
 }
 
-fn spool_pty(mut reader: Box<dyn Read + Send>, output_path: &Path, session_dir: &Path) {
+fn spool_pty(
+    mut reader: Box<dyn Read + Send>,
+    output_path: &Path,
+    session_dir: &Path,
+    writer: Arc<Mutex<Box<dyn Write + Send>>>,
+) {
     let mut buffer = [0_u8; 8192];
+    #[cfg(windows)]
+    let mut pending = Vec::new();
+
     while let Ok(count) = reader.read(&mut buffer) {
         if count == 0 {
             break;
         }
+
+        #[cfg(windows)]
+        {
+            let (visible, replies) = filter_terminal_queries(&mut pending, &buffer[..count]);
+            for reply in replies {
+                let Ok(mut input) = writer.lock() else {
+                    return;
+                };
+                if input.write_all(&reply).and_then(|_| input.flush()).is_err() {
+                    return;
+                }
+            }
+            if !visible.is_empty()
+                && append_and_compact(output_path, session_dir, &visible).is_err()
+            {
+                break;
+            }
+        }
+
+        #[cfg(not(windows))]
         if append_and_compact(output_path, session_dir, &buffer[..count]).is_err() {
             break;
         }
     }
+
+    #[cfg(windows)]
+    if !pending.is_empty() {
+        let _ = append_and_compact(output_path, session_dir, &pending);
+    }
+
+    #[cfg(not(windows))]
+    let _ = writer;
+}
+
+/// ConPTY is a pseudo-console, not a byte-transparent pipe. During startup it can ask the
+/// terminal for status/cursor/device attributes and wait for a reply before delivering normal
+/// interactive input. Infra does not need a full terminal emulator for these handshakes, but it
+/// does need to answer them and keep the query bytes out of the transcript.
+#[cfg(any(windows, test))]
+fn filter_terminal_queries(pending: &mut Vec<u8>, input: &[u8]) -> (Vec<u8>, Vec<Vec<u8>>) {
+    const QUERIES: &[(&[u8], &[u8])] = &[
+        (b"\x1b[5n", b"\x1b[0n"),
+        (b"\x1b[6n", b"\x1b[1;1R"),
+        (b"\x1b[c", b"\x1b[?1;2c"),
+        (b"\x1b[0c", b"\x1b[?1;2c"),
+    ];
+
+    pending.extend_from_slice(input);
+    let data = std::mem::take(pending);
+    let mut visible = Vec::with_capacity(data.len());
+    let mut replies = Vec::new();
+    let mut index = 0;
+
+    while index < data.len() {
+        if let Some((query, reply)) = QUERIES
+            .iter()
+            .find(|(query, _)| data[index..].starts_with(query))
+        {
+            replies.push(reply.to_vec());
+            index += query.len();
+            continue;
+        }
+
+        let remainder = &data[index..];
+        if QUERIES
+            .iter()
+            .any(|(query, _)| query.starts_with(remainder) && remainder.len() < query.len())
+        {
+            pending.extend_from_slice(remainder);
+            break;
+        }
+
+        visible.push(data[index]);
+        index += 1;
+    }
+
+    (visible, replies)
 }
 
 fn append_and_compact(output_path: &Path, session_dir: &Path, bytes: &[u8]) -> anyhow::Result<()> {
@@ -616,6 +699,29 @@ mod tests {
         worker.join().unwrap().unwrap();
         let final_meta = read_meta(&session_dir).unwrap();
         assert_eq!(final_meta.status, "closed");
+    }
+
+    #[test]
+    fn terminal_queries_are_replied_to_and_filtered_from_output() {
+        let mut pending = Vec::new();
+        let (visible, replies) = filter_terminal_queries(&mut pending, b"before\x1b[6nafter\x1b[c");
+        assert_eq!(visible, b"beforeafter");
+        assert_eq!(replies, vec![b"\x1b[1;1R".to_vec(), b"\x1b[?1;2c".to_vec()]);
+        assert!(pending.is_empty());
+    }
+
+    #[test]
+    fn terminal_query_filter_handles_split_escape_sequences() {
+        let mut pending = Vec::new();
+        let (visible, replies) = filter_terminal_queries(&mut pending, b"hello\x1b[");
+        assert_eq!(visible, b"hello");
+        assert!(replies.is_empty());
+        assert_eq!(pending, b"\x1b[");
+
+        let (visible, replies) = filter_terminal_queries(&mut pending, b"6nworld");
+        assert_eq!(visible, b"world");
+        assert_eq!(replies, vec![b"\x1b[1;1R".to_vec()]);
+        assert!(pending.is_empty());
     }
 
     #[test]

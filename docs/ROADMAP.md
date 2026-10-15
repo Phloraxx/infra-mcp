@@ -27,8 +27,10 @@ The roadmap is ordered to produce useful capability early while keeping the work
 - [x] automatic reconnect/backoff
 - [x] one-time Ed25519 enrollment/revocation
 - [x] Linux systemd-user startup implementation
+- [x] Linux ARM64 real-device non-login install/repair plus gateway/controller restart burn-in
+- [ ] Linux real-device reboot/reconnect validation
 
-Linux real-device startup/reboot validation remains required before declaring the phase complete.
+A full reboot remains required before declaring Linux startup validation complete.
 
 ## Phase 3 — clear Desktop Commander advantage
 

@@ -7,13 +7,14 @@ These scenarios are required product tests, not optional manual checks.
 For each supported primary platform:
 
 - fresh installation from dashboard instructions
-- installer rerun on healthy installation
+- installer rerun on healthy installation, including replacement of a currently-running agent binary
 - installer rerun on partially broken installation
 - transient download failure
 - expired enrollment during setup
 - no preinstalled Node/Python package manager
 - paths/usernames containing spaces and Unicode
 - uninstall then reinstall
+- Linux install/repair from a remote non-login shell with `XDG_RUNTIME_DIR` and `DBUS_SESSION_BUS_ADDRESS` absent
 
 Expected: normal recovery path does not require manual deletion of service files/config directories.
 
@@ -58,7 +59,7 @@ Test bash/zsh/PowerShell/cmd where applicable plus Python/Node/Codex-like intera
 - ChatGPT reconnect
 - gateway restart
 - device network loss
-- controller agent restart
+- controller agent restart; verify fresh PTY/job activity after reconnect, not merely old transcript visibility
 - machine reboot
 
 Expected: survive all documented survivable events; rebooted sessions become explicitly interrupted.

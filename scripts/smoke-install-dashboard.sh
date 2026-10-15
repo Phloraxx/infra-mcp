@@ -64,7 +64,7 @@ test -x "$TMP/bin/infra"
 test -x "$TMP/bin/infra-agent"
 test -f "$TMP/state/config.json"
 test -f "$TMP/state/identity.json"
-STATUS="$($TMP/bin/infra status --json --state-dir "$TMP/state")"
+STATUS="$(HOME="$TMP/home" $TMP/bin/infra status --json --state-dir "$TMP/state")"
 python3 - <<'PY' "$STATUS"
 import json,sys
 s=json.loads(sys.argv[1])
@@ -88,7 +88,7 @@ done
 curl -fsS "http://127.0.0.1:$PORT/api/sessions" | python3 -c 'import json,sys; assert isinstance(json.load(sys.stdin), list)'
 curl -fsS "http://127.0.0.1:$PORT/api/activity" | python3 -c 'import json,sys; a=json.load(sys.stdin); assert any(x["action"]=="device.connect" for x in a), a'
 
-DOCTOR="$($TMP/bin/infra doctor --json --state-dir "$TMP/state" || true)"
+DOCTOR="$(HOME="$TMP/home" $TMP/bin/infra doctor --json --state-dir "$TMP/state" || true)"
 python3 - <<'PY' "$DOCTOR"
 import json,sys
 r=json.loads(sys.argv[1])
