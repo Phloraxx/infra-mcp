@@ -1,0 +1,20 @@
+[package]
+name = "infra-gateway"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+axum.workspace = true
+futures-util.workspace = true
+infra-protocol = { path = "../protocol" }
+serde.workspace = true
+serde_json.workspace = true
+rmcp.workspace = true
+schemars.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+uuid.workspace = true
