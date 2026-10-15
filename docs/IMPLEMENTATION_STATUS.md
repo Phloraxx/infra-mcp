@@ -41,6 +41,6 @@ Not implemented yet:
 
 The workspace builds, passes clippy with warnings denied, and passes unit tests on the Oracle Linux ARM64 development host.
 
-A local long-lived second agent process was intentionally not launched through the current remote-control connector because that connector's safety layer blocked spawning another persistent remote agent. End-to-end agent/gateway smoke coverage should therefore be added as an automated integration test and then exercised through the normal development environment/release harness.
+A local long-lived second agent process was intentionally not launched through the current remote-control connector because that connector's safety layer blocked spawning another persistent remote agent. Instead, the gateway test suite now starts an isolated local server and simulated WebSocket agent to verify authenticated handshake, registration, request/response exec round trips, and newer-connection supersession automatically.
 
 The existing live Node v0.3 installation was not changed.

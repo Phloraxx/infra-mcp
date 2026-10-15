@@ -45,6 +45,18 @@ struct AppState {
     pending: Arc<Mutex<HashMap<Uuid, oneshot::Sender<AgentResponse>>>>,
 }
 
+impl AppState {
+    fn new(agent_token: String) -> Self {
+        Self {
+            agent_token: Arc::from(agent_token),
+            gateway_epoch: Uuid::new_v4(),
+            next_generation: Arc::new(AtomicU64::new(1)),
+            devices: Arc::new(RwLock::new(HashMap::new())),
+            pending: Arc::new(Mutex::new(HashMap::new())),
+        }
+    }
+}
+
 #[derive(Clone)]
 struct DeviceConnection {
     hello: DeviceHello,
@@ -249,14 +261,16 @@ async fn main() -> anyhow::Result<()> {
         .parse()
         .context("invalid INFRA_GATEWAY_BIND")?;
 
-    let state = AppState {
-        agent_token: Arc::from(agent_token),
-        gateway_epoch: Uuid::new_v4(),
-        next_generation: Arc::new(AtomicU64::new(1)),
-        devices: Arc::new(RwLock::new(HashMap::new())),
-        pending: Arc::new(Mutex::new(HashMap::new())),
-    };
+    let state = AppState::new(agent_token);
+    let app = build_app(state.clone());
 
+    let listener = tokio::net::TcpListener::bind(bind).await?;
+    info!(%bind, gateway_epoch=%state.gateway_epoch, "Infra v1 gateway listening");
+    axum::serve(listener, app).await?;
+    Ok(())
+}
+
+fn build_app(state: AppState) -> Router {
     let mcp_state = state.clone();
     let mcp_service: StreamableHttpService<InfraMcp, LocalSessionManager> =
         StreamableHttpService::new(
@@ -267,18 +281,13 @@ async fn main() -> anyhow::Result<()> {
                 .with_json_response(true),
         );
 
-    let app = Router::new()
+    Router::new()
         .nest_service("/mcp", mcp_service)
         .route("/healthz", get(health))
         .route("/api/devices", get(list_devices))
         .route("/api/devices/{device_id}/exec", post(exec_device))
         .route("/agent", get(agent_upgrade))
-        .with_state(state.clone());
-
-    let listener = tokio::net::TcpListener::bind(bind).await?;
-    info!(%bind, gateway_epoch=%state.gateway_epoch, "Infra v1 gateway listening");
-    axum::serve(listener, app).await?;
-    Ok(())
+        .with_state(state)
 }
 
 async fn health(State(state): State<AppState>) -> Json<Health<'static>> {
@@ -501,4 +510,159 @@ async fn send_json(socket: &mut WebSocket, message: &GatewayToAgent) -> anyhow::
     let text = serde_json::to_string(message)?;
     socket.send(Message::Text(text.into())).await?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use futures_util::{SinkExt, StreamExt};
+    use std::collections::BTreeMap;
+    use tokio_tungstenite::{connect_async, tungstenite::Message as ClientMessage};
+
+    const TEST_TOKEN: &str = "developmenttoken123456";
+
+    async fn spawn_test_gateway() -> (AppState, SocketAddr, tokio::task::JoinHandle<()>) {
+        let state = AppState::new(TEST_TOKEN.into());
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let app = build_app(state.clone());
+        let task = tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        (state, addr, task)
+    }
+
+    async fn connect_agent(
+        addr: SocketAddr,
+        device_id: &str,
+    ) -> (
+        tokio_tungstenite::WebSocketStream<
+            tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+        >,
+        u64,
+    ) {
+        let (mut socket, _) = connect_async(format!("ws://{addr}/agent")).await.unwrap();
+        let hello = AgentToGateway::Hello(DeviceHello {
+            protocol: PROTOCOL_VERSION,
+            token: TEST_TOKEN.into(),
+            device_id: device_id.into(),
+            device_name: device_id.into(),
+            agent_version: "test".into(),
+            platform: "linux".into(),
+            arch: "aarch64".into(),
+            boot_id: "boot-test".into(),
+            agent_instance_id: Uuid::new_v4(),
+            capabilities: vec!["exec".into()],
+            metadata: BTreeMap::new(),
+        });
+        socket
+            .send(ClientMessage::Text(
+                serde_json::to_string(&hello).unwrap().into(),
+            ))
+            .await
+            .unwrap();
+        let frame = socket.next().await.unwrap().unwrap();
+        let ClientMessage::Text(text) = frame else {
+            panic!("expected hello ack text frame");
+        };
+        let ack: GatewayToAgent = serde_json::from_str(text.as_str()).unwrap();
+        let GatewayToAgent::HelloAck(ack) = ack else {
+            panic!("expected hello ack");
+        };
+        (socket, ack.connection_generation)
+    }
+
+    async fn wait_registered(state: &AppState, device_id: &str) {
+        tokio::time::timeout(Duration::from_secs(1), async {
+            loop {
+                if state.devices.read().await.contains_key(device_id) {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+    }
+
+    #[tokio::test]
+    async fn handshake_registers_device_and_exec_round_trips() {
+        let (state, addr, server) = spawn_test_gateway().await;
+        let (socket, generation) = connect_agent(addr, "test-device").await;
+        wait_registered(&state, "test-device").await;
+        assert_eq!(generation, 1);
+
+        let (mut sink, mut stream) = socket.split();
+        let responder = tokio::spawn(async move {
+            while let Some(Ok(ClientMessage::Text(text))) = stream.next().await {
+                let message: GatewayToAgent = serde_json::from_str(text.as_str()).unwrap();
+                if let GatewayToAgent::Request(request) = message {
+                    let output = ExecOutput {
+                        exit_code: Some(0),
+                        stdout: "integration-ok\n".into(),
+                        stderr: String::new(),
+                        truncated: false,
+                    };
+                    let response = AgentToGateway::Response(AgentResponse {
+                        id: request.id,
+                        result: OperationResult::Ok {
+                            body: serde_json::to_value(output).unwrap(),
+                        },
+                    });
+                    sink.send(ClientMessage::Text(
+                        serde_json::to_string(&response).unwrap().into(),
+                    ))
+                    .await
+                    .unwrap();
+                }
+            }
+        });
+
+        let response = execute_on_device(
+            &state,
+            "test-device".into(),
+            "echo ignored-by-simulator".into(),
+            None,
+            Some(2_000),
+        )
+        .await
+        .unwrap();
+        let OperationResult::Ok { body } = response.result else {
+            panic!("expected ok response");
+        };
+        let output: ExecOutput = serde_json::from_value(body).unwrap();
+        assert_eq!(output.stdout, "integration-ok\n");
+
+        responder.abort();
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn newer_connection_supersedes_generation() {
+        let (state, addr, server) = spawn_test_gateway().await;
+        let (first, first_generation) = connect_agent(addr, "same-device").await;
+        wait_registered(&state, "same-device").await;
+        let (second, second_generation) = connect_agent(addr, "same-device").await;
+        tokio::time::timeout(Duration::from_secs(1), async {
+            loop {
+                let generation = state
+                    .devices
+                    .read()
+                    .await
+                    .get("same-device")
+                    .map(|d| d.generation);
+                if generation == Some(second_generation) {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+
+        assert!(second_generation > first_generation);
+        drop(first);
+        drop(second);
+        server.abort();
+    }
 }
