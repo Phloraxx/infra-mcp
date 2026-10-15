@@ -178,3 +178,11 @@ Implemented now: per-device Ed25519 keys, short-lived one-time enrollment codes 
 The agent currently stores its identity in its private state directory; Unix identity files use restrictive permissions. Platform-native Keychain/DPAPI/Secret Service storage is still required before calling credential storage complete. Public MCP/dashboard OAuth is also still pending.
 
 Persistent PTY workers accept control only on loopback and require a random capability token stored in private session metadata. Structured file access intentionally has the same user-level filesystem reach as the agent; permanent deletion is explicit and recoverable `trash` is not yet implemented.
+
+## 14. Current installer and dashboard boundary
+
+The current bootstrap installers verify SHA-256 release sidecars before installing native binaries. This protects against accidental corruption but is not the final release trust model; signed/authenticated release metadata and steady-state updater rollback remain required. Development `--source-dir` installation intentionally bypasses download verification and must never be presented as the normal remote install path.
+
+The embedded dashboard is loopback/private-development infrastructure until browser OAuth/session authentication is implemented. The gateway refuses non-loopback binding by default unless an explicit development override is set. Enrollment creation and revocation support an admin bearer token, while read-only dashboard APIs are not a substitute for production authentication.
+
+SQLite audit events store only bounded metadata (time, device association, action family, outcome and request ID). Tool payloads, stdout/stderr, file contents, enrollment codes and private device keys are deliberately excluded.

@@ -536,7 +536,11 @@ mod tests {
         fs::create_dir_all(&session_dir).unwrap();
         let meta = SessionMeta {
             id,
-            command: "cat".into(),
+            command: if cfg!(windows) {
+                "more".into()
+            } else {
+                "cat".into()
+            },
             cwd: None,
             rows: 24,
             cols: 80,

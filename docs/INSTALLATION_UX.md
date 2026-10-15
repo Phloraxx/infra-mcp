@@ -100,8 +100,18 @@ The same product should own its lifecycle:
 
 A fresh supported machine should reach an Online state through the normal install path without reading documentation. Re-running the installer on an existing healthy installation must be safe and should repair/upgrade rather than create a second logical device.
 
-## Backend progress — 2026-10-15
+## Implemented product foundation — 2026-10-15
 
-The enrollment backend now implements the identity flow required by this UX: one-time expiring code, locally generated Ed25519 keypair, idempotent retry for the same enrollment attempt, persisted stable device ID, signed challenge authentication, and revocation. The development agent can enroll from `INFRA_ENROLLMENT_CODE` and persist its identity under `INFRA_STATE_DIR`.
+The repository now implements the first complete onboarding path rather than only the enrollment backend:
 
-This is not yet the user-facing installer. Native packaging, startup registration, protected OS credential storage, repair/doctor, permission onboarding, and dashboard-driven Add Device remain required before the installation UX is considered complete.
+- Dashboard **Add device** creates a short-lived one-time enrollment and generates the recommended macOS/Linux or Windows bootstrap command.
+- `scripts/install.sh` and `scripts/install.ps1` install two native binaries: `infra` and `infra-agent`. They require no Node/npm/Python runtime on the target machine.
+- Release mode downloads platform/architecture-specific GitHub Release assets and verifies SHA-256 sidecars before replacement. `--source-dir` / `-SourceDir` exists only for isolated development smoke tests. Cryptographically signed release/update metadata is still a required hardening step.
+- `infra install` writes versioned local config, performs one-time enrollment through `infra-agent --enroll-only`, and then registers automatic startup unless explicitly disabled. The enrollment code is not written to config.
+- The agent subsequently reads its gateway/device name from local config and authenticates with the persisted Ed25519 identity.
+- Startup adapters exist for systemd-user on Linux, LaunchAgent on macOS, and an ONLOGON Scheduled Task on Windows.
+- `infra status`, `doctor`, `repair`, `reconnect`, and `uninstall` operate on the same local state/startup model. `doctor` currently covers config, identity, runtime PID, startup state and gateway health.
+- Re-running `infra install` with an existing identity does not require or consume a new enrollment code; it can re-register startup around the same logical device.
+- The isolated installer/dashboard smoke test proves the configure/enroll/reconnect/status/doctor path without registering a real startup service.
+
+Still required before the UX is considered production-ready: real-device startup/reboot acceptance tests on all primary OSes, better phase-specific installer progress/error codes, native package installers where useful, OS protected credential stores/ACL hardening, `infra update` with staged rollback, permission onboarding, and production dashboard authentication.

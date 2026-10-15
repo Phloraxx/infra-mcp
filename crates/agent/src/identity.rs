@@ -63,27 +63,11 @@ impl DeviceIdentity {
 }
 
 pub fn default_state_dir() -> PathBuf {
-    if let Some(path) = std::env::var_os("INFRA_STATE_DIR") {
-        return PathBuf::from(path);
-    }
-    #[cfg(windows)]
-    if let Some(home) = std::env::var_os("USERPROFILE") {
-        return PathBuf::from(home).join(".infra-mcp-v1");
-    }
-    if let Some(home) = std::env::var_os("HOME") {
-        return PathBuf::from(home).join(".infra-mcp-v1");
-    }
-    std::env::temp_dir().join("infra-mcp-v1")
+    infra_local_state::default_state_dir()
 }
 
 pub fn ensure_state_dir(path: &Path) -> anyhow::Result<()> {
-    fs::create_dir_all(path)?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        fs::set_permissions(path, fs::Permissions::from_mode(0o700))?;
-    }
-    Ok(())
+    infra_local_state::ensure_state_dir(path)
 }
 
 pub fn load(path: &Path) -> anyhow::Result<Option<DeviceIdentity>> {

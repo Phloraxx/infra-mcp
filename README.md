@@ -4,7 +4,7 @@ Infra MCP is a personal multi-device control plane that lets ChatGPT operate aut
 
 The product goal is not to be a thin SSH wrapper or a clone of Desktop Commander. The goal is a smaller, faster, more reliable, AI-native remote-control system with persistent terminals, structured system operations, resumable file transfer, multi-device routing, strong auditing, and eventually semantic desktop automation.
 
-> **Current status:** **Infra v1 is actively implemented in Rust alongside the working v0.3 deployment.** The Rust gateway/agent now cover signed device enrollment/authentication, persistent SQLite device state, MCP `devices`/`exec`/`files`/`processes`/`jobs`/`terminal`, durable job workers, real persistent PTYs, reconnect reconciliation, and an isolated end-to-end smoke test. The existing TypeScript code remains legacy/prototype reference and the live v0.3 runtime stays untouched until the benchmark/cutover criteria are met.
+> **Current status:** **Infra v1 is actively implemented in Rust alongside the working v0.3 deployment.** The Rust control plane now covers signed device enrollment/authentication, persistent SQLite state/audit metadata, MCP `devices`/`exec`/`files`/`search`/`processes`/`jobs`/`terminal`/`transfer`, durable workers and PTYs, resumable binary transfer, native installers/startup adapters, `infra` status/doctor/repair commands, and a live embedded dashboard foundation. The live v0.3 runtime remains untouched until the benchmark/cutover criteria are met.
 
 ## Product principles
 
@@ -126,7 +126,7 @@ Supporting documents:
 
 The foundation and first persistent-control layer are implemented. See [`docs/IMPLEMENTATION_STATUS.md`](docs/IMPLEMENTATION_STATUS.md) for the exact current state.
 
-For a safe local end-to-end check, `scripts/smoke-v1.sh` uses temporary gateway/device state and verifies enrollment, Ed25519 challenge authentication, MCP command execution, and identity-based reconnect. It does not deploy or modify the live v0.3 service.
+For safe local end-to-end checks, `scripts/smoke-v1.sh` verifies signed enrollment/authentication, MCP execution and identity reconnect. `scripts/smoke-install-dashboard.sh` additionally exercises the embedded dashboard, one-time enrollment, native installer source mode, persisted local config/identity, online reconnect, `infra status`, `infra doctor`, sessions and activity APIs. Both use isolated temporary state and do not deploy or modify v0.3.
 
 ## License
 

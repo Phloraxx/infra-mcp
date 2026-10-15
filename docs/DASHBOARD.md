@@ -160,3 +160,10 @@ Mobile dashboard should support monitoring, approving enrollment, reconnect/repa
 ## Destructive actions
 
 Removing/revoking a device, killing a session, uninstalling remotely, or performing privileged destructive actions must clearly identify the target device and consequence before execution.
+## Implemented foundation — 2026-10-15
+
+The gateway now embeds a dependency-free dashboard under `/` with Overview, Devices, Sessions, Activity and Settings, responsive/dark-mode styling, Add Device enrollment, OS-specific bootstrap commands and a session-only admin-token field. `/api/events` uses server-sent events to refresh state immediately, with periodic polling as fallback.
+
+The dashboard is backed by persisted `/api/devices`, reconciled `/api/sessions`, and bounded `/api/activity` metadata. The activity store records action family, outcome, request ID, timestamp and device association; it intentionally does not persist command output, arbitrary file contents or enrollment/private-key material.
+
+This is the control/status foundation, not the finished dashboard. Device-detail actions, human terminal attachment, file browser/transfer controls, permission onboarding, doctor/repair UI, update progress, login/OAuth and richer attention states remain. Until browser authentication is implemented, the gateway remains loopback-by-default and a public development override must be protected externally.

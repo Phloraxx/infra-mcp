@@ -89,6 +89,8 @@ crates/
   gateway/
   agent/
   platform/
+  local-state/
+  cli/
   privileged-helper/   # planned; not created yet
 ```
 
@@ -109,7 +111,7 @@ Do not adopt a heavy framework solely because it is convenient for one platform.
 
 ## Current implementation checkpoint
 
-As of 2026-10-15 the branch contains working SQLite persistence, one-time Ed25519 enrollment/challenge authentication, MCP `devices`/`exec`/`files`/`processes`/`jobs`/`terminal`, durable job workers, persistent PTY workers, and reconnect reconciliation. Read `docs/IMPLEMENTATION_STATUS.md` before choosing the next task; do not recreate these features.
+As of 2026-10-15 the branch contains working SQLite persistence/audit metadata, one-time Ed25519 enrollment/challenge authentication, MCP `devices`/`exec`/`files`/`search`/`processes`/`jobs`/`terminal`/`transfer`, durable workers, persistent PTYs, reconnect reconciliation, native bootstrap installers/startup adapters, an `infra` lifecycle/doctor CLI, and an embedded dashboard foundation. Read `docs/IMPLEMENTATION_STATUS.md` before choosing the next task; do not recreate these features.
 
 The live Node v0.3 deployment remains separate and must not be modified as a side effect of v1 development.
 

@@ -2,11 +2,14 @@ mod files;
 mod identity;
 mod jobs;
 mod processes;
+mod search;
 mod terminal;
+mod transfer;
 
 use anyhow::{Context, anyhow};
 use futures_util::{SinkExt, StreamExt};
 use identity::DeviceIdentity;
+use infra_local_state::{RuntimeStatus, now_ms, read_config, write_runtime};
 use infra_platform::identity as platform_identity;
 use infra_protocol::{
     AgentOperation, AgentRequest, AgentResponse, AgentToGateway, DeviceAuthStart, DeviceHello,
@@ -23,6 +26,7 @@ use tokio::{
 };
 use tokio_tungstenite::{connect_async, tungstenite::Message};
 use tracing::{info, warn};
+use transfer::Transfers;
 use uuid::Uuid;
 
 const MAX_CAPTURE_BYTES: usize = 1024 * 1024;
@@ -41,6 +45,13 @@ struct Config {
 struct AgentContext {
     jobs: Jobs,
     terminals: Terminals,
+    transfers: Transfers,
+}
+
+#[derive(Debug)]
+struct StartupArgs {
+    state_dir: PathBuf,
+    enroll_only: bool,
 }
 
 #[tokio::main]
@@ -58,6 +69,7 @@ async fn main() -> anyhow::Result<()> {
             .ok_or_else(|| anyhow!("--pty-worker requires a directory"))?;
         return terminal::run_worker(PathBuf::from(dir).as_path());
     }
+    let startup = parse_startup_args(&args[1..])?;
 
     tracing_subscriber::fmt()
         .with_env_filter(
@@ -68,14 +80,29 @@ async fn main() -> anyhow::Result<()> {
         .init();
 
     let platform = platform_identity();
-    let state_dir = identity::default_state_dir();
+    let state_dir = startup.state_dir;
     identity::ensure_state_dir(&state_dir)?;
-    let gateway_url =
-        std::env::var("INFRA_GATEWAY_URL").unwrap_or_else(|_| "ws://127.0.0.1:8788/agent".into());
-    let requested_name =
-        std::env::var("INFRA_DEVICE_NAME").unwrap_or_else(|_| platform.hostname.clone());
+    let disk_config = read_config(&state_dir)?;
+    let gateway_url = std::env::var("INFRA_GATEWAY_URL")
+        .ok()
+        .or_else(|| {
+            disk_config
+                .as_ref()
+                .map(|config| config.gateway_url.clone())
+        })
+        .unwrap_or_else(|| "ws://127.0.0.1:8788/agent".into());
+    let requested_name = std::env::var("INFRA_DEVICE_NAME")
+        .ok()
+        .or_else(|| {
+            disk_config
+                .as_ref()
+                .and_then(|config| config.device_name.clone())
+        })
+        .unwrap_or_else(|| platform.hostname.clone());
+    update_runtime(&state_dir, "starting", None, None, None, None);
+
     let enrollment_code = std::env::var("INFRA_ENROLLMENT_CODE").ok();
-    let device_identity = identity::load_or_enroll(
+    let device_identity = match identity::load_or_enroll(
         &state_dir,
         &gateway_url,
         enrollment_code.as_deref(),
@@ -84,9 +111,40 @@ async fn main() -> anyhow::Result<()> {
         platform.arch,
         env!("CARGO_PKG_VERSION"),
     )
-    .await?;
+    .await
+    {
+        Ok(identity) => identity,
+        Err(error) => {
+            update_runtime(
+                &state_dir,
+                "enrollment_failed",
+                Some(error.to_string()),
+                None,
+                None,
+                None,
+            );
+            return Err(error);
+        }
+    };
+
+    if startup.enroll_only {
+        let enrolled = device_identity
+            .as_ref()
+            .ok_or_else(|| anyhow!("device is not enrolled; provide INFRA_ENROLLMENT_CODE"))?;
+        update_runtime(
+            &state_dir,
+            "enrolled",
+            None,
+            Some(enrolled.device_id.clone()),
+            Some(enrolled.device_name.clone()),
+            None,
+        );
+        return Ok(());
+    }
+
     let legacy_token = std::env::var("INFRA_AGENT_TOKEN").ok();
     if device_identity.is_none() && legacy_token.is_none() {
+        update_runtime(&state_dir, "needs_enrollment", None, None, None, None);
         anyhow::bail!("device is not enrolled; set INFRA_ENROLLMENT_CODE for first run");
     }
 
@@ -101,17 +159,28 @@ async fn main() -> anyhow::Result<()> {
     let context = AgentContext {
         jobs: Jobs::new(&state_dir, platform.boot_id.clone())?,
         terminals: Terminals::new(&state_dir, platform.boot_id.clone())?,
+        transfers: Transfers::new(&state_dir, platform.boot_id.clone())?,
     };
 
     let mut delay = Duration::from_secs(1);
     loop {
-        match run_connection(config.clone(), context.clone()).await {
+        update_runtime(&state_dir, "connecting", None, None, None, None);
+        match run_connection(config.clone(), context.clone(), &state_dir).await {
             Ok(()) => {
                 warn!("gateway connection ended; reconnecting");
+                update_runtime(&state_dir, "reconnecting", None, None, None, None);
                 delay = Duration::from_secs(1);
             }
             Err(err) => {
                 warn!(%err, "gateway connection failed; reconnecting");
+                update_runtime(
+                    &state_dir,
+                    "reconnecting",
+                    Some(err.to_string()),
+                    None,
+                    None,
+                    None,
+                );
                 delay = (delay * 2).min(Duration::from_secs(30));
             }
         }
@@ -119,7 +188,72 @@ async fn main() -> anyhow::Result<()> {
     }
 }
 
-async fn run_connection(config: Config, context: AgentContext) -> anyhow::Result<()> {
+fn parse_startup_args(args: &[String]) -> anyhow::Result<StartupArgs> {
+    let mut state_dir = identity::default_state_dir();
+    let mut enroll_only = false;
+    let mut index = 0;
+    while index < args.len() {
+        match args[index].as_str() {
+            "--state-dir" => {
+                index += 1;
+                let value = args
+                    .get(index)
+                    .ok_or_else(|| anyhow!("--state-dir requires a path"))?;
+                state_dir = PathBuf::from(value);
+            }
+            "--enroll-only" => enroll_only = true,
+            other => return Err(anyhow!("unknown agent argument {other:?}")),
+        }
+        index += 1;
+    }
+    Ok(StartupArgs {
+        state_dir,
+        enroll_only,
+    })
+}
+
+fn update_runtime(
+    state_dir: &std::path::Path,
+    state: &str,
+    last_error: Option<String>,
+    device_id: Option<String>,
+    device_name: Option<String>,
+    generation: Option<u64>,
+) {
+    let mut runtime = infra_local_state::read_runtime(state_dir)
+        .ok()
+        .flatten()
+        .unwrap_or_else(|| RuntimeStatus::new(state));
+    runtime.pid = std::process::id();
+    runtime.state = state.into();
+    runtime.updated_unix_ms = now_ms();
+    if let Some(error) = last_error {
+        runtime.last_error = Some(error);
+    } else if matches!(state, "online" | "connecting" | "enrolled") {
+        runtime.last_error = None;
+    }
+    if device_id.is_some() {
+        runtime.device_id = device_id;
+    }
+    if device_name.is_some() {
+        runtime.device_name = device_name;
+    }
+    if generation.is_some() {
+        runtime.connection_generation = generation;
+    }
+    if state == "online" {
+        runtime.last_connected_unix_ms = Some(now_ms());
+    }
+    if let Err(error) = write_runtime(state_dir, &runtime) {
+        warn!(%error, "failed to write runtime status");
+    }
+}
+
+async fn run_connection(
+    config: Config,
+    context: AgentContext,
+    state_dir: &std::path::Path,
+) -> anyhow::Result<()> {
     let platform = platform_identity();
     let agent_instance_id = Uuid::new_v4();
     let (socket, _) = connect_async(&config.gateway_url)
@@ -145,9 +279,11 @@ async fn run_connection(config: Config, context: AgentContext) -> anyhow::Result
             "status".into(),
             "exec".into(),
             "files".into(),
+            "search".into(),
             "processes".into(),
             "jobs".into(),
             "terminal".into(),
+            "transfer".into(),
         ],
         metadata: BTreeMap::from([("hostname".into(), platform.hostname)]),
     };
@@ -202,6 +338,14 @@ async fn run_connection(config: Config, context: AgentContext) -> anyhow::Result
         other => return Err(anyhow!("gateway did not send hello ack: {other:?}")),
     };
     info!(device_id=%device_id, generation=ack.connection_generation, "connected to Infra gateway");
+    update_runtime(
+        state_dir,
+        "online",
+        None,
+        Some(device_id.clone()),
+        Some(hello.device_name.clone()),
+        Some(ack.connection_generation),
+    );
 
     let (out_tx, mut out_rx) = mpsc::channel::<AgentToGateway>(64);
     let writer = tokio::spawn(async move {
@@ -214,6 +358,7 @@ async fn run_connection(config: Config, context: AgentContext) -> anyhow::Result
 
     let mut items = context.jobs.reconcile_items();
     items.extend(context.terminals.reconcile_items());
+    items.extend(context.transfers.reconcile_items());
     out_tx
         .send(AgentToGateway::Reconcile(ReconcileSnapshot { items }))
         .await?;
@@ -302,6 +447,13 @@ async fn dispatch(request: AgentRequest, context: AgentContext) -> AgentResponse
                     error: e.to_string(),
                 })
         }
+        AgentOperation::Search(request) => {
+            tokio::task::spawn_blocking(move || search::handle(request))
+                .await
+                .unwrap_or_else(|e| OperationResult::Failed {
+                    error: e.to_string(),
+                })
+        }
         AgentOperation::Processes(request) => {
             tokio::task::spawn_blocking(move || processes::handle(request))
                 .await
@@ -320,6 +472,14 @@ async fn dispatch(request: AgentRequest, context: AgentContext) -> AgentResponse
         AgentOperation::Terminal(request) => {
             let terminals = context.terminals.clone();
             tokio::task::spawn_blocking(move || terminals.handle(request))
+                .await
+                .unwrap_or_else(|e| OperationResult::Failed {
+                    error: e.to_string(),
+                })
+        }
+        AgentOperation::Transfer(request) => {
+            let transfers = context.transfers.clone();
+            tokio::task::spawn_blocking(move || transfers.handle(request))
                 .await
                 .unwrap_or_else(|e| OperationResult::Failed {
                     error: e.to_string(),

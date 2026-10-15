@@ -245,6 +245,12 @@ Avoid returning huge raw process lists, terminal histories, or file contents whe
 
 ## Current implemented subset — 2026-10-15
 
-Available through the Rust MCP gateway now: `devices`, `exec`, `files`, `processes`, `jobs`, and `terminal`. `files` currently implements byte-range text read, write, append, list, stat, mkdir, copy, move, unsupported/reported `trash`, and explicit permanent delete. `jobs` implements start/list/read/cancel. `terminal` implements open/list/read/write/resize/close using persistent PTY workers.
+Available through the Rust MCP gateway now: `devices`, `exec`, `files`, `search`, `processes`, `jobs`, `terminal`, and `transfer`.
 
-The broader actions in this document remain the target surface. Search, edit/patch, binary transfer, system/service/network/container/Git, desktop control and privileged operations are not implemented yet.
+- `files`: byte-range UTF-8 read, atomic-style write, append, exact edit with expected replacement count, SHA-256 hash, list, stat, mkdir, copy, move, explicit permanent delete; recoverable `trash` currently reports unsupported.
+- `search`: filename or content mode, regex/literal, case control, hidden-file control, git-ignore-aware walking, glob file filtering, bounded results and bounded context.
+- `jobs`: start/list/read/cancel with worker process and byte-offset spool.
+- `terminal`: open/list/read/write/resize/close using persistent PTY/ConPTY workers.
+- `transfer`: persistent upload/download begin/chunk/commit/status/list/cancel, explicit byte offsets, idempotent upload retries, bounded base64 chunks, staging files and SHA-256 verification. Device-to-device relay is orchestration on top of the two device endpoints and is not optimized yet.
+
+Still targeted: line-range reads, unified patch, tail/watch, richer process inspection/signals, structured system/service/network/container/Git modules, semantic desktop control and privileged operations.

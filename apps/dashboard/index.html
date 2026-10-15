@@ -1,0 +1,90 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="color-scheme" content="light dark">
+  <title>Infra</title>
+  <link rel="stylesheet" href="/styles.css">
+</head>
+<body>
+  <div class="shell">
+    <aside class="sidebar">
+      <div class="brand"><span class="brand-mark">I</span><span>Infra</span></div>
+      <nav>
+        <button class="nav active" data-view="overview">Overview</button>
+        <button class="nav" data-view="devices">Devices</button>
+        <button class="nav" data-view="sessions">Sessions</button>
+        <button class="nav" data-view="activity">Activity</button>
+        <button class="nav" data-view="settings">Settings</button>
+      </nav>
+      <div class="sidebar-foot"><span id="gateway-dot" class="dot"></span><span id="gateway-label">Gateway</span></div>
+    </aside>
+
+    <main>
+      <header class="topbar">
+        <div>
+          <h1 id="view-title">Overview</h1>
+          <p id="view-subtitle">Your devices and active work.</p>
+        </div>
+        <button id="add-device" class="primary">Add device</button>
+      </header>
+
+      <section id="overview" class="view active">
+        <div id="summary" class="summary-grid"></div>
+        <section id="attention-section" class="panel hidden">
+          <div class="section-head"><h2>Needs attention</h2></div>
+          <div id="attention"></div>
+        </section>
+        <section class="panel">
+          <div class="section-head"><h2>Devices</h2><button class="text-button" data-view-target="devices">View all</button></div>
+          <div id="overview-devices" class="device-list"></div>
+        </section>
+        <section class="panel">
+          <div class="section-head"><h2>Active work</h2><button class="text-button" data-view-target="sessions">View sessions</button></div>
+          <div id="overview-sessions"></div>
+        </section>
+      </section>
+
+      <section id="devices" class="view">
+        <div class="panel"><div id="all-devices" class="device-list"></div></div>
+      </section>
+
+      <section id="sessions" class="view">
+        <div class="panel"><div id="all-sessions"></div></div>
+      </section>
+
+      <section id="activity" class="view">
+        <div class="panel"><div id="activity-list"></div></div>
+      </section>
+
+      <section id="settings" class="view">
+        <div class="panel settings-grid">
+          <div><h2>Gateway</h2><p class="muted">The dashboard uses the same gateway API as MCP and updates over server-sent events.</p></div>
+          <label>Admin token <input id="admin-token" type="password" autocomplete="off" placeholder="Only needed when configured"></label>
+          <button id="save-token" class="secondary">Use for this browser session</button>
+        </div>
+      </section>
+    </main>
+  </div>
+
+  <dialog id="enroll-dialog">
+    <form method="dialog" class="dialog-card">
+      <div class="dialog-head"><div><h2>Add device</h2><p>One-time enrollment. The device generates its own long-lived key.</p></div><button value="cancel" class="icon-button" aria-label="Close">×</button></div>
+      <div id="enroll-start">
+        <label>Friendly name <input id="device-name" placeholder="Optional; defaults to hostname"></label>
+        <button id="create-enrollment" type="button" class="primary wide">Create enrollment</button>
+      </div>
+      <div id="enroll-result" class="hidden">
+        <div class="code-box"><span>Enrollment code</span><strong id="enrollment-code"></strong><small id="enrollment-expiry"></small></div>
+        <div class="tabs"><button type="button" class="tab active" data-platform="unix">macOS / Linux</button><button type="button" class="tab" data-platform="windows">Windows</button></div>
+        <pre id="install-command"></pre>
+        <button id="copy-command" type="button" class="secondary wide">Copy install command</button>
+        <p class="muted small">The code expires automatically and cannot enroll a second device.</p>
+      </div>
+    </form>
+  </dialog>
+
+  <script src="/app.js" defer></script>
+</body>
+</html>

@@ -59,6 +59,17 @@ pub struct EnrollmentResult {
     pub device_name: String,
 }
 
+#[derive(Debug, Clone, Serialize)]
+pub struct AuditRecord {
+    pub id: i64,
+    pub at_unix_ms: u64,
+    pub device_id: Option<String>,
+    pub device_name: Option<String>,
+    pub action: String,
+    pub outcome: String,
+    pub request_id: Option<String>,
+}
+
 #[derive(Clone)]
 pub struct Store {
     path: PathBuf,
@@ -84,7 +95,7 @@ impl Store {
 
     fn migrate(&self) -> Result<(), StoreError> {
         let conn = self.connection()?;
-        let version: u32 = conn.pragma_query_value(None, "user_version", |row| row.get(0))?;
+        let mut version: u32 = conn.pragma_query_value(None, "user_version", |row| row.get(0))?;
         if version == 0 {
             conn.execute_batch(
                 r#"
@@ -118,6 +129,25 @@ impl Store {
                 CREATE INDEX IF NOT EXISTS enrollments_expires_idx
                     ON enrollments(expires_at_ms);
                 PRAGMA user_version=1;
+                "#,
+            )?;
+            version = 1;
+        }
+        if version < 2 {
+            conn.execute_batch(
+                r#"
+                CREATE TABLE IF NOT EXISTS audit_events (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    at_ms INTEGER NOT NULL,
+                    device_id TEXT,
+                    action TEXT NOT NULL,
+                    outcome TEXT NOT NULL,
+                    request_id TEXT,
+                    FOREIGN KEY(device_id) REFERENCES devices(device_id)
+                );
+                CREATE INDEX IF NOT EXISTS audit_events_at_idx ON audit_events(at_ms DESC);
+                CREATE INDEX IF NOT EXISTS audit_events_device_idx ON audit_events(device_id, at_ms DESC);
+                PRAGMA user_version=2;
                 "#,
             )?;
         }
@@ -326,6 +356,46 @@ impl Store {
         )?;
         Ok(changed > 0)
     }
+
+    pub fn record_activity(
+        &self,
+        device_id: Option<&str>,
+        action: &str,
+        outcome: &str,
+        request_id: Option<&str>,
+    ) -> Result<(), StoreError> {
+        let conn = self.connection()?;
+        conn.execute(
+            "INSERT INTO audit_events(at_ms, device_id, action, outcome, request_id) VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![now_ms() as i64, device_id, action, outcome, request_id],
+        )?;
+        Ok(())
+    }
+
+    pub fn list_activity(&self, limit: usize) -> Result<Vec<AuditRecord>, StoreError> {
+        let conn = self.connection()?;
+        let limit = limit.clamp(1, 200) as i64;
+        let mut stmt = conn.prepare(
+            r#"SELECT a.id, a.at_ms, a.device_id, d.device_name, a.action, a.outcome, a.request_id
+               FROM audit_events a
+               LEFT JOIN devices d ON d.device_id=a.device_id
+               ORDER BY a.at_ms DESC, a.id DESC
+               LIMIT ?1"#,
+        )?;
+        let rows = stmt.query_map(params![limit], |row| {
+            Ok(AuditRecord {
+                id: row.get(0)?,
+                at_unix_ms: row.get::<_, i64>(1)?.max(0) as u64,
+                device_id: row.get(2)?,
+                device_name: row.get(3)?,
+                action: row.get(4)?,
+                outcome: row.get(5)?,
+                request_id: row.get(6)?,
+            })
+        })?;
+        rows.collect::<Result<Vec<_>, _>>()
+            .map_err(StoreError::from)
+    }
 }
 
 fn decode_device(row: &rusqlite::Row<'_>) -> rusqlite::Result<DeviceRecord> {
@@ -408,6 +478,31 @@ mod tests {
             )
             .unwrap_err();
         assert!(matches!(err, StoreError::EnrollmentConsumed));
+    }
+
+    #[test]
+    fn audit_events_are_bounded_and_join_device_name() {
+        let dir = tempdir().unwrap();
+        let store = Store::open(dir.path().join("infra.db")).unwrap();
+        let enrollment = store.create_enrollment(60_000).unwrap();
+        let enrolled = store
+            .consume_enrollment(
+                &enrollment.code,
+                "audit-request",
+                "Audit Laptop",
+                &[9_u8; 32],
+                "linux",
+                "x86_64",
+                "test",
+            )
+            .unwrap();
+        store
+            .record_activity(Some(&enrolled.device_id), "exec", "ok", Some("req-1"))
+            .unwrap();
+        let activity = store.list_activity(10).unwrap();
+        assert_eq!(activity.len(), 1);
+        assert_eq!(activity[0].device_name.as_deref(), Some("Audit Laptop"));
+        assert_eq!(activity[0].action, "exec");
     }
 
     #[test]

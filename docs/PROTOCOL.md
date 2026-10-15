@@ -27,7 +27,7 @@ Even on WebSocket, multiplex independent logical streams at the protocol layer.
 
 ## 3. Identity
 
-A paired device should eventually possess an asymmetric keypair generated locally.
+A paired device possesses an Ed25519 asymmetric keypair generated locally; this is implemented in the v1 agent/gateway.
 
 Conceptual pairing flow:
 
@@ -38,7 +38,7 @@ Conceptual pairing flow:
 5. agent stores private identity using protected local storage when possible.
 6. future connections authenticate possession of that device key.
 
-A temporary bearer-token implementation is acceptable only during bootstrap if the migration plan is explicit.
+A legacy bearer-token path remains only as an explicitly named development/migration fallback; signed challenge authentication is the normal v1 path.
 
 ## 4. Connection handshake
 
@@ -231,3 +231,7 @@ The current Rust implementation uses the following signed path:
 Enrollment codes are short-lived and stored hashed. The gateway retains an explicitly separate legacy bearer-token handshake only for migration/development. Non-idempotent requests are not automatically replayed after connection loss.
 
 The current PTY/job streams use byte-offset reads over typed RPC rather than the future general multiplexed binary-stream envelope. Binary/resumable transfer is still pending.
+
+### Current transfer RPC mapping
+
+The first implementation maps resumable transfer semantics onto bounded control RPCs: `upload_begin`, `upload_chunk`, `upload_commit`, `download_begin`, `download_chunk`, `status`, `list`, and `cancel`. Chunks are capped so their base64 representation remains comfortably below the control-frame limit. The persistent transfer ID and byte offsets provide resume semantics now; a later dedicated binary stream transport may replace base64 chunks without changing the higher-level lifecycle.

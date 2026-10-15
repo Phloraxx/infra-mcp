@@ -2,6 +2,7 @@ use infra_protocol::{
     DEFAULT_READ_LIMIT, FileAction, FileRequest, MAX_READ_LIMIT, OperationResult,
 };
 use serde::Serialize;
+use sha2::{Digest, Sha256};
 use std::{
     fs,
     io::{Read, Seek, SeekFrom, Write},
@@ -10,6 +11,7 @@ use std::{
 use uuid::Uuid;
 
 const MAX_LIST_ENTRIES: usize = 1000;
+const MAX_EDIT_FILE_BYTES: u64 = 16 * 1024 * 1024;
 
 #[derive(Debug, Serialize)]
 struct FileReadOutput {
@@ -71,6 +73,10 @@ fn handle_inner(action: FileAction) -> Result<serde_json::Value, FileError> {
             file.flush()?;
             Ok(serde_json::json!({"ok": true, "path": display(&path), "bytes": content.len()}))
         }
+        FileAction::ExactEdit { path, old, new, expected_replacements } => {
+            exact_edit(&PathBuf::from(path), &old, &new, expected_replacements)
+        }
+        FileAction::Hash { path } => hash_file(&PathBuf::from(path)),
         FileAction::List { path } => list(&PathBuf::from(path)),
         FileAction::Stat { path } => stat(&PathBuf::from(path)),
         FileAction::Mkdir { path } => {
@@ -134,6 +140,78 @@ fn read_text(path: &str, offset: u64, length: usize) -> Result<serde_json::Value
         has_more: next_offset < size,
     })
     .map_err(|e| FileError::Other(e.to_string()))
+}
+
+fn exact_edit(
+    path: &Path,
+    old: &str,
+    new: &str,
+    expected_replacements: Option<usize>,
+) -> Result<serde_json::Value, FileError> {
+    if old.is_empty() {
+        return Err(FileError::Other("old text cannot be empty".into()));
+    }
+    let expected = expected_replacements.unwrap_or(1);
+    if expected == 0 || expected > 10_000 {
+        return Err(FileError::Other(
+            "expected_replacements must be between 1 and 10000".into(),
+        ));
+    }
+    let metadata = fs::metadata(path)?;
+    if metadata.len() > MAX_EDIT_FILE_BYTES {
+        return Err(FileError::Other(format!(
+            "file is too large for exact_edit ({} bytes; max {})",
+            metadata.len(),
+            MAX_EDIT_FILE_BYTES
+        )));
+    }
+    let bytes = fs::read(path)?;
+    if bytes.contains(&0) {
+        return Err(FileError::Other(
+            "binary file detected; exact_edit refused".into(),
+        ));
+    }
+    let content = String::from_utf8(bytes)
+        .map_err(|_| FileError::Other("file is not valid UTF-8; exact_edit refused".into()))?;
+    let found = content.match_indices(old).count();
+    if found != expected {
+        return Err(FileError::Other(format!(
+            "exact_edit expected {expected} replacement(s), found {found}; file was not changed"
+        )));
+    }
+    let updated = content.replacen(old, new, expected);
+    atomic_write(path, updated.as_bytes())?;
+    Ok(serde_json::json!({
+        "ok": true,
+        "path": display(path),
+        "replacements": expected,
+        "bytes": updated.len()
+    }))
+}
+
+fn hash_file(path: &Path) -> Result<serde_json::Value, FileError> {
+    let mut file = fs::File::open(path)?;
+    let size = file.metadata()?.len();
+    let mut hasher = Sha256::new();
+    let mut buffer = [0_u8; 64 * 1024];
+    loop {
+        let count = file.read(&mut buffer)?;
+        if count == 0 {
+            break;
+        }
+        hasher.update(&buffer[..count]);
+    }
+    let digest = hasher.finalize();
+    let hash = digest
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
+    Ok(serde_json::json!({
+        "path": display(path),
+        "algorithm": "sha256",
+        "sha256": hash,
+        "size": size
+    }))
 }
 
 fn list(path: &Path) -> Result<serde_json::Value, FileError> {
@@ -273,5 +351,27 @@ mod tests {
         let file = dir.path().join("binary.bin");
         fs::write(&file, [1_u8, 0, 2]).unwrap();
         assert!(read_text(file.to_str().unwrap(), 0, 32).is_err());
+    }
+
+    #[test]
+    fn exact_edit_requires_expected_match_count() {
+        let dir = tempdir().unwrap();
+        let file = dir.path().join("edit.txt");
+        fs::write(&file, "alpha beta alpha").unwrap();
+        assert!(exact_edit(&file, "alpha", "omega", Some(1)).is_err());
+        exact_edit(&file, "alpha", "omega", Some(2)).unwrap();
+        assert_eq!(fs::read_to_string(&file).unwrap(), "omega beta omega");
+    }
+
+    #[test]
+    fn hash_is_sha256() {
+        let dir = tempdir().unwrap();
+        let file = dir.path().join("hash.txt");
+        fs::write(&file, b"abc").unwrap();
+        let value = hash_file(&file).unwrap();
+        assert_eq!(
+            value["sha256"],
+            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+        );
     }
 }

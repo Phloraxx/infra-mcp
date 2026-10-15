@@ -93,9 +93,11 @@ pub enum AgentOperation {
         timeout_ms: Option<u64>,
     },
     Files(FileRequest),
+    Search(SearchRequest),
     Processes(ProcessRequest),
     Jobs(JobRequest),
     Terminal(TerminalRequest),
+    Transfer(TransferRequest),
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -125,6 +127,16 @@ pub enum FileAction {
         #[serde(default)]
         create_parents: bool,
     },
+    ExactEdit {
+        path: String,
+        old: String,
+        new: String,
+        #[serde(default)]
+        expected_replacements: Option<usize>,
+    },
+    Hash {
+        path: String,
+    },
     List {
         path: String,
     },
@@ -152,6 +164,32 @@ pub enum FileAction {
         #[serde(default)]
         recursive: bool,
     },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SearchRequest {
+    pub root: String,
+    pub query: String,
+    pub mode: SearchMode,
+    #[serde(default)]
+    pub literal: bool,
+    #[serde(default)]
+    pub ignore_case: bool,
+    #[serde(default)]
+    pub include_hidden: bool,
+    #[serde(default)]
+    pub file_pattern: Option<String>,
+    #[serde(default)]
+    pub max_results: Option<usize>,
+    #[serde(default)]
+    pub context_lines: Option<usize>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum SearchMode {
+    Files,
+    Content,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -198,6 +236,50 @@ pub enum JobAction {
     },
     Cancel {
         job_id: Uuid,
+    },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct TransferRequest {
+    pub action: TransferAction,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "action", rename_all = "snake_case")]
+pub enum TransferAction {
+    UploadBegin {
+        path: String,
+        size: u64,
+        #[serde(default)]
+        sha256: Option<String>,
+        #[serde(default)]
+        overwrite: bool,
+        #[serde(default)]
+        create_parents: bool,
+    },
+    UploadChunk {
+        transfer_id: Uuid,
+        offset: u64,
+        data_base64: String,
+    },
+    UploadCommit {
+        transfer_id: Uuid,
+    },
+    DownloadBegin {
+        path: String,
+    },
+    DownloadChunk {
+        transfer_id: Uuid,
+        offset: u64,
+        #[serde(default)]
+        length: Option<usize>,
+    },
+    Status {
+        transfer_id: Uuid,
+    },
+    List,
+    Cancel {
+        transfer_id: Uuid,
     },
 }
 
@@ -269,6 +351,7 @@ pub struct AgentResponse {
 pub enum ReconcileKind {
     Job,
     Terminal,
+    Transfer,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

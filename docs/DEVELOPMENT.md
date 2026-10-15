@@ -139,3 +139,15 @@ Run from the repository root:
 The script builds only v1 binaries, allocates a temporary loopback gateway/database/state directory, creates a short-lived enrollment, starts a real agent, verifies it becomes online, calls MCP `exec`, restarts only that temporary controller, and verifies identity-based signed reconnect without an enrollment code. Everything is removed on exit. It does not inspect, stop, modify, or reuse the live v0.3 deployment.
 
 Use this after protocol/enrollment/session changes in addition to the normal formatting, clippy and test commands.
+
+## Installer/dashboard smoke test
+
+Run:
+
+```bash
+./scripts/smoke-install-dashboard.sh
+```
+
+This builds the v1 gateway, agent and `infra` CLI, starts an isolated loopback gateway, verifies embedded dashboard/bootstrap assets, creates an enrollment, runs `scripts/install.sh` in `--source-dir` development mode with startup intentionally disabled, verifies config and identity persistence, starts the installed agent without the enrollment code, then verifies status/doctor plus sessions/activity APIs. It removes all temporary state and does not register a real service or touch v0.3.
+
+`./scripts/install.sh --source-dir target/debug ...` and the analogous PowerShell `-SourceDir` are development-only paths. Normal release installs download versioned native assets plus `.sha256` sidecars. `.github/workflows/release.yml` defines the expected release asset names for Linux x64/ARM64, macOS Intel/ARM64 and Windows x64/ARM64. A real release must be published and validated before treating the remote bootstrap path as production-ready.

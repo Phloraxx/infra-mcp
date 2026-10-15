@@ -7,8 +7,11 @@ use axum::{
         Path, State, WebSocketUpgrade,
         ws::{Message, WebSocket},
     },
-    http::{HeaderMap, StatusCode},
-    response::{IntoResponse, Response},
+    http::{HeaderMap, StatusCode, header},
+    response::{
+        IntoResponse, Response,
+        sse::{Event, KeepAlive, Sse},
+    },
     routing::{get, post},
 };
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
@@ -17,8 +20,9 @@ use infra_protocol::{
     AgentOperation, AgentRequest, AgentResponse, AgentToGateway, AuthChallenge,
     DEFAULT_CONTROL_FRAME_LIMIT, DeviceAuthStart, DeviceHello, ExecOutput, FileAction, FileRequest,
     GatewayToAgent, HelloAck, JobAction, JobRequest, LegacyDeviceHello, OperationResult,
-    PROTOCOL_VERSION, ProcessAction, ProcessRequest, ReconcileSnapshot, SignedDeviceHello,
-    TerminalAction, TerminalRequest, signed_auth_message,
+    PROTOCOL_VERSION, ProcessAction, ProcessRequest, ReconcileSnapshot, SearchMode, SearchRequest,
+    SignedDeviceHello, TerminalAction, TerminalRequest, TransferAction, TransferRequest,
+    signed_auth_message,
 };
 use rmcp::{
     Json as McpJson,
@@ -32,6 +36,7 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use std::{
     collections::HashMap,
+    convert::Infallible,
     net::SocketAddr,
     path::PathBuf,
     sync::{
@@ -41,7 +46,7 @@ use std::{
     time::Duration,
 };
 use store::{DeviceRecord, Store, StoreError, now_ms};
-use tokio::sync::{Mutex, RwLock, mpsc, oneshot};
+use tokio::sync::{Mutex, RwLock, broadcast, mpsc, oneshot};
 use tracing::{info, warn};
 use uuid::Uuid;
 
@@ -53,11 +58,13 @@ struct AppState {
     next_generation: Arc<AtomicU64>,
     devices: Arc<RwLock<HashMap<String, DeviceConnection>>>,
     pending: Arc<Mutex<HashMap<Uuid, oneshot::Sender<AgentResponse>>>>,
+    events: broadcast::Sender<DashboardEvent>,
     store: Store,
 }
 
 impl AppState {
     fn new(store: Store, legacy_agent_token: Option<String>, admin_token: Option<String>) -> Self {
+        let (events, _) = broadcast::channel(128);
         Self {
             legacy_agent_token: legacy_agent_token.map(Arc::from),
             admin_token: admin_token.map(Arc::from),
@@ -65,9 +72,25 @@ impl AppState {
             next_generation: Arc::new(AtomicU64::new(1)),
             devices: Arc::new(RwLock::new(HashMap::new())),
             pending: Arc::new(Mutex::new(HashMap::new())),
+            events,
             store,
         }
     }
+
+    fn emit(&self, kind: &'static str, device_id: Option<String>) {
+        let _ = self.events.send(DashboardEvent {
+            kind,
+            device_id,
+            at_unix_ms: now_ms(),
+        });
+    }
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct DashboardEvent {
+    kind: &'static str,
+    device_id: Option<String>,
+    at_unix_ms: u64,
 }
 
 #[derive(Clone)]
@@ -100,6 +123,19 @@ struct McpDeviceView {
     connection_generation: Option<u64>,
     active_jobs: usize,
     active_terminals: usize,
+    active_transfers: usize,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct DashboardSession {
+    id: Uuid,
+    kind: &'static str,
+    status: String,
+    boot_id: String,
+    started_at_unix_ms: u64,
+    device_id: String,
+    device_name: String,
+    device_online: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -179,6 +215,31 @@ struct McpFilesInput {
     recursive: Option<bool>,
     #[serde(default)]
     create_parents: Option<bool>,
+    #[serde(default)]
+    old: Option<String>,
+    #[serde(default)]
+    new: Option<String>,
+    #[serde(default)]
+    expected_replacements: Option<usize>,
+}
+#[derive(Debug, Deserialize, JsonSchema)]
+struct McpSearchInput {
+    device: String,
+    root: String,
+    query: String,
+    mode: String,
+    #[serde(default)]
+    literal: Option<bool>,
+    #[serde(default)]
+    ignore_case: Option<bool>,
+    #[serde(default)]
+    include_hidden: Option<bool>,
+    #[serde(default)]
+    file_pattern: Option<String>,
+    #[serde(default)]
+    max_results: Option<usize>,
+    #[serde(default)]
+    context_lines: Option<usize>,
 }
 #[derive(Debug, Deserialize, JsonSchema)]
 struct McpProcessesInput {
@@ -230,6 +291,30 @@ struct McpTerminalInput {
     length: Option<usize>,
 }
 
+#[derive(Debug, Deserialize, JsonSchema)]
+struct McpTransferInput {
+    device: String,
+    action: String,
+    #[serde(default)]
+    path: Option<String>,
+    #[serde(default)]
+    size: Option<u64>,
+    #[serde(default)]
+    sha256: Option<String>,
+    #[serde(default)]
+    overwrite: Option<bool>,
+    #[serde(default)]
+    create_parents: Option<bool>,
+    #[serde(default)]
+    transfer_id: Option<String>,
+    #[serde(default)]
+    offset: Option<u64>,
+    #[serde(default)]
+    data_base64: Option<String>,
+    #[serde(default)]
+    length: Option<usize>,
+}
+
 #[derive(Clone)]
 struct InfraMcp {
     state: AppState,
@@ -260,6 +345,7 @@ impl InfraMcp {
         &self,
         Parameters(input): Parameters<McpExecInput>,
     ) -> Result<McpJson<McpExecOutput>, String> {
+        let device_id = input.device.clone();
         let response = dispatch_to_device(
             &self.state,
             input.device,
@@ -272,12 +358,13 @@ impl InfraMcp {
         )
         .await
         .map_err(dispatch_error)?;
+        record_operation(&self.state, &device_id, "exec", &response);
         Ok(McpJson(exec_output(response)))
     }
 
     #[tool(
         name = "files",
-        description = "Read or mutate files on an Infra device. Actions: read, write, append, list, stat, mkdir, copy, move, trash, delete_permanent."
+        description = "Read or mutate files on an Infra device. Actions: read, write, append, exact_edit, hash, list, stat, mkdir, copy, move, trash, delete_permanent."
     )]
     async fn files(
         &self,
@@ -298,6 +385,15 @@ impl InfraMcp {
                 path: required(input.path, "path")?,
                 content: required(input.content, "content")?,
                 create_parents: input.create_parents.unwrap_or(false),
+            },
+            "exact_edit" => FileAction::ExactEdit {
+                path: required(input.path, "path")?,
+                old: required(input.old, "old")?,
+                new: required(input.new, "new")?,
+                expected_replacements: input.expected_replacements,
+            },
+            "hash" => FileAction::Hash {
+                path: required(input.path, "path")?,
             },
             "list" => FileAction::List {
                 path: required(input.path, "path")?,
@@ -330,6 +426,38 @@ impl InfraMcp {
             &self.state,
             input.device,
             AgentOperation::Files(FileRequest { action }),
+            65_000,
+        )
+        .await
+    }
+
+    #[tool(
+        name = "search",
+        description = "Search filenames or text content efficiently on an Infra device. mode: files or content."
+    )]
+    async fn search(
+        &self,
+        Parameters(input): Parameters<McpSearchInput>,
+    ) -> Result<McpJson<serde_json::Value>, String> {
+        let mode = match input.mode.as_str() {
+            "files" => SearchMode::Files,
+            "content" => SearchMode::Content,
+            _ => return Err("search mode must be files or content".into()),
+        };
+        tool_operation(
+            &self.state,
+            input.device,
+            AgentOperation::Search(SearchRequest {
+                root: input.root,
+                query: input.query,
+                mode,
+                literal: input.literal.unwrap_or(false),
+                ignore_case: input.ignore_case.unwrap_or(true),
+                include_hidden: input.include_hidden.unwrap_or(false),
+                file_pattern: input.file_pattern,
+                max_results: input.max_results,
+                context_lines: input.context_lines,
+            }),
             65_000,
         )
         .await
@@ -437,6 +565,56 @@ impl InfraMcp {
         )
         .await
     }
+
+    #[tool(
+        name = "transfer",
+        description = "Resumable binary upload/download on an Infra device. Actions: upload_begin, upload_chunk, upload_commit, download_begin, download_chunk, status, list, cancel."
+    )]
+    async fn transfer(
+        &self,
+        Parameters(input): Parameters<McpTransferInput>,
+    ) -> Result<McpJson<serde_json::Value>, String> {
+        let action = match input.action.as_str() {
+            "upload_begin" => TransferAction::UploadBegin {
+                path: required(input.path, "path")?,
+                size: input.size.ok_or("size is required")?,
+                sha256: input.sha256,
+                overwrite: input.overwrite.unwrap_or(false),
+                create_parents: input.create_parents.unwrap_or(false),
+            },
+            "upload_chunk" => TransferAction::UploadChunk {
+                transfer_id: parse_uuid(input.transfer_id, "transfer_id")?,
+                offset: input.offset.ok_or("offset is required")?,
+                data_base64: required(input.data_base64, "data_base64")?,
+            },
+            "upload_commit" => TransferAction::UploadCommit {
+                transfer_id: parse_uuid(input.transfer_id, "transfer_id")?,
+            },
+            "download_begin" => TransferAction::DownloadBegin {
+                path: required(input.path, "path")?,
+            },
+            "download_chunk" => TransferAction::DownloadChunk {
+                transfer_id: parse_uuid(input.transfer_id, "transfer_id")?,
+                offset: input.offset.ok_or("offset is required")?,
+                length: input.length,
+            },
+            "status" => TransferAction::Status {
+                transfer_id: parse_uuid(input.transfer_id, "transfer_id")?,
+            },
+            "list" => TransferAction::List,
+            "cancel" => TransferAction::Cancel {
+                transfer_id: parse_uuid(input.transfer_id, "transfer_id")?,
+            },
+            _ => return Err("unknown transfer action".into()),
+        };
+        tool_operation(
+            &self.state,
+            input.device,
+            AgentOperation::Transfer(TransferRequest { action }),
+            300_000,
+        )
+        .await
+    }
 }
 
 #[tokio::main]
@@ -487,13 +665,130 @@ fn build_app(state: AppState) -> Router {
         );
     Router::new()
         .nest_service("/mcp", mcp_service)
+        .route("/", get(dashboard_index))
+        .route("/app.js", get(dashboard_js))
+        .route("/styles.css", get(dashboard_css))
+        .route("/downloads/install.sh", get(download_install_sh))
+        .route("/downloads/install.ps1", get(download_install_ps1))
         .route("/healthz", get(health))
         .route("/api/devices", get(list_devices_http))
+        .route("/api/sessions", get(list_sessions_http))
+        .route("/api/activity", get(list_activity_http))
+        .route("/api/events", get(dashboard_events))
         .route("/api/enrollments", post(create_enrollment))
         .route("/api/devices/{device_id}/revoke", post(revoke_device))
         .route("/enroll", post(enroll))
         .route("/agent", get(agent_upgrade))
         .with_state(state)
+}
+
+const DASHBOARD_HTML: &str = include_str!("../../../apps/dashboard/index.html");
+const DASHBOARD_JS: &str = include_str!("../../../apps/dashboard/app.js");
+const DASHBOARD_CSS: &str = include_str!("../../../apps/dashboard/styles.css");
+const INSTALL_SH: &str = include_str!("../../../scripts/install.sh");
+const INSTALL_PS1: &str = include_str!("../../../scripts/install.ps1");
+
+async fn dashboard_index() -> Response {
+    static_response(DASHBOARD_HTML, "text/html; charset=utf-8")
+}
+async fn dashboard_js() -> Response {
+    static_response(DASHBOARD_JS, "text/javascript; charset=utf-8")
+}
+async fn dashboard_css() -> Response {
+    static_response(DASHBOARD_CSS, "text/css; charset=utf-8")
+}
+async fn download_install_sh() -> Response {
+    static_response(INSTALL_SH, "text/x-shellscript; charset=utf-8")
+}
+async fn download_install_ps1() -> Response {
+    static_response(INSTALL_PS1, "text/plain; charset=utf-8")
+}
+
+fn static_response(body: &'static str, content_type: &'static str) -> Response {
+    (
+        [
+            (header::CONTENT_TYPE, content_type),
+            (header::CACHE_CONTROL, "no-store"),
+            (header::X_CONTENT_TYPE_OPTIONS, "nosniff"),
+            (
+                header::CONTENT_SECURITY_POLICY,
+                "default-src 'self'; connect-src 'self'; img-src 'self' data:; style-src 'self'; script-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'",
+            ),
+        ],
+        body,
+    )
+        .into_response()
+}
+
+async fn dashboard_events(
+    State(state): State<AppState>,
+) -> Sse<impl futures_util::Stream<Item = Result<Event, Infallible>>> {
+    let receiver = state.events.subscribe();
+    let stream = futures_util::stream::unfold(receiver, |mut receiver| async move {
+        loop {
+            match receiver.recv().await {
+                Ok(event) => {
+                    let payload = serde_json::to_string(&event)
+                        .unwrap_or_else(|_| "{\"kind\":\"refresh\"}".into());
+                    return Some((Ok(Event::default().data(payload)), receiver));
+                }
+                Err(broadcast::error::RecvError::Lagged(_)) => continue,
+                Err(broadcast::error::RecvError::Closed) => return None,
+            }
+        }
+    });
+    Sse::new(stream).keep_alive(
+        KeepAlive::new()
+            .interval(Duration::from_secs(15))
+            .text("keepalive"),
+    )
+}
+
+async fn list_sessions_http(State(state): State<AppState>) -> Response {
+    match dashboard_sessions(&state).await {
+        Ok(sessions) => Json(sessions).into_response(),
+        Err(error) => (StatusCode::INTERNAL_SERVER_ERROR, error.to_string()).into_response(),
+    }
+}
+
+async fn list_activity_http(State(state): State<AppState>) -> Response {
+    match state.store.list_activity(100) {
+        Ok(activity) => Json(activity).into_response(),
+        Err(error) => (StatusCode::INTERNAL_SERVER_ERROR, error.to_string()).into_response(),
+    }
+}
+
+async fn dashboard_sessions(state: &AppState) -> Result<Vec<DashboardSession>, StoreError> {
+    let persisted = state.store.list_devices()?;
+    let online = state.devices.read().await;
+    let mut sessions = Vec::new();
+    for record in persisted {
+        let live = online.get(&record.device_id);
+        let reconcile = live
+            .map(|device| &device.reconcile)
+            .or(record.reconcile.as_ref());
+        let Some(reconcile) = reconcile else {
+            continue;
+        };
+        for item in &reconcile.items {
+            sessions.push(DashboardSession {
+                id: item.id,
+                kind: match item.kind {
+                    infra_protocol::ReconcileKind::Job => "job",
+                    infra_protocol::ReconcileKind::Terminal => "terminal",
+                    infra_protocol::ReconcileKind::Transfer => "transfer",
+                },
+                status: item.status.clone(),
+                boot_id: item.boot_id.clone(),
+                started_at_unix_ms: item.started_at_unix_ms,
+                device_id: record.device_id.clone(),
+                device_name: record.device_name.clone(),
+                device_online: live.is_some(),
+            });
+        }
+    }
+    sessions.sort_by_key(|session| std::cmp::Reverse(session.started_at_unix_ms));
+    Ok(sessions)
 }
 
 async fn health(State(state): State<AppState>) -> Json<Health<'static>> {
@@ -521,12 +816,21 @@ async fn create_enrollment(
     }
     let ttl_ms = input.ttl_seconds.unwrap_or(300).clamp(30, 900) * 1000;
     match state.store.create_enrollment(ttl_ms) {
-        Ok(created) => Json(CreateEnrollmentOutput {
-            enrollment_id: created.enrollment_id,
-            code: created.code,
-            expires_at_unix_ms: created.expires_at_unix_ms,
-        })
-        .into_response(),
+        Ok(created) => {
+            let _ = state.store.record_activity(
+                None,
+                "enrollment.create",
+                "ok",
+                Some(&created.enrollment_id),
+            );
+            state.emit("enrollment_created", None);
+            Json(CreateEnrollmentOutput {
+                enrollment_id: created.enrollment_id,
+                code: created.code,
+                expires_at_unix_ms: created.expires_at_unix_ms,
+            })
+            .into_response()
+        }
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
     }
 }
@@ -555,11 +859,21 @@ async fn enroll(State(state): State<AppState>, Json(input): Json<EnrollInput>) -
         &input.arch,
         &input.agent_version,
     ) {
-        Ok(result) => Json(EnrollOutput {
-            device_id: result.device_id,
-            device_name: result.device_name,
-        })
-        .into_response(),
+        Ok(result) => {
+            let device_id = result.device_id.clone();
+            let _ = state.store.record_activity(
+                Some(&device_id),
+                "enrollment.consume",
+                "ok",
+                Some(&input.request_id),
+            );
+            state.emit("device_enrolled", Some(device_id));
+            Json(EnrollOutput {
+                device_id: result.device_id,
+                device_name: result.device_name,
+            })
+            .into_response()
+        }
         Err(StoreError::EnrollmentInvalid) => {
             (StatusCode::UNAUTHORIZED, "invalid enrollment code").into_response()
         }
@@ -584,6 +898,10 @@ async fn revoke_device(
     match state.store.revoke(&device_id) {
         Ok(true) => {
             state.devices.write().await.remove(&device_id);
+            let _ = state
+                .store
+                .record_activity(Some(&device_id), "device.revoke", "ok", None);
+            state.emit("device_revoked", Some(device_id.clone()));
             Json(serde_json::json!({"ok":true,"device_id":device_id})).into_response()
         }
         Ok(false) => (StatusCode::NOT_FOUND, "device not found").into_response(),
@@ -630,6 +948,14 @@ fn device_view(record: DeviceRecord, live: Option<&DeviceConnection>) -> McpDevi
                 .count()
         })
         .unwrap_or(0);
+    let active_transfers = reconcile
+        .map(|r| {
+            r.items
+                .iter()
+                .filter(|i| matches!(i.kind, infra_protocol::ReconcileKind::Transfer))
+                .count()
+        })
+        .unwrap_or(0);
     McpDeviceView {
         device_id: record.device_id,
         device_name: record.device_name,
@@ -647,6 +973,7 @@ fn device_view(record: DeviceRecord, live: Option<&DeviceConnection>) -> McpDevi
         connection_generation: live.map(|d| d.generation),
         active_jobs,
         active_terminals,
+        active_transfers,
     }
 }
 
@@ -656,10 +983,47 @@ async fn tool_operation(
     operation: AgentOperation,
     timeout_ms: u64,
 ) -> Result<McpJson<serde_json::Value>, String> {
-    let response = dispatch_to_device(state, device, operation, timeout_ms)
+    let action = operation_label(&operation);
+    let response = dispatch_to_device(state, device.clone(), operation, timeout_ms)
         .await
         .map_err(dispatch_error)?;
+    record_operation(state, &device, action, &response);
     Ok(McpJson(response_json(response)))
+}
+
+fn operation_label(operation: &AgentOperation) -> &'static str {
+    match operation {
+        AgentOperation::Status => "status",
+        AgentOperation::Exec { .. } => "exec",
+        AgentOperation::Files(_) => "files",
+        AgentOperation::Search(_) => "search",
+        AgentOperation::Processes(_) => "processes",
+        AgentOperation::Jobs(_) => "jobs",
+        AgentOperation::Terminal(_) => "terminal",
+        AgentOperation::Transfer(_) => "transfer",
+    }
+}
+
+fn outcome_label(result: &OperationResult) -> &'static str {
+    match result {
+        OperationResult::Ok { .. } => "ok",
+        OperationResult::Failed { .. } => "failed",
+        OperationResult::Canceled { .. } => "canceled",
+        OperationResult::DeadlineExceeded => "deadline_exceeded",
+        OperationResult::OutcomeUnknown { .. } => "outcome_unknown",
+        OperationResult::Unsupported { .. } => "unsupported",
+        OperationResult::Unauthorized => "unauthorized",
+    }
+}
+
+fn record_operation(state: &AppState, device_id: &str, action: &str, response: &AgentResponse) {
+    let _ = state.store.record_activity(
+        Some(device_id),
+        action,
+        outcome_label(&response.result),
+        Some(&response.id.to_string()),
+    );
+    state.emit("activity", Some(device_id.to_string()));
 }
 fn response_json(response: AgentResponse) -> serde_json::Value {
     match response.result {
@@ -827,6 +1191,10 @@ async fn handle_agent(mut socket: WebSocket, state: AppState) {
             },
         );
     }
+    let _ = state
+        .store
+        .record_activity(Some(&hello.device_id), "device.connect", "ok", None);
+    state.emit("device_online", Some(hello.device_id.clone()));
     info!(device_id=%hello.device_id,generation,platform=%hello.platform,arch=%hello.arch,"agent online");
     loop {
         tokio::select! {
@@ -841,6 +1209,7 @@ async fn handle_agent(mut socket: WebSocket, state: AppState) {
                             device.reconcile = snapshot.clone();
                         }
                         let _ = state.store.record_reconcile(&hello.device_id, &snapshot);
+                        state.emit("sessions_changed", Some(hello.device_id.clone()));
                     },
                     Ok(AgentToGateway::Pong)=>{}, Ok(_)=>warn!(device_id=%hello.device_id,"unexpected post-auth agent frame"), Err(e)=>warn!(device_id=%hello.device_id,error=%e,"invalid agent frame")},
                 Some(Ok(Message::Ping(payload)))=>if socket.send(Message::Pong(payload)).await.is_err(){break},
@@ -855,6 +1224,11 @@ async fn handle_agent(mut socket: WebSocket, state: AppState) {
     {
         devices.remove(&hello.device_id);
         let _ = state.store.record_disconnect(&hello.device_id);
+        let _ =
+            state
+                .store
+                .record_activity(Some(&hello.device_id), "device.disconnect", "ok", None);
+        state.emit("device_offline", Some(hello.device_id.clone()));
         info!(device_id=%hello.device_id,generation,"agent offline")
     } else {
         info!(device_id=%hello.device_id,generation,"stale agent connection retired")
