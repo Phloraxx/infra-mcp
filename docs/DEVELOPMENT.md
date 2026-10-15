@@ -163,7 +163,7 @@ cargo build --release -p infra-gateway -p infra-agent -p infra-cli
 ./scripts/burnin-linux-user.sh status
 ```
 
-The burn-in uses a loopback-only gateway and state under `~/.local/share/infra-v1-burnin`, never the live v0.3 gateway. It validates the real startup adapter, including remote shells that lack user-bus environment variables, idempotent reinstall, signed reconnect, MCP exec, and **fresh** PTY input/output after both gateway and agent-controller service restarts. Use `./scripts/burnin-linux-user.sh remove` to remove only the v1 burn-in.
+The burn-in uses a loopback-only gateway and state under `~/.local/share/infra-v1-burnin`, never the live v0.3 gateway. It validates the real startup adapter, including remote shells that lack user-bus environment variables, idempotent reinstall, signed reconnect, MCP exec, and **fresh** PTY input/output after both gateway and agent-controller service restarts. It also starts a durable background job before the controller restart and requires the same job ID to produce a later marker afterward. Use `./scripts/burnin-linux-user.sh remove` to remove only the v1 burn-in.
 
 This is intentionally stronger than re-reading a pre-restart transcript: persistence only passes when the same PTY accepts and returns a new marker after the restart.
 

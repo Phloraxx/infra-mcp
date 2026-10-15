@@ -135,6 +135,18 @@ pty_write_expect() {
   return 1
 }
 
+job_read_expect() {
+  local device="$1" job="$2" marker="$3" result=''
+  for _ in $(seq 1 120); do
+    result="$(mcp_call jobs "$(python3 -c 'import json,sys; print(json.dumps({"device":sys.argv[1],"action":"read","job_id":sys.argv[2],"offset":0,"length":16384}))' "$device" "$job")")"
+    grep -q "$marker" <<<"$result" && return 0
+    sleep .1
+  done
+  echo "job marker $marker never arrived" >&2
+  echo "$result" >&2
+  return 1
+}
+
 run_test() {
   wait_health
   local device marker exec_result open_result session write_result read_result
@@ -159,6 +171,12 @@ run_test() {
   }
 
   echo "agent service restart test..."
+  local job_before="${marker}-job-before" job_after="${marker}-job-after" job_result job
+  local job_command="printf '${marker}-job-before\n'; sleep 3; printf '${marker}-job-after\n'; sleep 30"
+  job_result="$(mcp_call jobs "$(python3 -c 'import json,sys; print(json.dumps({"device":sys.argv[1],"action":"start","command":sys.argv[2],"timeout_ms":60000}))' "$device" "$job_command")")"
+  job="$(python3 -c 'import json,sys; print(json.load(sys.stdin)["result"]["structuredContent"]["body"]["job"]["id"])' <<<"$job_result")"
+  job_read_expect "$device" "$job" "$job_before"
+
   systemctl --user restart infra-agent.service
   device="$(wait_device)"
   local agent_marker="${marker}-after-agent"
@@ -166,10 +184,15 @@ run_test() {
     echo "PTY did not survive agent service restart" >&2
     return 2
   fi
+  if ! job_read_expect "$device" "$job" "$job_after"; then
+    echo "background job did not survive agent service restart" >&2
+    return 3
+  fi
 
+  mcp_call jobs "$(python3 -c 'import json,sys; print(json.dumps({"device":sys.argv[1],"action":"cancel","job_id":sys.argv[2]}))' "$device" "$job")" >/dev/null || true
   mcp_call terminal "$(python3 -c 'import json,sys; print(json.dumps({"device":sys.argv[1],"action":"close","session_id":sys.argv[2]}))' "$device" "$session")" >/dev/null || true
   "$BIN/infra" --state-dir "$AGENT_STATE" doctor
-  echo "Infra v1 real-service burn-in passed: exec, PTY, gateway restart and agent-service restart."
+  echo "Infra v1 real-service burn-in passed: exec, PTY, durable job, gateway restart and agent-service restart."
 }
 
 status_burnin() {

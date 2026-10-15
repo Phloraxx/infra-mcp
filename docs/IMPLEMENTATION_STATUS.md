@@ -39,7 +39,7 @@ This file records what exists in code. Product intent remains in the other desig
 - Structured JSON tracing and Linux/macOS/Windows Rust CI definition.
 - Isolated `scripts/smoke-v1.sh` verifies enrollment, signed authentication, MCP `exec`, identity persistence, and reconnect.
 - Isolated `scripts/smoke-install-dashboard.sh` verifies dashboard assets, enrollment, the native installer flow, persisted config/identity, online reconnect, status, doctor, sessions API and activity API.
-- `scripts/burnin-linux-user.sh` provides a real Linux user-service burn-in beside v0.3. On the Oracle ARM64 host it has verified non-login install/doctor, live MCP exec, fresh PTY I/O across a gateway restart, and fresh PTY I/O across an `infra-agent.service` controller restart.
+- `scripts/burnin-linux-user.sh` provides a real Linux user-service burn-in beside v0.3. On the Oracle ARM64 host it has verified non-login install/doctor, live MCP exec, fresh PTY I/O across a gateway restart, plus fresh PTY I/O and continued output from the same durable background job ID across an `infra-agent.service` controller restart.
 
 ### Current verification
 
