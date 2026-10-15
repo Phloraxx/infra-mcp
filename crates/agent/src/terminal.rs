@@ -340,6 +340,7 @@ pub fn run_worker(dir: &Path) -> anyhow::Result<()> {
     let control_writer = writer.clone();
     let control_master = master.clone();
     let control_killer = killer.clone();
+    let control_child_pid = meta.child_pid;
     let control_thread = std::thread::spawn(move || {
         while control_alive.load(Ordering::Relaxed) {
             match listener.accept() {
@@ -349,6 +350,7 @@ pub fn run_worker(dir: &Path) -> anyhow::Result<()> {
                     &control_writer,
                     &control_master,
                     &control_killer,
+                    control_child_pid,
                     &control_close,
                 ),
                 Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => {
@@ -389,6 +391,7 @@ fn handle_control(
     writer: &Arc<Mutex<Box<dyn Write + Send>>>,
     master: &Arc<Mutex<Box<dyn portable_pty::MasterPty + Send>>>,
     killer: &Arc<Mutex<Box<dyn portable_pty::ChildKiller + Send + Sync>>>,
+    child_pid: Option<u32>,
     close_requested: &Arc<AtomicBool>,
 ) {
     let mut line = String::new();
@@ -431,10 +434,7 @@ fn handle_control(
                 }),
             Ok(ControlRequest::Close { token: supplied }) if supplied == token => {
                 close_requested.store(true, Ordering::Relaxed);
-                killer
-                    .lock()
-                    .map_err(|_| "killer lock poisoned".to_string())
-                    .and_then(|mut killer| killer.kill().map_err(|e| e.to_string()))
+                close_terminal_child(killer, child_pid)
             }
             Ok(ControlRequest::Status { token: supplied }) if supplied == token => Ok(()),
             Ok(_) => Err("invalid terminal capability token".into()),
@@ -454,6 +454,42 @@ fn handle_control(
     let _ = serde_json::to_writer(&mut stream, &reply);
     let _ = stream.write_all(b"\n");
     let _ = stream.flush();
+}
+
+fn close_terminal_child(
+    killer: &Arc<Mutex<Box<dyn portable_pty::ChildKiller + Send + Sync>>>,
+    child_pid: Option<u32>,
+) -> Result<(), String> {
+    #[cfg(windows)]
+    {
+        let _ = killer;
+        let pid = child_pid.ok_or_else(|| "terminal child pid unavailable".to_string())?;
+        let output = Command::new("taskkill")
+            .args(["/PID", &pid.to_string(), "/T", "/F"])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped())
+            .output()
+            .map_err(|error| format!("taskkill terminal child: {error}"))?;
+        if output.status.success() || !process_alive(pid) {
+            Ok(())
+        } else {
+            Err(format!(
+                "taskkill terminal child failed: {}",
+                String::from_utf8_lossy(&output.stderr).trim()
+            ))
+        }
+    }
+
+    #[cfg(not(windows))]
+    {
+        let _ = child_pid;
+        killer
+            .lock()
+            .map_err(|_| "killer lock poisoned".to_string())?
+            .kill()
+            .map_err(|error| error.to_string())
+    }
 }
 
 fn spool_pty(
