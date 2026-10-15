@@ -134,3 +134,9 @@ During migration:
 ## Cutover rule
 
 Do not remove Desktop Commander or v0.3 merely because v1 “works.” Perform the benchmark in `BENCHMARK.md` and close must-win gaps first.
+
+## V1 implementation checkpoint — 2026-10-15
+
+The Rust v1 branch now has SQLite-backed device records, one-time Ed25519 enrollment and challenge authentication, `exec`, file/process parity, durable job workers, real PTY/ConPTY workers, connection supersession, and reconnect reconciliation. The old shared bearer-token path exists only as an explicit development/migration fallback.
+
+The implementation continues to use a separate state directory/database and has not altered the deployed v0.3 service. Startup installers and cutover are still pending.

@@ -242,3 +242,9 @@ Tools should optimize for model consumption:
 - timestamps only where they add value
 
 Avoid returning huge raw process lists, terminal histories, or file contents when a filtered request can answer the question.
+
+## Current implemented subset — 2026-10-15
+
+Available through the Rust MCP gateway now: `devices`, `exec`, `files`, `processes`, `jobs`, and `terminal`. `files` currently implements byte-range text read, write, append, list, stat, mkdir, copy, move, unsupported/reported `trash`, and explicit permanent delete. `jobs` implements start/list/read/cancel. `terminal` implements open/list/read/write/resize/close using persistent PTY workers.
+
+The broader actions in this document remain the target surface. Search, edit/patch, binary transfer, system/service/network/container/Git, desktop control and privileged operations are not implemented yet.

@@ -99,3 +99,9 @@ The same product should own its lifecycle:
 ## Acceptance requirements
 
 A fresh supported machine should reach an Online state through the normal install path without reading documentation. Re-running the installer on an existing healthy installation must be safe and should repair/upgrade rather than create a second logical device.
+
+## Backend progress — 2026-10-15
+
+The enrollment backend now implements the identity flow required by this UX: one-time expiring code, locally generated Ed25519 keypair, idempotent retry for the same enrollment attempt, persisted stable device ID, signed challenge authentication, and revocation. The development agent can enroll from `INFRA_ENROLLMENT_CODE` and persist its identity under `INFRA_STATE_DIR`.
+
+This is not yet the user-facing installer. Native packaging, startup registration, protected OS credential storage, repair/doctor, permission onboarding, and dashboard-driven Add Device remain required before the installation UX is considered complete.

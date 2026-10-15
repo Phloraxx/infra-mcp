@@ -78,9 +78,9 @@ The regular agent must not quietly become root/SYSTEM. The privileged helper is 
 
 Never commit real pairing credentials, private keys, OAuth secrets, machine tokens, passwords, or live environment files. Audit metadata should identify actions while avoiding command output or file contents unless explicitly configured.
 
-## Initial Rust workspace proposal
+## Current Rust workspace
 
-Create only when implementation begins:
+Implementation has begun. Preserve and extend this workspace:
 
 ```text
 Cargo.toml
@@ -89,7 +89,7 @@ crates/
   gateway/
   agent/
   platform/
-  privileged-helper/
+  privileged-helper/   # planned; not created yet
 ```
 
 Suggested dependency categories, not mandates:
@@ -105,6 +105,13 @@ Suggested dependency categories, not mandates:
 - file notifications: `notify`
 
 Do not adopt a heavy framework solely because it is convenient for one platform.
+
+
+## Current implementation checkpoint
+
+As of 2026-10-15 the branch contains working SQLite persistence, one-time Ed25519 enrollment/challenge authentication, MCP `devices`/`exec`/`files`/`processes`/`jobs`/`terminal`, durable job workers, persistent PTY workers, and reconnect reconciliation. Read `docs/IMPLEMENTATION_STATUS.md` before choosing the next task; do not recreate these features.
+
+The live Node v0.3 deployment remains separate and must not be modified as a side effect of v1 development.
 
 ## Testing expectations
 

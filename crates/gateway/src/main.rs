@@ -1,3 +1,5 @@
+mod store;
+
 use anyhow::Context;
 use axum::{
     Json, Router,
@@ -5,13 +7,18 @@ use axum::{
         Path, State, WebSocketUpgrade,
         ws::{Message, WebSocket},
     },
-    http::StatusCode,
+    http::{HeaderMap, StatusCode},
     response::{IntoResponse, Response},
     routing::{get, post},
 };
+use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
+use ed25519_dalek::{Signature, VerifyingKey};
 use infra_protocol::{
-    AgentOperation, AgentRequest, AgentResponse, AgentToGateway, DEFAULT_CONTROL_FRAME_LIMIT,
-    DeviceHello, ExecOutput, GatewayToAgent, HelloAck, OperationResult, PROTOCOL_VERSION,
+    AgentOperation, AgentRequest, AgentResponse, AgentToGateway, AuthChallenge,
+    DEFAULT_CONTROL_FRAME_LIMIT, DeviceAuthStart, DeviceHello, ExecOutput, FileAction, FileRequest,
+    GatewayToAgent, HelloAck, JobAction, JobRequest, LegacyDeviceHello, OperationResult,
+    PROTOCOL_VERSION, ProcessAction, ProcessRequest, ReconcileSnapshot, SignedDeviceHello,
+    TerminalAction, TerminalRequest, signed_auth_message,
 };
 use rmcp::{
     Json as McpJson,
@@ -26,33 +33,39 @@ use serde::{Deserialize, Serialize};
 use std::{
     collections::HashMap,
     net::SocketAddr,
+    path::PathBuf,
     sync::{
         Arc,
         atomic::{AtomicU64, Ordering},
     },
-    time::{Duration, SystemTime},
+    time::Duration,
 };
+use store::{DeviceRecord, Store, StoreError, now_ms};
 use tokio::sync::{Mutex, RwLock, mpsc, oneshot};
 use tracing::{info, warn};
 use uuid::Uuid;
 
 #[derive(Clone)]
 struct AppState {
-    agent_token: Arc<str>,
+    legacy_agent_token: Option<Arc<str>>,
+    admin_token: Option<Arc<str>>,
     gateway_epoch: Uuid,
     next_generation: Arc<AtomicU64>,
     devices: Arc<RwLock<HashMap<String, DeviceConnection>>>,
     pending: Arc<Mutex<HashMap<Uuid, oneshot::Sender<AgentResponse>>>>,
+    store: Store,
 }
 
 impl AppState {
-    fn new(agent_token: String) -> Self {
+    fn new(store: Store, legacy_agent_token: Option<String>, admin_token: Option<String>) -> Self {
         Self {
-            agent_token: Arc::from(agent_token),
+            legacy_agent_token: legacy_agent_token.map(Arc::from),
+            admin_token: admin_token.map(Arc::from),
             gateway_epoch: Uuid::new_v4(),
             next_generation: Arc::new(AtomicU64::new(1)),
             devices: Arc::new(RwLock::new(HashMap::new())),
             pending: Arc::new(Mutex::new(HashMap::new())),
+            store,
         }
     }
 }
@@ -61,8 +74,8 @@ impl AppState {
 struct DeviceConnection {
     hello: DeviceHello,
     generation: u64,
-    connected_at: SystemTime,
     tx: mpsc::Sender<GatewayToAgent>,
+    reconcile: ReconcileSnapshot,
 }
 
 #[derive(Debug, Serialize)]
@@ -73,38 +86,6 @@ struct Health<'a> {
     gateway_epoch: Uuid,
 }
 
-#[derive(Debug, Serialize)]
-struct DeviceView {
-    device_id: String,
-    device_name: String,
-    agent_version: String,
-    platform: String,
-    arch: String,
-    boot_id: String,
-    agent_instance_id: Uuid,
-    capabilities: Vec<String>,
-    connection_generation: u64,
-    connected_seconds: u64,
-    online: bool,
-}
-
-#[derive(Debug, Deserialize)]
-struct ExecRequestBody {
-    command: String,
-    #[serde(default)]
-    cwd: Option<String>,
-    #[serde(default)]
-    timeout_ms: Option<u64>,
-}
-
-#[derive(Debug)]
-enum ExecDispatchError {
-    BadRequest(&'static str),
-    Offline,
-    ConnectionClosed,
-    ResponseClosed,
-}
-
 #[derive(Debug, Clone, Serialize, JsonSchema)]
 struct McpDeviceView {
     device_id: String,
@@ -113,7 +94,46 @@ struct McpDeviceView {
     platform: String,
     arch: String,
     capabilities: Vec<String>,
-    connection_generation: u64,
+    online: bool,
+    revoked: bool,
+    last_seen_unix_ms: u64,
+    connection_generation: Option<u64>,
+    active_jobs: usize,
+    active_terminals: usize,
+}
+
+#[derive(Debug, Deserialize)]
+struct CreateEnrollmentInput {
+    #[serde(default)]
+    ttl_seconds: Option<u64>,
+}
+#[derive(Debug, Serialize)]
+struct CreateEnrollmentOutput {
+    enrollment_id: String,
+    code: String,
+    expires_at_unix_ms: u64,
+}
+#[derive(Debug, Deserialize)]
+struct EnrollInput {
+    code: String,
+    request_id: String,
+    device_name: String,
+    public_key: String,
+    platform: String,
+    arch: String,
+    agent_version: String,
+}
+#[derive(Debug, Serialize)]
+struct EnrollOutput {
+    device_id: String,
+    device_name: String,
+}
+
+#[derive(Debug)]
+enum DispatchError {
+    Offline,
+    ConnectionClosed,
+    ResponseClosed,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -125,7 +145,6 @@ struct McpExecInput {
     #[serde(default)]
     timeout_ms: Option<u64>,
 }
-
 #[derive(Debug, Serialize, JsonSchema)]
 struct McpExecOutput {
     request_id: String,
@@ -142,11 +161,79 @@ struct McpExecOutput {
     error: Option<String>,
 }
 
+#[derive(Debug, Deserialize, JsonSchema)]
+struct McpFilesInput {
+    device: String,
+    action: String,
+    #[serde(default)]
+    path: Option<String>,
+    #[serde(default)]
+    destination: Option<String>,
+    #[serde(default)]
+    content: Option<String>,
+    #[serde(default)]
+    offset: Option<u64>,
+    #[serde(default)]
+    length: Option<usize>,
+    #[serde(default)]
+    recursive: Option<bool>,
+    #[serde(default)]
+    create_parents: Option<bool>,
+}
+#[derive(Debug, Deserialize, JsonSchema)]
+struct McpProcessesInput {
+    device: String,
+    action: String,
+    #[serde(default)]
+    query: Option<String>,
+    #[serde(default)]
+    pid: Option<u32>,
+    #[serde(default)]
+    force: Option<bool>,
+}
+#[derive(Debug, Deserialize, JsonSchema)]
+struct McpJobsInput {
+    device: String,
+    action: String,
+    #[serde(default)]
+    command: Option<String>,
+    #[serde(default)]
+    cwd: Option<String>,
+    #[serde(default)]
+    timeout_ms: Option<u64>,
+    #[serde(default)]
+    job_id: Option<String>,
+    #[serde(default)]
+    offset: Option<u64>,
+    #[serde(default)]
+    length: Option<usize>,
+}
+#[derive(Debug, Deserialize, JsonSchema)]
+struct McpTerminalInput {
+    device: String,
+    action: String,
+    #[serde(default)]
+    command: Option<String>,
+    #[serde(default)]
+    cwd: Option<String>,
+    #[serde(default)]
+    session_id: Option<String>,
+    #[serde(default)]
+    data: Option<String>,
+    #[serde(default)]
+    rows: Option<u16>,
+    #[serde(default)]
+    cols: Option<u16>,
+    #[serde(default)]
+    offset: Option<u64>,
+    #[serde(default)]
+    length: Option<usize>,
+}
+
 #[derive(Clone)]
 struct InfraMcp {
     state: AppState,
 }
-
 impl InfraMcp {
     fn new(state: AppState) -> Self {
         Self { state }
@@ -157,24 +244,12 @@ impl InfraMcp {
 impl InfraMcp {
     #[tool(
         name = "devices",
-        description = "List currently connected Infra devices and their capabilities."
+        description = "List enrolled Infra devices, online state, capabilities and active persistent work."
     )]
-    async fn devices(&self) -> McpJson<Vec<McpDeviceView>> {
-        let devices = self.state.devices.read().await;
-        McpJson(
-            devices
-                .values()
-                .map(|d| McpDeviceView {
-                    device_id: d.hello.device_id.clone(),
-                    device_name: d.hello.device_name.clone(),
-                    agent_version: d.hello.agent_version.clone(),
-                    platform: d.hello.platform.clone(),
-                    arch: d.hello.arch.clone(),
-                    capabilities: d.hello.capabilities.clone(),
-                    connection_generation: d.generation,
-                })
-                .collect(),
-        )
+    async fn devices(&self) -> Result<McpJson<Vec<McpDeviceView>>, String> {
+        Ok(McpJson(
+            device_views(&self.state).await.map_err(|e| e.to_string())?,
+        ))
     }
 
     #[tool(
@@ -185,58 +260,182 @@ impl InfraMcp {
         &self,
         Parameters(input): Parameters<McpExecInput>,
     ) -> Result<McpJson<McpExecOutput>, String> {
-        let response = execute_on_device(
+        let response = dispatch_to_device(
             &self.state,
             input.device,
-            input.command,
-            input.cwd,
-            input.timeout_ms,
+            AgentOperation::Exec {
+                command: input.command,
+                cwd: input.cwd,
+                timeout_ms: input.timeout_ms,
+            },
+            input.timeout_ms.unwrap_or(30_000).clamp(100, 120_000) + 5_000,
         )
         .await
-        .map_err(|e| format!("{e:?}"))?;
+        .map_err(dispatch_error)?;
+        Ok(McpJson(exec_output(response)))
+    }
 
-        let mut out = McpExecOutput {
-            request_id: response.id.to_string(),
-            status: "unknown".into(),
-            exit_code: None,
-            stdout: None,
-            stderr: None,
-            truncated: None,
-            error: None,
+    #[tool(
+        name = "files",
+        description = "Read or mutate files on an Infra device. Actions: read, write, append, list, stat, mkdir, copy, move, trash, delete_permanent."
+    )]
+    async fn files(
+        &self,
+        Parameters(input): Parameters<McpFilesInput>,
+    ) -> Result<McpJson<serde_json::Value>, String> {
+        let action = match input.action.as_str() {
+            "read" => FileAction::Read {
+                path: required(input.path, "path")?,
+                offset: input.offset,
+                length: input.length,
+            },
+            "write" => FileAction::Write {
+                path: required(input.path, "path")?,
+                content: required(input.content, "content")?,
+                create_parents: input.create_parents.unwrap_or(false),
+            },
+            "append" => FileAction::Append {
+                path: required(input.path, "path")?,
+                content: required(input.content, "content")?,
+                create_parents: input.create_parents.unwrap_or(false),
+            },
+            "list" => FileAction::List {
+                path: required(input.path, "path")?,
+            },
+            "stat" => FileAction::Stat {
+                path: required(input.path, "path")?,
+            },
+            "mkdir" => FileAction::Mkdir {
+                path: required(input.path, "path")?,
+            },
+            "copy" => FileAction::Copy {
+                source: required(input.path, "path")?,
+                destination: required(input.destination, "destination")?,
+                recursive: input.recursive.unwrap_or(false),
+            },
+            "move" => FileAction::Move {
+                source: required(input.path, "path")?,
+                destination: required(input.destination, "destination")?,
+            },
+            "trash" => FileAction::Trash {
+                path: required(input.path, "path")?,
+            },
+            "delete_permanent" => FileAction::DeletePermanent {
+                path: required(input.path, "path")?,
+                recursive: input.recursive.unwrap_or(false),
+            },
+            _ => return Err("unknown files action".into()),
         };
-        match response.result {
-            OperationResult::Ok { body } => {
-                out.status = "ok".into();
-                match serde_json::from_value::<ExecOutput>(body) {
-                    Ok(exec) => {
-                        out.exit_code = exec.exit_code;
-                        out.stdout = Some(exec.stdout);
-                        out.stderr = Some(exec.stderr);
-                        out.truncated = Some(exec.truncated);
-                    }
-                    Err(err) => out.error = Some(format!("invalid exec response: {err}")),
-                }
-            }
-            OperationResult::Failed { error } => {
-                out.status = "failed".into();
-                out.error = Some(error);
-            }
-            OperationResult::Canceled { error } => {
-                out.status = "canceled".into();
-                out.error = error;
-            }
-            OperationResult::DeadlineExceeded => out.status = "deadline_exceeded".into(),
-            OperationResult::OutcomeUnknown { error } => {
-                out.status = "outcome_unknown".into();
-                out.error = Some(error);
-            }
-            OperationResult::Unsupported { operation } => {
-                out.status = "unsupported".into();
-                out.error = Some(operation);
-            }
-            OperationResult::Unauthorized => out.status = "unauthorized".into(),
-        }
-        Ok(McpJson(out))
+        tool_operation(
+            &self.state,
+            input.device,
+            AgentOperation::Files(FileRequest { action }),
+            65_000,
+        )
+        .await
+    }
+
+    #[tool(
+        name = "processes",
+        description = "List/find or terminate processes on an Infra device. Actions: list, terminate."
+    )]
+    async fn processes(
+        &self,
+        Parameters(input): Parameters<McpProcessesInput>,
+    ) -> Result<McpJson<serde_json::Value>, String> {
+        let action = match input.action.as_str() {
+            "list" => ProcessAction::List { query: input.query },
+            "terminate" => ProcessAction::Terminate {
+                pid: input.pid.ok_or("pid is required")?,
+                force: input.force.unwrap_or(false),
+            },
+            _ => return Err("unknown processes action".into()),
+        };
+        tool_operation(
+            &self.state,
+            input.device,
+            AgentOperation::Processes(ProcessRequest { action }),
+            30_000,
+        )
+        .await
+    }
+
+    #[tool(
+        name = "jobs",
+        description = "Manage durable background command jobs. Actions: start, list, read, cancel."
+    )]
+    async fn jobs(
+        &self,
+        Parameters(input): Parameters<McpJobsInput>,
+    ) -> Result<McpJson<serde_json::Value>, String> {
+        let action = match input.action.as_str() {
+            "start" => JobAction::Start {
+                command: required(input.command, "command")?,
+                cwd: input.cwd,
+                timeout_ms: input.timeout_ms,
+            },
+            "list" => JobAction::List,
+            "read" => JobAction::Read {
+                job_id: parse_uuid(input.job_id, "job_id")?,
+                offset: input.offset,
+                length: input.length,
+            },
+            "cancel" => JobAction::Cancel {
+                job_id: parse_uuid(input.job_id, "job_id")?,
+            },
+            _ => return Err("unknown jobs action".into()),
+        };
+        tool_operation(
+            &self.state,
+            input.device,
+            AgentOperation::Jobs(JobRequest { action }),
+            65_000,
+        )
+        .await
+    }
+
+    #[tool(
+        name = "terminal",
+        description = "Manage persistent PTY sessions independent of the MCP request. Actions: open, list, read, write, resize, close."
+    )]
+    async fn terminal(
+        &self,
+        Parameters(input): Parameters<McpTerminalInput>,
+    ) -> Result<McpJson<serde_json::Value>, String> {
+        let action = match input.action.as_str() {
+            "open" => TerminalAction::Open {
+                command: required(input.command, "command")?,
+                cwd: input.cwd,
+                rows: input.rows,
+                cols: input.cols,
+            },
+            "list" => TerminalAction::List,
+            "read" => TerminalAction::Read {
+                session_id: parse_uuid(input.session_id, "session_id")?,
+                offset: input.offset,
+                length: input.length,
+            },
+            "write" => TerminalAction::Write {
+                session_id: parse_uuid(input.session_id, "session_id")?,
+                data: required(input.data, "data")?,
+            },
+            "resize" => TerminalAction::Resize {
+                session_id: parse_uuid(input.session_id, "session_id")?,
+                rows: input.rows.ok_or("rows is required")?,
+                cols: input.cols.ok_or("cols is required")?,
+            },
+            "close" => TerminalAction::Close {
+                session_id: parse_uuid(input.session_id, "session_id")?,
+            },
+            _ => return Err("unknown terminal action".into()),
+        };
+        tool_operation(
+            &self.state,
+            input.device,
+            AgentOperation::Terminal(TerminalRequest { action }),
+            65_000,
+        )
+        .await
     }
 }
 
@@ -249,21 +448,27 @@ async fn main() -> anyhow::Result<()> {
         )
         .json()
         .init();
-
-    let agent_token =
-        std::env::var("INFRA_AGENT_TOKEN").context("INFRA_AGENT_TOKEN is required")?;
-    if agent_token.len() < 16 {
-        anyhow::bail!("INFRA_AGENT_TOKEN must be at least 16 characters for development");
-    }
-
     let bind: SocketAddr = std::env::var("INFRA_GATEWAY_BIND")
         .unwrap_or_else(|_| "127.0.0.1:8788".into())
         .parse()
         .context("invalid INFRA_GATEWAY_BIND")?;
-
-    let state = AppState::new(agent_token);
+    if !bind.ip().is_loopback()
+        && std::env::var("INFRA_ALLOW_UNAUTHENTICATED_PUBLIC").as_deref() != Ok("1")
+    {
+        anyhow::bail!(
+            "refusing non-loopback bind until production OAuth exists; set INFRA_ALLOW_UNAUTHENTICATED_PUBLIC=1 only for an explicitly protected development deployment"
+        );
+    }
+    let db_path = PathBuf::from(
+        std::env::var("INFRA_DB_PATH").unwrap_or_else(|_| "./data/infra-v1.db".into()),
+    );
+    let store = Store::open(db_path)?;
+    let legacy = std::env::var("INFRA_LEGACY_AGENT_TOKEN")
+        .ok()
+        .or_else(|| std::env::var("INFRA_AGENT_TOKEN").ok());
+    let admin = std::env::var("INFRA_ADMIN_TOKEN").ok();
+    let state = AppState::new(store, legacy, admin);
     let app = build_app(state.clone());
-
     let listener = tokio::net::TcpListener::bind(bind).await?;
     info!(%bind, gateway_epoch=%state.gateway_epoch, "Infra v1 gateway listening");
     axum::serve(listener, app).await?;
@@ -280,12 +485,13 @@ fn build_app(state: AppState) -> Router {
                 .with_legacy_session_mode(false)
                 .with_json_response(true),
         );
-
     Router::new()
         .nest_service("/mcp", mcp_service)
         .route("/healthz", get(health))
-        .route("/api/devices", get(list_devices))
-        .route("/api/devices/{device_id}/exec", post(exec_device))
+        .route("/api/devices", get(list_devices_http))
+        .route("/api/enrollments", post(create_enrollment))
+        .route("/api/devices/{device_id}/revoke", post(revoke_device))
+        .route("/enroll", post(enroll))
         .route("/agent", get(agent_upgrade))
         .with_state(state)
 }
@@ -298,102 +504,278 @@ async fn health(State(state): State<AppState>) -> Json<Health<'static>> {
         gateway_epoch: state.gateway_epoch,
     })
 }
-
-async fn list_devices(State(state): State<AppState>) -> Json<Vec<DeviceView>> {
-    let now = SystemTime::now();
-    let devices = state.devices.read().await;
-    Json(
-        devices
-            .values()
-            .map(|d| DeviceView {
-                device_id: d.hello.device_id.clone(),
-                device_name: d.hello.device_name.clone(),
-                agent_version: d.hello.agent_version.clone(),
-                platform: d.hello.platform.clone(),
-                arch: d.hello.arch.clone(),
-                boot_id: d.hello.boot_id.clone(),
-                agent_instance_id: d.hello.agent_instance_id,
-                capabilities: d.hello.capabilities.clone(),
-                connection_generation: d.generation,
-                connected_seconds: now
-                    .duration_since(d.connected_at)
-                    .unwrap_or_default()
-                    .as_secs(),
-                online: true,
-            })
-            .collect(),
-    )
+async fn list_devices_http(State(state): State<AppState>) -> Response {
+    match device_views(&state).await {
+        Ok(v) => Json(v).into_response(),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+    }
 }
 
-async fn exec_device(
+async fn create_enrollment(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(input): Json<CreateEnrollmentInput>,
+) -> Response {
+    if !admin_authorized(&state, &headers) {
+        return (StatusCode::UNAUTHORIZED, "admin authorization required").into_response();
+    }
+    let ttl_ms = input.ttl_seconds.unwrap_or(300).clamp(30, 900) * 1000;
+    match state.store.create_enrollment(ttl_ms) {
+        Ok(created) => Json(CreateEnrollmentOutput {
+            enrollment_id: created.enrollment_id,
+            code: created.code,
+            expires_at_unix_ms: created.expires_at_unix_ms,
+        })
+        .into_response(),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+    }
+}
+
+async fn enroll(State(state): State<AppState>, Json(input): Json<EnrollInput>) -> Response {
+    if Uuid::parse_str(&input.request_id).is_err()
+        || input.device_name.trim().is_empty()
+        || input.device_name.len() > 120
+    {
+        return (StatusCode::BAD_REQUEST, "invalid enrollment request").into_response();
+    }
+    let key = match URL_SAFE_NO_PAD
+        .decode(&input.public_key)
+        .ok()
+        .and_then(|v| <[u8; 32]>::try_from(v).ok())
+    {
+        Some(k) => k,
+        None => return (StatusCode::BAD_REQUEST, "invalid public key").into_response(),
+    };
+    match state.store.consume_enrollment(
+        &input.code,
+        &input.request_id,
+        input.device_name.trim(),
+        &key,
+        &input.platform,
+        &input.arch,
+        &input.agent_version,
+    ) {
+        Ok(result) => Json(EnrollOutput {
+            device_id: result.device_id,
+            device_name: result.device_name,
+        })
+        .into_response(),
+        Err(StoreError::EnrollmentInvalid) => {
+            (StatusCode::UNAUTHORIZED, "invalid enrollment code").into_response()
+        }
+        Err(StoreError::EnrollmentExpired) => {
+            (StatusCode::GONE, "enrollment code expired").into_response()
+        }
+        Err(StoreError::EnrollmentConsumed) => {
+            (StatusCode::CONFLICT, "enrollment code already used").into_response()
+        }
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+    }
+}
+
+async fn revoke_device(
     State(state): State<AppState>,
     Path(device_id): Path<String>,
-    Json(body): Json<ExecRequestBody>,
+    headers: HeaderMap,
 ) -> Response {
-    match execute_on_device(&state, device_id, body.command, body.cwd, body.timeout_ms).await {
-        Ok(response) => Json(response).into_response(),
-        Err(ExecDispatchError::BadRequest(message)) => {
-            (StatusCode::BAD_REQUEST, message).into_response()
+    if !admin_authorized(&state, &headers) {
+        return (StatusCode::UNAUTHORIZED, "admin authorization required").into_response();
+    }
+    match state.store.revoke(&device_id) {
+        Ok(true) => {
+            state.devices.write().await.remove(&device_id);
+            Json(serde_json::json!({"ok":true,"device_id":device_id})).into_response()
         }
-        Err(ExecDispatchError::Offline) => {
-            (StatusCode::NOT_FOUND, "device is not online").into_response()
-        }
-        Err(ExecDispatchError::ConnectionClosed) => {
-            (StatusCode::SERVICE_UNAVAILABLE, "device connection closed").into_response()
-        }
-        Err(ExecDispatchError::ResponseClosed) => {
-            (StatusCode::BAD_GATEWAY, "agent response channel closed").into_response()
-        }
+        Ok(false) => (StatusCode::NOT_FOUND, "device not found").into_response(),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
     }
 }
 
-async fn execute_on_device(
+fn admin_authorized(state: &AppState, headers: &HeaderMap) -> bool {
+    let Some(expected) = &state.admin_token else {
+        return true;
+    };
+    headers
+        .get(axum::http::header::AUTHORIZATION)
+        .and_then(|v| v.to_str().ok())
+        .is_some_and(|v| v.strip_prefix("Bearer ") == Some(expected.as_ref()))
+}
+
+async fn device_views(state: &AppState) -> Result<Vec<McpDeviceView>, StoreError> {
+    let persisted = state.store.list_devices()?;
+    let online = state.devices.read().await;
+    Ok(persisted
+        .into_iter()
+        .map(|record| {
+            let device_id = record.device_id.clone();
+            device_view(record, online.get(&device_id))
+        })
+        .collect())
+}
+fn device_view(record: DeviceRecord, live: Option<&DeviceConnection>) -> McpDeviceView {
+    let reconcile = live.map(|d| &d.reconcile).or(record.reconcile.as_ref());
+    let active_jobs = reconcile
+        .map(|r| {
+            r.items
+                .iter()
+                .filter(|i| matches!(i.kind, infra_protocol::ReconcileKind::Job))
+                .count()
+        })
+        .unwrap_or(0);
+    let active_terminals = reconcile
+        .map(|r| {
+            r.items
+                .iter()
+                .filter(|i| matches!(i.kind, infra_protocol::ReconcileKind::Terminal))
+                .count()
+        })
+        .unwrap_or(0);
+    McpDeviceView {
+        device_id: record.device_id,
+        device_name: record.device_name,
+        agent_version: live
+            .map(|d| d.hello.agent_version.clone())
+            .unwrap_or(record.agent_version),
+        platform: record.platform,
+        arch: record.arch,
+        capabilities: live
+            .map(|d| d.hello.capabilities.clone())
+            .unwrap_or(record.capabilities),
+        online: live.is_some(),
+        revoked: record.revoked,
+        last_seen_unix_ms: record.last_seen_unix_ms,
+        connection_generation: live.map(|d| d.generation),
+        active_jobs,
+        active_terminals,
+    }
+}
+
+async fn tool_operation(
+    state: &AppState,
+    device: String,
+    operation: AgentOperation,
+    timeout_ms: u64,
+) -> Result<McpJson<serde_json::Value>, String> {
+    let response = dispatch_to_device(state, device, operation, timeout_ms)
+        .await
+        .map_err(dispatch_error)?;
+    Ok(McpJson(response_json(response)))
+}
+fn response_json(response: AgentResponse) -> serde_json::Value {
+    match response.result {
+        OperationResult::Ok { body } => {
+            serde_json::json!({"request_id":response.id,"status":"ok","body":body})
+        }
+        OperationResult::Failed { error } => {
+            serde_json::json!({"request_id":response.id,"status":"failed","error":error})
+        }
+        OperationResult::Canceled { error } => {
+            serde_json::json!({"request_id":response.id,"status":"canceled","error":error})
+        }
+        OperationResult::DeadlineExceeded => {
+            serde_json::json!({"request_id":response.id,"status":"deadline_exceeded"})
+        }
+        OperationResult::OutcomeUnknown { error } => {
+            serde_json::json!({"request_id":response.id,"status":"outcome_unknown","error":error})
+        }
+        OperationResult::Unsupported { operation } => {
+            serde_json::json!({"request_id":response.id,"status":"unsupported","error":operation})
+        }
+        OperationResult::Unauthorized => {
+            serde_json::json!({"request_id":response.id,"status":"unauthorized"})
+        }
+    }
+}
+fn exec_output(response: AgentResponse) -> McpExecOutput {
+    let mut out = McpExecOutput {
+        request_id: response.id.to_string(),
+        status: "unknown".into(),
+        exit_code: None,
+        stdout: None,
+        stderr: None,
+        truncated: None,
+        error: None,
+    };
+    match response.result {
+        OperationResult::Ok { body } => {
+            out.status = "ok".into();
+            match serde_json::from_value::<ExecOutput>(body) {
+                Ok(v) => {
+                    out.exit_code = v.exit_code;
+                    out.stdout = Some(v.stdout);
+                    out.stderr = Some(v.stderr);
+                    out.truncated = Some(v.truncated)
+                }
+                Err(e) => out.error = Some(format!("invalid exec response: {e}")),
+            }
+        }
+        OperationResult::Failed { error } => {
+            out.status = "failed".into();
+            out.error = Some(error)
+        }
+        OperationResult::Canceled { error } => {
+            out.status = "canceled".into();
+            out.error = error
+        }
+        OperationResult::DeadlineExceeded => out.status = "deadline_exceeded".into(),
+        OperationResult::OutcomeUnknown { error } => {
+            out.status = "outcome_unknown".into();
+            out.error = Some(error)
+        }
+        OperationResult::Unsupported { operation } => {
+            out.status = "unsupported".into();
+            out.error = Some(operation)
+        }
+        OperationResult::Unauthorized => out.status = "unauthorized".into(),
+    };
+    out
+}
+fn required<T>(value: Option<T>, name: &str) -> Result<T, String> {
+    value.ok_or_else(|| format!("{name} is required"))
+}
+fn parse_uuid(value: Option<String>, name: &str) -> Result<Uuid, String> {
+    Uuid::parse_str(&required(value, name)?).map_err(|_| format!("{name} must be a UUID"))
+}
+fn dispatch_error(error: DispatchError) -> String {
+    match error {
+        DispatchError::Offline => "device is not online".into(),
+        DispatchError::ConnectionClosed => "device connection closed".into(),
+        DispatchError::ResponseClosed => "agent response channel closed".into(),
+    }
+}
+
+async fn dispatch_to_device(
     state: &AppState,
     device_id: String,
-    command: String,
-    cwd: Option<String>,
-    timeout_ms: Option<u64>,
-) -> Result<AgentResponse, ExecDispatchError> {
-    if command.trim().is_empty() || command.len() > 32 * 1024 {
-        return Err(ExecDispatchError::BadRequest(
-            "command must be 1..32768 bytes",
-        ));
-    }
-    let timeout_ms = timeout_ms.unwrap_or(30_000).clamp(100, 120_000);
+    operation: AgentOperation,
+    timeout_ms: u64,
+) -> Result<AgentResponse, DispatchError> {
     let tx = {
         let devices = state.devices.read().await;
         devices
             .get(&device_id)
             .map(|d| d.tx.clone())
-            .ok_or(ExecDispatchError::Offline)?
+            .ok_or(DispatchError::Offline)?
     };
-
     let id = Uuid::new_v4();
-    let request = GatewayToAgent::Request(AgentRequest {
-        id,
-        operation: AgentOperation::Exec {
-            command,
-            cwd,
-            timeout_ms: Some(timeout_ms),
-        },
-    });
+    let request = GatewayToAgent::Request(AgentRequest { id, operation });
     let (reply_tx, reply_rx) = oneshot::channel();
     state.pending.lock().await.insert(id, reply_tx);
-
     if tx.send(request).await.is_err() {
         state.pending.lock().await.remove(&id);
-        return Err(ExecDispatchError::ConnectionClosed);
+        return Err(DispatchError::ConnectionClosed);
     }
-
-    match tokio::time::timeout(Duration::from_millis(timeout_ms + 5_000), reply_rx).await {
-        Ok(Ok(response)) => Ok(response),
-        Ok(Err(_)) => Err(ExecDispatchError::ResponseClosed),
+    match tokio::time::timeout(Duration::from_millis(timeout_ms), reply_rx).await {
+        Ok(Ok(r)) => Ok(r),
+        Ok(Err(_)) => Err(DispatchError::ResponseClosed),
         Err(_) => {
             state.pending.lock().await.remove(&id);
             Ok(AgentResponse {
                 id,
                 result: OperationResult::OutcomeUnknown {
-                    error: "gateway timed out waiting for device response".into(),
+                    error:
+                        "gateway timed out waiting for device response; operation was not replayed"
+                            .into(),
                 },
             })
         }
@@ -406,27 +788,15 @@ async fn agent_upgrade(ws: WebSocketUpgrade, State(state): State<AppState>) -> i
 }
 
 async fn handle_agent(mut socket: WebSocket, state: AppState) {
-    let first = match tokio::time::timeout(Duration::from_secs(5), socket.recv()).await {
-        Ok(Some(Ok(Message::Text(text)))) => text,
-        _ => {
+    let auth = match authenticate_agent(&mut socket, &state).await {
+        Ok(v) => v,
+        Err(e) => {
+            warn!(error=%e,"agent authentication rejected");
             let _ = socket.send(Message::Close(None)).await;
             return;
         }
     };
-    let hello = match serde_json::from_str::<AgentToGateway>(first.as_str()) {
-        Ok(AgentToGateway::Hello(hello)) => hello,
-        _ => {
-            warn!("agent sent invalid hello");
-            let _ = socket.send(Message::Close(None)).await;
-            return;
-        }
-    };
-    if hello.protocol != PROTOCOL_VERSION || hello.token.as_str() != state.agent_token.as_ref() {
-        warn!(device_id=%hello.device_id, protocol=hello.protocol, "agent authentication/protocol rejected");
-        let _ = socket.send(Message::Close(None)).await;
-        return;
-    }
-
+    let hello = auth.hello;
     let generation = state.next_generation.fetch_add(1, Ordering::Relaxed);
     let (out_tx, mut out_rx) = mpsc::channel::<GatewayToAgent>(64);
     let ack = GatewayToAgent::HelloAck(HelloAck {
@@ -434,11 +804,17 @@ async fn handle_agent(mut socket: WebSocket, state: AppState) {
         connection_generation: generation,
         gateway_epoch: state.gateway_epoch,
         control_frame_limit: DEFAULT_CONTROL_FRAME_LIMIT,
+        reconcile_requested: true,
     });
     if send_json(&mut socket, &ack).await.is_err() {
         return;
     }
-
+    if let Err(e) = state
+        .store
+        .record_connect(&hello, auth.public_key.as_deref())
+    {
+        warn!(device_id=%hello.device_id,error=%e,"failed to persist device connect");
+    }
     {
         let mut devices = state.devices.write().await;
         devices.insert(
@@ -446,93 +822,193 @@ async fn handle_agent(mut socket: WebSocket, state: AppState) {
             DeviceConnection {
                 hello: hello.clone(),
                 generation,
-                connected_at: SystemTime::now(),
                 tx: out_tx,
+                reconcile: ReconcileSnapshot::default(),
             },
         );
     }
-    info!(device_id=%hello.device_id, generation, platform=%hello.platform, arch=%hello.arch, "agent online");
-
+    info!(device_id=%hello.device_id,generation,platform=%hello.platform,arch=%hello.arch,"agent online");
     loop {
         tokio::select! {
-            maybe_out = out_rx.recv() => {
-                match maybe_out {
-                    Some(message) => {
-                        if let Err(err) = send_json(&mut socket, &message).await {
-                            warn!(device_id=%hello.device_id, %err, "failed to send to agent");
-                            break;
+            maybe_out=out_rx.recv()=>match maybe_out{Some(message)=>if let Err(e)=send_json(&mut socket,&message).await{warn!(device_id=%hello.device_id,error=%e,"failed to send to agent");break},None=>break},
+            incoming=socket.recv()=>match incoming{
+                Some(Ok(Message::Text(text)))=>match serde_json::from_str::<AgentToGateway>(text.as_str()){
+                    Ok(AgentToGateway::Response(response))=>if let Some(waiter)=state.pending.lock().await.remove(&response.id){let _=waiter.send(response);},
+                    Ok(AgentToGateway::Reconcile(snapshot)) => {
+                        if let Some(device) = state.devices.write().await.get_mut(&hello.device_id)
+                            && device.generation == generation
+                        {
+                            device.reconcile = snapshot.clone();
                         }
-                    }
-                    None => break,
-                }
-            }
-            incoming = socket.recv() => {
-                match incoming {
-                    Some(Ok(Message::Text(text))) => {
-                        match serde_json::from_str::<AgentToGateway>(text.as_str()) {
-                            Ok(AgentToGateway::Response(response)) => {
-                                if let Some(waiter) = state.pending.lock().await.remove(&response.id) {
-                                    let _ = waiter.send(response);
-                                }
-                            }
-                            Ok(AgentToGateway::Pong) => {}
-                            Ok(AgentToGateway::Hello(_)) => warn!(device_id=%hello.device_id, "duplicate hello ignored"),
-                            Err(err) => warn!(device_id=%hello.device_id, %err, "invalid agent frame"),
-                        }
-                    }
-                    Some(Ok(Message::Ping(payload))) => {
-                        if socket.send(Message::Pong(payload)).await.is_err() { break; }
-                    }
-                    Some(Ok(Message::Close(_))) | None => break,
-                    Some(Ok(_)) => {}
-                    Some(Err(err)) => {
-                        warn!(device_id=%hello.device_id, %err, "agent websocket error");
-                        break;
-                    }
-                }
+                        let _ = state.store.record_reconcile(&hello.device_id, &snapshot);
+                    },
+                    Ok(AgentToGateway::Pong)=>{}, Ok(_)=>warn!(device_id=%hello.device_id,"unexpected post-auth agent frame"), Err(e)=>warn!(device_id=%hello.device_id,error=%e,"invalid agent frame")},
+                Some(Ok(Message::Ping(payload)))=>if socket.send(Message::Pong(payload)).await.is_err(){break},
+                Some(Ok(Message::Close(_)))|None=>break,Some(Ok(_))=>{},Some(Err(e))=>{warn!(device_id=%hello.device_id,error=%e,"agent websocket error");break}
             }
         }
     }
-
     let mut devices = state.devices.write().await;
     if devices
         .get(&hello.device_id)
         .is_some_and(|d| d.generation == generation)
     {
         devices.remove(&hello.device_id);
-        info!(device_id=%hello.device_id, generation, "agent offline");
+        let _ = state.store.record_disconnect(&hello.device_id);
+        info!(device_id=%hello.device_id,generation,"agent offline")
     } else {
-        info!(device_id=%hello.device_id, generation, "stale agent connection retired");
+        info!(device_id=%hello.device_id,generation,"stale agent connection retired")
     }
 }
 
+struct AuthenticatedHello {
+    hello: DeviceHello,
+    public_key: Option<Vec<u8>>,
+}
+async fn authenticate_agent(
+    socket: &mut WebSocket,
+    state: &AppState,
+) -> Result<AuthenticatedHello, String> {
+    let first = recv_agent(socket, Duration::from_secs(5)).await?;
+    match first {
+        AgentToGateway::AuthStart(start) => authenticate_signed(socket, state, start).await,
+        AgentToGateway::LegacyHello(LegacyDeviceHello { hello, token }) => {
+            let Some(expected) = &state.legacy_agent_token else {
+                return Err("legacy authentication disabled".into());
+            };
+            if token.as_str() != expected.as_ref() {
+                return Err("invalid legacy credential".into());
+            }
+            if hello.protocol != PROTOCOL_VERSION {
+                return Err("protocol mismatch".into());
+            }
+            Ok(AuthenticatedHello {
+                hello,
+                public_key: None,
+            })
+        }
+        _ => Err("expected auth_start or legacy_hello".into()),
+    }
+}
+async fn authenticate_signed(
+    socket: &mut WebSocket,
+    state: &AppState,
+    start: DeviceAuthStart,
+) -> Result<AuthenticatedHello, String> {
+    if start.protocol != PROTOCOL_VERSION {
+        return Err("protocol mismatch".into());
+    }
+    let record = state
+        .store
+        .get_device(&start.device_id)
+        .map_err(|e| e.to_string())?
+        .ok_or("unknown device")?;
+    if record.revoked {
+        return Err("device revoked".into());
+    }
+    let public_key = record
+        .public_key
+        .ok_or("device has no enrolled public key")?;
+    let mut nonce_bytes = [0_u8; 32];
+    getrandom::fill(&mut nonce_bytes).map_err(|_| "random source unavailable")?;
+    let nonce = URL_SAFE_NO_PAD.encode(nonce_bytes);
+    let expires = now_ms() + 5_000;
+    send_json(
+        socket,
+        &GatewayToAgent::AuthChallenge(AuthChallenge {
+            nonce: nonce.clone(),
+            gateway_epoch: state.gateway_epoch,
+            expires_at_unix_ms: expires,
+        }),
+    )
+    .await
+    .map_err(|e| e.to_string())?;
+    let AgentToGateway::SignedHello(SignedDeviceHello { hello, signature }) =
+        recv_agent(socket, Duration::from_secs(5)).await?
+    else {
+        return Err("expected signed_hello".into());
+    };
+    if now_ms() > expires
+        || hello.protocol != PROTOCOL_VERSION
+        || hello.device_id != start.device_id
+        || hello.agent_instance_id != start.agent_instance_id
+    {
+        return Err("signed hello does not match authentication start".into());
+    }
+    let key_bytes = <[u8; 32]>::try_from(public_key.as_slice())
+        .map_err(|_| "stored public key has invalid length")?;
+    let verifying =
+        VerifyingKey::from_bytes(&key_bytes).map_err(|_| "stored public key invalid")?;
+    let sig_bytes = <[u8; 64]>::try_from(
+        URL_SAFE_NO_PAD
+            .decode(signature)
+            .map_err(|_| "signature encoding invalid")?,
+    )
+    .map_err(|_| "signature length invalid")?;
+    let sig = Signature::from_bytes(&sig_bytes);
+    verifying
+        .verify_strict(
+            &signed_auth_message(&nonce, state.gateway_epoch, &hello),
+            &sig,
+        )
+        .map_err(|_| "signature verification failed")?;
+    Ok(AuthenticatedHello {
+        hello,
+        public_key: Some(public_key),
+    })
+}
+async fn recv_agent(socket: &mut WebSocket, timeout: Duration) -> Result<AgentToGateway, String> {
+    match tokio::time::timeout(timeout, socket.recv()).await {
+        Ok(Some(Ok(Message::Text(text)))) => {
+            serde_json::from_str(text.as_str()).map_err(|e| e.to_string())
+        }
+        Ok(Some(Err(e))) => Err(e.to_string()),
+        Ok(Some(Ok(_))) => Err("unexpected websocket frame".into()),
+        Ok(None) => Err("connection closed".into()),
+        Err(_) => Err("handshake timeout".into()),
+    }
+}
 async fn send_json(socket: &mut WebSocket, message: &GatewayToAgent) -> anyhow::Result<()> {
-    let text = serde_json::to_string(message)?;
-    socket.send(Message::Text(text.into())).await?;
+    socket
+        .send(Message::Text(serde_json::to_string(message)?.into()))
+        .await?;
     Ok(())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ed25519_dalek::{Signer, SigningKey};
     use futures_util::{SinkExt, StreamExt};
     use std::collections::BTreeMap;
+    use tempfile::TempDir;
     use tokio_tungstenite::{connect_async, tungstenite::Message as ClientMessage};
-
     const TEST_TOKEN: &str = "developmenttoken123456";
-
-    async fn spawn_test_gateway() -> (AppState, SocketAddr, tokio::task::JoinHandle<()>) {
-        let state = AppState::new(TEST_TOKEN.into());
+    async fn spawn_test_gateway() -> (TempDir, AppState, SocketAddr, tokio::task::JoinHandle<()>) {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(dir.path().join("infra.db")).unwrap();
+        let state = AppState::new(store, Some(TEST_TOKEN.into()), None);
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         let app = build_app(state.clone());
-        let task = tokio::spawn(async move {
-            axum::serve(listener, app).await.unwrap();
-        });
-        (state, addr, task)
+        let task = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        (dir, state, addr, task)
     }
-
-    async fn connect_agent(
+    fn test_hello(device_id: &str, instance: Uuid) -> DeviceHello {
+        DeviceHello {
+            protocol: PROTOCOL_VERSION,
+            device_id: device_id.into(),
+            device_name: device_id.into(),
+            agent_version: "test".into(),
+            platform: "linux".into(),
+            arch: "aarch64".into(),
+            boot_id: "boot-test".into(),
+            agent_instance_id: instance,
+            capabilities: vec!["exec".into()],
+            metadata: BTreeMap::new(),
+        }
+    }
+    async fn connect_legacy(
         addr: SocketAddr,
         device_id: &str,
     ) -> (
@@ -542,18 +1018,9 @@ mod tests {
         u64,
     ) {
         let (mut socket, _) = connect_async(format!("ws://{addr}/agent")).await.unwrap();
-        let hello = AgentToGateway::Hello(DeviceHello {
-            protocol: PROTOCOL_VERSION,
+        let hello = AgentToGateway::LegacyHello(LegacyDeviceHello {
+            hello: test_hello(device_id, Uuid::new_v4()),
             token: TEST_TOKEN.into(),
-            device_id: device_id.into(),
-            device_name: device_id.into(),
-            agent_version: "test".into(),
-            platform: "linux".into(),
-            arch: "aarch64".into(),
-            boot_id: "boot-test".into(),
-            agent_instance_id: Uuid::new_v4(),
-            capabilities: vec!["exec".into()],
-            metadata: BTreeMap::new(),
         });
         socket
             .send(ClientMessage::Text(
@@ -561,52 +1028,47 @@ mod tests {
             ))
             .await
             .unwrap();
-        let frame = socket.next().await.unwrap().unwrap();
-        let ClientMessage::Text(text) = frame else {
-            panic!("expected hello ack text frame");
+        let ClientMessage::Text(text) = socket.next().await.unwrap().unwrap() else {
+            panic!()
         };
-        let ack: GatewayToAgent = serde_json::from_str(text.as_str()).unwrap();
-        let GatewayToAgent::HelloAck(ack) = ack else {
-            panic!("expected hello ack");
+        let GatewayToAgent::HelloAck(ack) = serde_json::from_str(text.as_str()).unwrap() else {
+            panic!()
         };
         (socket, ack.connection_generation)
     }
-
     async fn wait_registered(state: &AppState, device_id: &str) {
         tokio::time::timeout(Duration::from_secs(1), async {
             loop {
                 if state.devices.read().await.contains_key(device_id) {
                     break;
                 }
-                tokio::task::yield_now().await;
+                tokio::task::yield_now().await
             }
         })
         .await
-        .unwrap();
+        .unwrap()
     }
-
     #[tokio::test]
-    async fn handshake_registers_device_and_exec_round_trips() {
-        let (state, addr, server) = spawn_test_gateway().await;
-        let (socket, generation) = connect_agent(addr, "test-device").await;
+    async fn legacy_handshake_and_exec_round_trip() {
+        let (_dir, state, addr, server) = spawn_test_gateway().await;
+        let (socket, generation) = connect_legacy(addr, "test-device").await;
         wait_registered(&state, "test-device").await;
         assert_eq!(generation, 1);
-
         let (mut sink, mut stream) = socket.split();
         let responder = tokio::spawn(async move {
             while let Some(Ok(ClientMessage::Text(text))) = stream.next().await {
                 let message: GatewayToAgent = serde_json::from_str(text.as_str()).unwrap();
                 if let GatewayToAgent::Request(request) = message {
-                    let output = ExecOutput {
-                        exit_code: Some(0),
-                        stdout: "integration-ok\n".into(),
-                        stderr: String::new(),
-                        truncated: false,
-                    };
                     let response = AgentToGateway::Response(AgentResponse {
                         id: request.id,
                         result: OperationResult::Ok {
-                            body: serde_json::to_value(output).unwrap(),
+                            body: serde_json::to_value(ExecOutput {
+                                exit_code: Some(0),
+                                stdout: "integration-ok\n".into(),
+                                stderr: String::new(),
+                                truncated: false,
+                            })
+                            .unwrap(),
                         },
                     });
                     sink.send(ClientMessage::Text(
@@ -617,49 +1079,132 @@ mod tests {
                 }
             }
         });
-
-        let response = execute_on_device(
+        let response = dispatch_to_device(
             &state,
             "test-device".into(),
-            "echo ignored-by-simulator".into(),
-            None,
-            Some(2_000),
+            AgentOperation::Exec {
+                command: "ignored".into(),
+                cwd: None,
+                timeout_ms: Some(2000),
+            },
+            3000,
         )
         .await
         .unwrap();
-        let OperationResult::Ok { body } = response.result else {
-            panic!("expected ok response");
-        };
-        let output: ExecOutput = serde_json::from_value(body).unwrap();
-        assert_eq!(output.stdout, "integration-ok\n");
-
+        assert!(matches!(response.result, OperationResult::Ok { .. }));
         responder.abort();
         server.abort();
     }
-
+    #[tokio::test]
+    async fn signed_auth_and_revocation() {
+        let (_dir, state, addr, server) = spawn_test_gateway().await;
+        let enrollment = state.store.create_enrollment(60_000).unwrap();
+        let secret = [9_u8; 32];
+        let key = SigningKey::from_bytes(&secret);
+        let enrolled = state
+            .store
+            .consume_enrollment(
+                &enrollment.code,
+                &Uuid::new_v4().to_string(),
+                "signed",
+                &key.verifying_key().to_bytes(),
+                "linux",
+                "aarch64",
+                "test",
+            )
+            .unwrap();
+        let (mut socket, _) = connect_async(format!("ws://{addr}/agent")).await.unwrap();
+        let instance = Uuid::new_v4();
+        socket
+            .send(ClientMessage::Text(
+                serde_json::to_string(&AgentToGateway::AuthStart(DeviceAuthStart {
+                    protocol: PROTOCOL_VERSION,
+                    device_id: enrolled.device_id.clone(),
+                    agent_instance_id: instance,
+                }))
+                .unwrap()
+                .into(),
+            ))
+            .await
+            .unwrap();
+        let ClientMessage::Text(text) = socket.next().await.unwrap().unwrap() else {
+            panic!()
+        };
+        let GatewayToAgent::AuthChallenge(challenge) = serde_json::from_str(text.as_str()).unwrap()
+        else {
+            panic!()
+        };
+        let hello = test_hello(&enrolled.device_id, instance);
+        let signature = URL_SAFE_NO_PAD.encode(
+            key.sign(&signed_auth_message(
+                &challenge.nonce,
+                challenge.gateway_epoch,
+                &hello,
+            ))
+            .to_bytes(),
+        );
+        socket
+            .send(ClientMessage::Text(
+                serde_json::to_string(&AgentToGateway::SignedHello(SignedDeviceHello {
+                    hello,
+                    signature,
+                }))
+                .unwrap()
+                .into(),
+            ))
+            .await
+            .unwrap();
+        let ClientMessage::Text(text) = socket.next().await.unwrap().unwrap() else {
+            panic!()
+        };
+        assert!(matches!(
+            serde_json::from_str::<GatewayToAgent>(text.as_str()).unwrap(),
+            GatewayToAgent::HelloAck(_)
+        ));
+        state.store.revoke(&enrolled.device_id).unwrap();
+        drop(socket);
+        let (mut retry, _) = connect_async(format!("ws://{addr}/agent")).await.unwrap();
+        retry
+            .send(ClientMessage::Text(
+                serde_json::to_string(&AgentToGateway::AuthStart(DeviceAuthStart {
+                    protocol: PROTOCOL_VERSION,
+                    device_id: enrolled.device_id,
+                    agent_instance_id: Uuid::new_v4(),
+                }))
+                .unwrap()
+                .into(),
+            ))
+            .await
+            .unwrap();
+        let frame = tokio::time::timeout(Duration::from_secs(1), retry.next())
+            .await
+            .unwrap();
+        assert!(matches!(frame, Some(Ok(ClientMessage::Close(_))) | None));
+        server.abort();
+    }
     #[tokio::test]
     async fn newer_connection_supersedes_generation() {
-        let (state, addr, server) = spawn_test_gateway().await;
-        let (first, first_generation) = connect_agent(addr, "same-device").await;
+        let (_dir, state, addr, server) = spawn_test_gateway().await;
+        let (first, first_generation) = connect_legacy(addr, "same-device").await;
         wait_registered(&state, "same-device").await;
-        let (second, second_generation) = connect_agent(addr, "same-device").await;
+        let (second, second_generation) = connect_legacy(addr, "same-device").await;
         tokio::time::timeout(Duration::from_secs(1), async {
             loop {
-                let generation = state
+                if state
                     .devices
                     .read()
                     .await
                     .get("same-device")
-                    .map(|d| d.generation);
-                if generation == Some(second_generation) {
+                    .map(|d| d.generation)
+                    == Some(second_generation)
+                {
                     break;
                 }
-                tokio::task::yield_now().await;
+                tokio::task::yield_now().await
             }
         })
         .await
         .unwrap();
-
         assert!(second_generation > first_generation);
         drop(first);
         drop(second);

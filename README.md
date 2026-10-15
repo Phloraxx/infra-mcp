@@ -4,7 +4,7 @@ Infra MCP is a personal multi-device control plane that lets ChatGPT operate aut
 
 The product goal is not to be a thin SSH wrapper or a clone of Desktop Commander. The goal is a smaller, faster, more reliable, AI-native remote-control system with persistent terminals, structured system operations, resumable file transfer, multi-device routing, strong auditing, and eventually semantic desktop automation.
 
-> **Current status:** design and migration phase for **Infra v1**. The existing TypeScript code in this repository is an older scaffold and should be treated as legacy/prototype reference. A separately deployed v0.3 prototype has already validated the ChatGPT → gateway → device-agent architecture with shell, files, process inspection, jobs, pairing, and automatic reconnect. The v1 implementation should be built cleanly rather than extending the Node agent indefinitely.
+> **Current status:** **Infra v1 is actively implemented in Rust alongside the working v0.3 deployment.** The Rust gateway/agent now cover signed device enrollment/authentication, persistent SQLite device state, MCP `devices`/`exec`/`files`/`processes`/`jobs`/`terminal`, durable job workers, real persistent PTYs, reconnect reconciliation, and an isolated end-to-end smoke test. The existing TypeScript code remains legacy/prototype reference and the live v0.3 runtime stays untouched until the benchmark/cutover criteria are met.
 
 ## Product principles
 
@@ -122,19 +122,11 @@ Supporting documents:
 - [`docs/DEPLOYMENT.md`](docs/DEPLOYMENT.md)
 - [`docs/DECISIONS.md`](docs/DECISIONS.md)
 
-## First implementation milestone
+## Implementation progress
 
-The first useful v1 milestone is deliberately smaller than the complete product:
+The foundation and first persistent-control layer are implemented. See [`docs/IMPLEMENTATION_STATUS.md`](docs/IMPLEMENTATION_STATUS.md) for the exact current state.
 
-- Rust workspace and protocol crate.
-- Rust gateway with MCP health/device listing.
-- Rust agent on Linux ARM64.
-- authenticated pairing/device identity.
-- `exec`, basic `files`, and `processes` parity.
-- persistent reconnect.
-- tests proving the v1 agent can run beside v0.3 without disrupting it.
-
-Only after this foundation works should implementation expand into PTY sessions, resumable binary transfer, structured system modules, privilege helpers, and desktop automation.
+For a safe local end-to-end check, `scripts/smoke-v1.sh` uses temporary gateway/device state and verifies enrollment, Ed25519 challenge authentication, MCP command execution, and identity-based reconnect. It does not deploy or modify the live v0.3 service.
 
 ## License
 

@@ -25,3 +25,5 @@ jobs:
       - run: cargo fmt --all -- --check
       - run: cargo clippy --workspace --all-targets -- -D warnings
       - run: cargo test --workspace
+      - if: matrix.os == 'ubuntu-latest'
+        run: ./scripts/smoke-v1.sh

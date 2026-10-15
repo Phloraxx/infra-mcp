@@ -1,0 +1,638 @@
+use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
+use infra_protocol::{
+    DEFAULT_READ_LIMIT, MAX_READ_LIMIT, OperationResult, ReconcileItem, ReconcileKind,
+    TerminalAction, TerminalRequest,
+};
+use portable_pty::{CommandBuilder, PtySize, native_pty_system};
+use serde::{Deserialize, Serialize};
+use std::{
+    fs,
+    io::{BufRead, BufReader, Read, Seek, SeekFrom, Write},
+    net::{TcpListener, TcpStream},
+    path::{Path, PathBuf},
+    process::{Command, Stdio},
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicBool, Ordering},
+    },
+    time::{Duration, SystemTime, UNIX_EPOCH},
+};
+use sysinfo::{Pid, System};
+use uuid::Uuid;
+
+const MAX_PTY_SPOOL: usize = 8 * 1024 * 1024;
+const RETAIN_PTY_SPOOL: usize = 4 * 1024 * 1024;
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct SessionMeta {
+    id: Uuid,
+    command: String,
+    cwd: Option<String>,
+    rows: u16,
+    cols: u16,
+    boot_id: String,
+    status: String,
+    started_at_unix_ms: u64,
+    finished_at_unix_ms: Option<u64>,
+    worker_pid: Option<u32>,
+    child_pid: Option<u32>,
+    control_port: Option<u16>,
+    control_token: String,
+    base_offset: u64,
+    output_truncated: bool,
+    exit_code: Option<u32>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(tag = "action", rename_all = "snake_case")]
+enum ControlRequest {
+    Write { token: String, data: String },
+    Resize { token: String, rows: u16, cols: u16 },
+    Close { token: String },
+    Status { token: String },
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct ControlResponse {
+    ok: bool,
+    error: Option<String>,
+}
+
+#[derive(Clone)]
+pub struct Terminals {
+    root: PathBuf,
+    boot_id: String,
+}
+
+impl Terminals {
+    pub fn new(state_dir: &Path, boot_id: String) -> anyhow::Result<Self> {
+        let root = state_dir.join("sessions");
+        fs::create_dir_all(&root)?;
+        Ok(Self { root, boot_id })
+    }
+
+    pub fn handle(&self, request: TerminalRequest) -> OperationResult {
+        match self.handle_inner(request.action) {
+            Ok(body) => OperationResult::Ok { body },
+            Err(error) => OperationResult::Failed { error },
+        }
+    }
+
+    fn handle_inner(&self, action: TerminalAction) -> Result<serde_json::Value, String> {
+        match action {
+            TerminalAction::Open {
+                command,
+                cwd,
+                rows,
+                cols,
+            } => self.open(command, cwd, rows.unwrap_or(24), cols.unwrap_or(80)),
+            TerminalAction::List => Ok(serde_json::json!({"sessions": self.list()?})),
+            TerminalAction::Read {
+                session_id,
+                offset,
+                length,
+            } => self.read(session_id, offset.unwrap_or(0), bounded_length(length)),
+            TerminalAction::Write { session_id, data } => {
+                self.control(session_id, |token| ControlRequest::Write { token, data })
+            }
+            TerminalAction::Resize {
+                session_id,
+                rows,
+                cols,
+            } => self.control(session_id, |token| ControlRequest::Resize {
+                token,
+                rows,
+                cols,
+            }),
+            TerminalAction::Close { session_id } => {
+                self.control(session_id, |token| ControlRequest::Close { token })
+            }
+        }
+    }
+
+    fn open(
+        &self,
+        command: String,
+        cwd: Option<String>,
+        rows: u16,
+        cols: u16,
+    ) -> Result<serde_json::Value, String> {
+        if command.trim().is_empty() || command.len() > 32 * 1024 {
+            return Err("command must be 1..32768 bytes".into());
+        }
+        let id = Uuid::new_v4();
+        let dir = self.root.join(id.to_string());
+        fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+        let mut random = [0_u8; 32];
+        getrandom::fill(&mut random).map_err(|_| "OS random source unavailable".to_string())?;
+        let mut meta = SessionMeta {
+            id,
+            command,
+            cwd,
+            rows: rows.clamp(1, 500),
+            cols: cols.clamp(1, 1000),
+            boot_id: self.boot_id.clone(),
+            status: "starting".into(),
+            started_at_unix_ms: now_ms(),
+            finished_at_unix_ms: None,
+            worker_pid: None,
+            child_pid: None,
+            control_port: None,
+            control_token: URL_SAFE_NO_PAD.encode(random),
+            base_offset: 0,
+            output_truncated: false,
+            exit_code: None,
+        };
+        write_meta(&dir, &meta).map_err(|e| e.to_string())?;
+        let exe = std::env::current_exe().map_err(|e| e.to_string())?;
+        let child = Command::new(exe)
+            .arg("--pty-worker")
+            .arg(&dir)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .map_err(|e| format!("start PTY worker: {e}"))?;
+        meta.worker_pid = Some(child.id());
+        write_meta(&dir, &meta).map_err(|e| e.to_string())?;
+        drop(child);
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while std::time::Instant::now() < deadline {
+            if let Ok(current) = read_meta(&dir) {
+                if current.status == "running" && current.control_port.is_some() {
+                    return Ok(serde_json::json!({"session": public_meta(&current)}));
+                }
+                if current.status == "failed" {
+                    return Err("PTY worker failed to start".into());
+                }
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        Err("PTY worker did not become ready".into())
+    }
+
+    fn list(&self) -> Result<Vec<serde_json::Value>, String> {
+        let mut sessions = Vec::new();
+        for entry in fs::read_dir(&self.root)
+            .map_err(|e| e.to_string())?
+            .flatten()
+        {
+            if !entry.path().is_dir() {
+                continue;
+            }
+            let Ok(mut meta) = read_meta(&entry.path()) else {
+                continue;
+            };
+            if matches!(meta.status.as_str(), "starting" | "running")
+                && (meta.boot_id != self.boot_id
+                    || meta.worker_pid.is_some_and(|pid| !process_alive(pid)))
+            {
+                meta.status = "interrupted".into();
+                meta.finished_at_unix_ms = Some(now_ms());
+                let _ = write_meta(&entry.path(), &meta);
+            }
+            sessions.push(public_meta(&meta));
+        }
+        sessions.sort_by_key(|value| {
+            std::cmp::Reverse(value["started_at_unix_ms"].as_u64().unwrap_or(0))
+        });
+        Ok(sessions)
+    }
+
+    fn read(
+        &self,
+        id: Uuid,
+        requested_offset: u64,
+        length: usize,
+    ) -> Result<serde_json::Value, String> {
+        let dir = self.root.join(id.to_string());
+        let meta = read_meta(&dir).map_err(|_| "terminal session not found".to_string())?;
+        let path = dir.join("output.log");
+        let mut file = match fs::File::open(path) {
+            Ok(file) => file,
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+                return Ok(
+                    serde_json::json!({"session": public_meta(&meta), "offset": meta.base_offset, "next_offset": meta.base_offset, "base_offset": meta.base_offset, "output": "", "has_more": false, "offset_expired": requested_offset < meta.base_offset}),
+                );
+            }
+            Err(err) => return Err(err.to_string()),
+        };
+        let local_size = file.metadata().map_err(|e| e.to_string())?.len();
+        let end_offset = meta.base_offset.saturating_add(local_size);
+        let global_start = requested_offset.max(meta.base_offset).min(end_offset);
+        let local_start = global_start.saturating_sub(meta.base_offset);
+        file.seek(SeekFrom::Start(local_start))
+            .map_err(|e| e.to_string())?;
+        let mut bytes = vec![0_u8; length.min((local_size - local_start) as usize)];
+        let count = file.read(&mut bytes).map_err(|e| e.to_string())?;
+        bytes.truncate(count);
+        let next = global_start + count as u64;
+        Ok(serde_json::json!({
+            "session": public_meta(&meta), "offset": global_start, "next_offset": next,
+            "base_offset": meta.base_offset, "end_offset": end_offset,
+            "output": String::from_utf8_lossy(&bytes), "has_more": next < end_offset,
+            "offset_expired": requested_offset < meta.base_offset,
+        }))
+    }
+
+    fn control<F>(&self, id: Uuid, build: F) -> Result<serde_json::Value, String>
+    where
+        F: FnOnce(String) -> ControlRequest,
+    {
+        let dir = self.root.join(id.to_string());
+        let meta = read_meta(&dir).map_err(|_| "terminal session not found".to_string())?;
+        if meta.boot_id != self.boot_id {
+            return Err("terminal belongs to a previous machine boot".into());
+        }
+        let port = meta
+            .control_port
+            .ok_or_else(|| "terminal control endpoint is not ready".to_string())?;
+        let mut stream = TcpStream::connect_timeout(
+            &format!("127.0.0.1:{port}")
+                .parse()
+                .map_err(|_| "invalid control address")?,
+            Duration::from_secs(2),
+        )
+        .map_err(|e| format!("connect terminal worker: {e}"))?;
+        stream.set_read_timeout(Some(Duration::from_secs(2))).ok();
+        let request = build(meta.control_token.clone());
+        serde_json::to_writer(&mut stream, &request).map_err(|e| e.to_string())?;
+        stream.write_all(b"\n").map_err(|e| e.to_string())?;
+        stream.flush().map_err(|e| e.to_string())?;
+        let mut line = String::new();
+        BufReader::new(stream)
+            .read_line(&mut line)
+            .map_err(|e| e.to_string())?;
+        let response: ControlResponse = serde_json::from_str(&line).map_err(|e| e.to_string())?;
+        if response.ok {
+            Ok(serde_json::json!({"ok": true, "session_id": id}))
+        } else {
+            Err(response
+                .error
+                .unwrap_or_else(|| "terminal worker rejected request".into()))
+        }
+    }
+
+    pub fn reconcile_items(&self) -> Vec<ReconcileItem> {
+        self.list()
+            .unwrap_or_default()
+            .into_iter()
+            .filter_map(|value| {
+                let status = value["status"].as_str()?.to_string();
+                if !matches!(status.as_str(), "starting" | "running") {
+                    return None;
+                }
+                Some(ReconcileItem {
+                    id: Uuid::parse_str(value["id"].as_str()?).ok()?,
+                    kind: ReconcileKind::Terminal,
+                    status,
+                    boot_id: value["boot_id"].as_str()?.to_string(),
+                    started_at_unix_ms: value["started_at_unix_ms"].as_u64()?,
+                })
+            })
+            .collect()
+    }
+}
+
+pub fn run_worker(dir: &Path) -> anyhow::Result<()> {
+    let mut meta = read_meta(dir)?;
+    meta.worker_pid = Some(std::process::id());
+    let pty = native_pty_system();
+    let pair = pty.openpty(PtySize {
+        rows: meta.rows,
+        cols: meta.cols,
+        pixel_width: 0,
+        pixel_height: 0,
+    })?;
+    #[cfg(windows)]
+    let mut command = {
+        let mut c = CommandBuilder::new("cmd.exe");
+        c.args(["/D", "/S", "/C", &meta.command]);
+        c
+    };
+    #[cfg(not(windows))]
+    let mut command = {
+        let mut c = CommandBuilder::new("/bin/sh");
+        c.args(["-lc", &meta.command]);
+        c
+    };
+    if let Some(cwd) = &meta.cwd {
+        command.cwd(cwd);
+    }
+    let mut child = pair.slave.spawn_command(command)?;
+    drop(pair.slave);
+    meta.child_pid = child.process_id();
+    let reader = pair.master.try_clone_reader()?;
+    let writer = Arc::new(Mutex::new(pair.master.take_writer()?));
+    let master = Arc::new(Mutex::new(pair.master));
+    let killer = Arc::new(Mutex::new(child.clone_killer()));
+    let listener = TcpListener::bind("127.0.0.1:0")?;
+    listener.set_nonblocking(true)?;
+    meta.control_port = Some(listener.local_addr()?.port());
+    meta.status = "running".into();
+    write_meta(dir, &meta)?;
+
+    let alive = Arc::new(AtomicBool::new(true));
+    let close_requested = Arc::new(AtomicBool::new(false));
+    let control_alive = alive.clone();
+    let control_close = close_requested.clone();
+    let token = meta.control_token.clone();
+    let control_writer = writer.clone();
+    let control_master = master.clone();
+    let control_killer = killer.clone();
+    let control_thread = std::thread::spawn(move || {
+        while control_alive.load(Ordering::Relaxed) {
+            match listener.accept() {
+                Ok((stream, _)) => handle_control(
+                    stream,
+                    &token,
+                    &control_writer,
+                    &control_master,
+                    &control_killer,
+                    &control_close,
+                ),
+                Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => {
+                    std::thread::sleep(Duration::from_millis(30))
+                }
+                Err(_) => break,
+            }
+        }
+    });
+
+    let output_path = dir.join("output.log");
+    let meta_path = dir.to_path_buf();
+    let spool_thread = std::thread::spawn(move || spool_pty(reader, &output_path, &meta_path));
+    let status = child.wait()?;
+    alive.store(false, Ordering::Relaxed);
+    let _ = control_thread.join();
+    let _ = spool_thread.join();
+    let mut latest = read_meta(dir)?;
+    latest.status = if close_requested.load(Ordering::Relaxed) {
+        "closed"
+    } else if status.success() {
+        "completed"
+    } else {
+        "failed"
+    }
+    .into();
+    latest.exit_code = Some(status.exit_code());
+    latest.finished_at_unix_ms = Some(now_ms());
+    write_meta(dir, &latest)?;
+    Ok(())
+}
+
+fn handle_control(
+    mut stream: TcpStream,
+    token: &str,
+    writer: &Arc<Mutex<Box<dyn Write + Send>>>,
+    master: &Arc<Mutex<Box<dyn portable_pty::MasterPty + Send>>>,
+    killer: &Arc<Mutex<Box<dyn portable_pty::ChildKiller + Send + Sync>>>,
+    close_requested: &Arc<AtomicBool>,
+) {
+    let cloned = match stream.try_clone() {
+        Ok(stream) => stream,
+        Err(_) => return,
+    };
+    let mut line = String::new();
+    if BufReader::new(cloned).read_line(&mut line).is_err() {
+        return;
+    }
+    let response = match serde_json::from_str::<ControlRequest>(&line) {
+        Ok(ControlRequest::Write {
+            token: supplied,
+            data,
+        }) if supplied == token => writer
+            .lock()
+            .map_err(|_| "writer lock poisoned".to_string())
+            .and_then(|mut writer| {
+                writer
+                    .write_all(data.as_bytes())
+                    .map_err(|e| e.to_string())?;
+                writer.flush().map_err(|e| e.to_string())
+            }),
+        Ok(ControlRequest::Resize {
+            token: supplied,
+            rows,
+            cols,
+        }) if supplied == token => master
+            .lock()
+            .map_err(|_| "PTY lock poisoned".to_string())
+            .and_then(|master| {
+                master
+                    .resize(PtySize {
+                        rows: rows.clamp(1, 500),
+                        cols: cols.clamp(1, 1000),
+                        pixel_width: 0,
+                        pixel_height: 0,
+                    })
+                    .map_err(|e| e.to_string())
+            }),
+        Ok(ControlRequest::Close { token: supplied }) if supplied == token => {
+            close_requested.store(true, Ordering::Relaxed);
+            killer
+                .lock()
+                .map_err(|_| "killer lock poisoned".to_string())
+                .and_then(|mut killer| killer.kill().map_err(|e| e.to_string()))
+        }
+        Ok(ControlRequest::Status { token: supplied }) if supplied == token => Ok(()),
+        Ok(_) => Err("invalid terminal capability token".into()),
+        Err(error) => Err(format!("invalid control request: {error}")),
+    };
+    let reply = match response {
+        Ok(()) => ControlResponse {
+            ok: true,
+            error: None,
+        },
+        Err(error) => ControlResponse {
+            ok: false,
+            error: Some(error),
+        },
+    };
+    let _ = serde_json::to_writer(&mut stream, &reply);
+    let _ = stream.write_all(b"\n");
+    let _ = stream.flush();
+}
+
+fn spool_pty(mut reader: Box<dyn Read + Send>, output_path: &Path, session_dir: &Path) {
+    let mut buffer = [0_u8; 8192];
+    while let Ok(count) = reader.read(&mut buffer) {
+        if count == 0 {
+            break;
+        }
+        if append_and_compact(output_path, session_dir, &buffer[..count]).is_err() {
+            break;
+        }
+    }
+}
+
+fn append_and_compact(output_path: &Path, session_dir: &Path, bytes: &[u8]) -> anyhow::Result<()> {
+    {
+        let mut file = fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(output_path)?;
+        file.write_all(bytes)?;
+        file.flush()?;
+    }
+    let size = fs::metadata(output_path)?.len() as usize;
+    if size <= MAX_PTY_SPOOL {
+        return Ok(());
+    }
+    let all = fs::read(output_path)?;
+    let keep_from = all.len().saturating_sub(RETAIN_PTY_SPOOL);
+    let removed = keep_from as u64;
+    let temp = session_dir.join(format!(".output.{}.tmp", Uuid::new_v4()));
+    fs::write(&temp, &all[keep_from..])?;
+    fs::rename(temp, output_path)?;
+    let mut meta = read_meta(session_dir)?;
+    meta.base_offset = meta.base_offset.saturating_add(removed);
+    meta.output_truncated = true;
+    write_meta(session_dir, &meta)?;
+    Ok(())
+}
+
+fn read_meta(dir: &Path) -> anyhow::Result<SessionMeta> {
+    Ok(serde_json::from_slice(&fs::read(
+        dir.join("session.json"),
+    )?)?)
+}
+fn write_meta(dir: &Path, meta: &SessionMeta) -> anyhow::Result<()> {
+    let temp = dir.join(format!(".session.{}.tmp", Uuid::new_v4()));
+    fs::write(&temp, serde_json::to_vec_pretty(meta)?)?;
+    fs::rename(temp, dir.join("session.json"))?;
+    Ok(())
+}
+fn public_meta(meta: &SessionMeta) -> serde_json::Value {
+    serde_json::json!({"id": meta.id, "command": meta.command, "cwd": meta.cwd, "rows": meta.rows, "cols": meta.cols, "boot_id": meta.boot_id, "status": meta.status, "started_at_unix_ms": meta.started_at_unix_ms, "finished_at_unix_ms": meta.finished_at_unix_ms, "worker_pid": meta.worker_pid, "child_pid": meta.child_pid, "base_offset": meta.base_offset, "output_truncated": meta.output_truncated, "exit_code": meta.exit_code})
+}
+fn bounded_length(length: Option<usize>) -> usize {
+    length
+        .unwrap_or(DEFAULT_READ_LIMIT)
+        .clamp(1, MAX_READ_LIMIT)
+}
+fn process_alive(pid: u32) -> bool {
+    System::new_all().process(Pid::from_u32(pid)).is_some()
+}
+fn now_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis()
+        .try_into()
+        .unwrap_or(u64::MAX)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::tempdir;
+
+    #[test]
+    fn pty_worker_can_write_read_resize_and_close() {
+        let dir = tempdir().unwrap();
+        let terminals = Terminals::new(dir.path(), "boot".into()).unwrap();
+        let id = Uuid::new_v4();
+        let session_dir = terminals.root.join(id.to_string());
+        fs::create_dir_all(&session_dir).unwrap();
+        let meta = SessionMeta {
+            id,
+            command: "cat".into(),
+            cwd: None,
+            rows: 24,
+            cols: 80,
+            boot_id: "boot".into(),
+            status: "starting".into(),
+            started_at_unix_ms: now_ms(),
+            finished_at_unix_ms: None,
+            worker_pid: None,
+            child_pid: None,
+            control_port: None,
+            control_token: "test-capability-token".into(),
+            base_offset: 0,
+            output_truncated: false,
+            exit_code: None,
+        };
+        write_meta(&session_dir, &meta).unwrap();
+        let worker_dir = session_dir.clone();
+        let worker = std::thread::spawn(move || run_worker(&worker_dir));
+
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        loop {
+            let current = read_meta(&session_dir).unwrap();
+            if current.status == "running" && current.control_port.is_some() {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "PTY worker did not become ready"
+            );
+            std::thread::sleep(Duration::from_millis(25));
+        }
+
+        terminals
+            .control(id, |token| ControlRequest::Resize {
+                token,
+                rows: 30,
+                cols: 100,
+            })
+            .unwrap();
+        terminals
+            .control(id, |token| ControlRequest::Write {
+                token,
+                data: "infra-pty-test\n".into(),
+            })
+            .unwrap();
+        let deadline = std::time::Instant::now() + Duration::from_secs(3);
+        loop {
+            let value = terminals.read(id, 0, 4096).unwrap();
+            if value["output"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("infra-pty-test")
+            {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "PTY output never arrived"
+            );
+            std::thread::sleep(Duration::from_millis(25));
+        }
+        terminals
+            .control(id, |token| ControlRequest::Close { token })
+            .unwrap();
+        worker.join().unwrap().unwrap();
+        let final_meta = read_meta(&session_dir).unwrap();
+        assert_eq!(final_meta.status, "closed");
+    }
+
+    #[test]
+    fn stale_boot_is_interrupted() {
+        let dir = tempdir().unwrap();
+        let terminals = Terminals::new(dir.path(), "new".into()).unwrap();
+        let id = Uuid::new_v4();
+        let session_dir = terminals.root.join(id.to_string());
+        fs::create_dir_all(&session_dir).unwrap();
+        let meta = SessionMeta {
+            id,
+            command: "cat".into(),
+            cwd: None,
+            rows: 24,
+            cols: 80,
+            boot_id: "old".into(),
+            status: "running".into(),
+            started_at_unix_ms: 1,
+            finished_at_unix_ms: None,
+            worker_pid: Some(u32::MAX),
+            child_pid: None,
+            control_port: None,
+            control_token: "secret".into(),
+            base_offset: 0,
+            output_truncated: false,
+            exit_code: None,
+        };
+        write_meta(&session_dir, &meta).unwrap();
+        let listed = terminals.list().unwrap();
+        assert_eq!(listed[0]["status"], "interrupted");
+    }
+}

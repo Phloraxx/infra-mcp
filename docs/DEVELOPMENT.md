@@ -1,6 +1,6 @@
 # Development guide for Infra v1
 
-This document describes the intended development workflow before the Rust workspace exists.
+This document describes the development workflow for the active Rust implementation.
 
 ## Branching
 
@@ -16,7 +16,7 @@ Expected checks:
 
 ```text
 cargo fmt --check
-cargo clippy --workspace --all-targets
+cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace
 ```
 
@@ -127,3 +127,15 @@ Avoid dependencies that add large resident memory/runtime requirements for conve
 ## Documentation rule
 
 If an implementation decision contradicts a locked decision in `DECISIONS.md`, update the decision intentionally in the same change rather than allowing code and docs to diverge silently.
+
+## Isolated end-to-end v1 smoke test
+
+Run from the repository root:
+
+```bash
+./scripts/smoke-v1.sh
+```
+
+The script builds only v1 binaries, allocates a temporary loopback gateway/database/state directory, creates a short-lived enrollment, starts a real agent, verifies it becomes online, calls MCP `exec`, restarts only that temporary controller, and verifies identity-based signed reconnect without an enrollment code. Everything is removed on exit. It does not inspect, stop, modify, or reuse the live v0.3 deployment.
+
+Use this after protocol/enrollment/session changes in addition to the normal formatting, clippy and test commands.

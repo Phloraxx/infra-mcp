@@ -96,3 +96,9 @@ The gateway persists device/session metadata in SQLite, but device execution sta
 If a device sleeps, the dashboard should show a transitional state rather than immediately implying failure. When it wakes and reconnects, surviving PTYs/jobs should reappear automatically.
 
 If a session cannot resume, explain why (`device rebooted`, `worker exited`, `retention expired`, etc.).
+
+## Current implementation checkpoint — 2026-10-15
+
+Jobs and terminals now use device-local metadata/output directories and distinct worker processes. PTY control is local-only and protected by a random per-session capability. Both expose byte-offset reads; PTY transcript retention is bounded and reports when a requested offset has expired. Active jobs/PTYs are reconciled to the gateway on reconnect, and the gateway persists the latest snapshot in SQLite.
+
+This already survives MCP/browser/gateway/network disconnects because the worker is not owned by the remote request. A normal controller-process exit also does not intentionally close workers. Full service-manager restart survival is not yet guaranteed: future systemd/launchd/Windows installation must ensure its service/job containment does not reap worker children. Machine reboot never implies resume; a mismatched `boot_id` becomes `interrupted`.

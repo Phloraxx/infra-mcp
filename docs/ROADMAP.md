@@ -4,7 +4,7 @@ The roadmap is ordered to produce useful capability early while keeping the work
 
 ## Phase 0 — freeze the prototype
 
-- [ ] Treat the live Node v0.3 system as compatibility reference, not the place for major new features.
+- [x] Treat the live Node v0.3 system as compatibility reference, not the place for major new features.
 - [x] Capture v1 product/architecture/protocol/tool/security context in this repository.
 - [ ] Record reproducible v0.3 smoke tests before replacing behavior.
 
@@ -12,35 +12,36 @@ Exit: implementation can proceed without relying on chat history.
 
 ## Phase 1 — Rust foundation
 
-- [ ] Create Cargo workspace.
-- [ ] Add `protocol`, `gateway`, `agent`, and `platform` crates.
-- [ ] Structured tracing/logging.
+- [x] Create Cargo workspace.
+- [x] Add `protocol`, `gateway`, `agent`, and `platform` crates.
+- [x] Structured tracing/logging.
 - [ ] Common error model.
-- [ ] CI for formatting, clippy, tests, and build matrix.
-- [ ] Gateway health endpoint.
-- [ ] Agent connects to gateway over authenticated WSS.
-- [ ] Device list/status through MCP.
+- [x] CI for formatting, clippy, tests, and build matrix.
+- [x] Gateway health endpoint.
+- [x] Agent connects to gateway over authenticated WSS.
+- [x] Device list/status through MCP.
 
 Exit: Linux ARM64 agent connects reliably and is visible through MCP.
 
 ## Phase 2 — v0.3 capability parity
 
-- [ ] one-shot `exec`
-- [ ] files read/write/list/stat/copy/move/mkdir/delete
-- [ ] process list/find/terminate
-- [ ] durable background jobs with incremental output
-- [ ] automatic reconnect/backoff
-- [ ] pairing/revocation
+- [x] one-shot `exec`
+- [x] files read/write/list/stat/copy/move/mkdir/delete
+- [x] process list/find/terminate
+- [x] durable background jobs with byte-offset incremental output
+- [x] automatic reconnect/backoff
+- [x] one-time Ed25519 enrollment/revocation
 - [ ] startup service support for Linux
 
 Exit: v1 can perform every essential v0.3 operation on the Oracle test host without using the Node agent.
 
 ## Phase 3 — clear Desktop Commander advantage
 
-- [ ] real PTY/ConPTY terminal sessions
-- [ ] attach/detach/resume
-- [ ] offset-based terminal reads
-- [ ] line/byte-range file reads
+- [x] real PTY/ConPTY terminal sessions
+- [ ] explicit attach/detach API (current list/read/write already reattaches to surviving PTY workers)
+- [x] offset-based terminal reads with bounded retained history
+- [x] byte-range text file reads
+- [ ] line-range file reads
 - [ ] exact edit + unified patch
 - [ ] efficient content/filename search
 - [ ] tail/watch
@@ -51,9 +52,9 @@ Exit: development workflows such as Codex/REPL/dev-server sessions are materiall
 
 ## Phase 4 — resilience and all primary platforms
 
-- [ ] connection generation/supersession
-- [ ] boot/agent instance identity
-- [ ] reconciliation after reconnect
+- [x] connection generation/supersession
+- [x] boot/agent instance identity
+- [x] job/PTY reconciliation after reconnect
 - [ ] macOS ARM64 agent + launchd install/startup
 - [ ] Windows x64 agent + startup
 - [ ] device-protected credential storage

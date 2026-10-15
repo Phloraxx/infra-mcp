@@ -1,11 +1,21 @@
+mod files;
+mod identity;
+mod jobs;
+mod processes;
+mod terminal;
+
 use anyhow::{Context, anyhow};
 use futures_util::{SinkExt, StreamExt};
-use infra_platform::identity;
+use identity::DeviceIdentity;
+use infra_platform::identity as platform_identity;
 use infra_protocol::{
-    AgentOperation, AgentRequest, AgentResponse, AgentToGateway, DeviceHello, ExecOutput,
-    GatewayToAgent, OperationResult, PROTOCOL_VERSION,
+    AgentOperation, AgentRequest, AgentResponse, AgentToGateway, DeviceAuthStart, DeviceHello,
+    ExecOutput, GatewayToAgent, LegacyDeviceHello, OperationResult, PROTOCOL_VERSION,
+    ReconcileSnapshot, SignedDeviceHello,
 };
-use std::{collections::BTreeMap, process::Stdio, sync::Arc, time::Duration};
+use jobs::Jobs;
+use std::{collections::BTreeMap, path::PathBuf, process::Stdio, sync::Arc, time::Duration};
+use terminal::Terminals;
 use tokio::{
     io::{AsyncRead, AsyncReadExt},
     process::Command,
@@ -21,13 +31,34 @@ const MAX_CONCURRENT_REQUESTS: usize = 8;
 #[derive(Clone)]
 struct Config {
     gateway_url: String,
-    token: String,
-    device_id: String,
+    identity: Option<DeviceIdentity>,
+    legacy_token: Option<String>,
+    legacy_device_id: String,
     device_name: String,
+}
+
+#[derive(Clone)]
+struct AgentContext {
+    jobs: Jobs,
+    terminals: Terminals,
 }
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    let args = std::env::args().collect::<Vec<_>>();
+    if args.get(1).map(String::as_str) == Some("--job-worker") {
+        let dir = args
+            .get(2)
+            .ok_or_else(|| anyhow!("--job-worker requires a directory"))?;
+        return jobs::run_worker(PathBuf::from(dir).as_path());
+    }
+    if args.get(1).map(String::as_str) == Some("--pty-worker") {
+        let dir = args
+            .get(2)
+            .ok_or_else(|| anyhow!("--pty-worker requires a directory"))?;
+        return terminal::run_worker(PathBuf::from(dir).as_path());
+    }
+
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::from_default_env()
@@ -36,20 +67,45 @@ async fn main() -> anyhow::Result<()> {
         .json()
         .init();
 
-    let platform = identity();
+    let platform = platform_identity();
+    let state_dir = identity::default_state_dir();
+    identity::ensure_state_dir(&state_dir)?;
+    let gateway_url =
+        std::env::var("INFRA_GATEWAY_URL").unwrap_or_else(|_| "ws://127.0.0.1:8788/agent".into());
+    let requested_name =
+        std::env::var("INFRA_DEVICE_NAME").unwrap_or_else(|_| platform.hostname.clone());
+    let enrollment_code = std::env::var("INFRA_ENROLLMENT_CODE").ok();
+    let device_identity = identity::load_or_enroll(
+        &state_dir,
+        &gateway_url,
+        enrollment_code.as_deref(),
+        &requested_name,
+        platform.platform,
+        platform.arch,
+        env!("CARGO_PKG_VERSION"),
+    )
+    .await?;
+    let legacy_token = std::env::var("INFRA_AGENT_TOKEN").ok();
+    if device_identity.is_none() && legacy_token.is_none() {
+        anyhow::bail!("device is not enrolled; set INFRA_ENROLLMENT_CODE for first run");
+    }
+
     let config = Config {
-        gateway_url: std::env::var("INFRA_GATEWAY_URL")
-            .unwrap_or_else(|_| "ws://127.0.0.1:8788/agent".into()),
-        token: std::env::var("INFRA_AGENT_TOKEN").context("INFRA_AGENT_TOKEN is required")?,
-        device_id: std::env::var("INFRA_DEVICE_ID")
+        gateway_url,
+        identity: device_identity,
+        legacy_token,
+        legacy_device_id: std::env::var("INFRA_DEVICE_ID")
             .unwrap_or_else(|_| platform.hostname.to_lowercase()),
-        device_name: std::env::var("INFRA_DEVICE_NAME")
-            .unwrap_or_else(|_| platform.hostname.clone()),
+        device_name: requested_name,
+    };
+    let context = AgentContext {
+        jobs: Jobs::new(&state_dir, platform.boot_id.clone())?,
+        terminals: Terminals::new(&state_dir, platform.boot_id.clone())?,
     };
 
     let mut delay = Duration::from_secs(1);
     loop {
-        match run_connection(config.clone()).await {
+        match run_connection(config.clone(), context.clone()).await {
             Ok(()) => {
                 warn!("gateway connection ended; reconnecting");
                 delay = Duration::from_secs(1);
@@ -63,42 +119,79 @@ async fn main() -> anyhow::Result<()> {
     }
 }
 
-async fn run_connection(config: Config) -> anyhow::Result<()> {
-    let platform = identity();
+async fn run_connection(config: Config, context: AgentContext) -> anyhow::Result<()> {
+    let platform = platform_identity();
+    let agent_instance_id = Uuid::new_v4();
     let (socket, _) = connect_async(&config.gateway_url)
         .await
         .with_context(|| format!("connect {}", config.gateway_url))?;
     let (mut ws_tx, mut ws_rx) = socket.split();
 
-    let hello = AgentToGateway::Hello(DeviceHello {
+    let (device_id, device_name) = config
+        .identity
+        .as_ref()
+        .map(|identity| (identity.device_id.clone(), identity.device_name.clone()))
+        .unwrap_or_else(|| (config.legacy_device_id.clone(), config.device_name.clone()));
+    let hello = DeviceHello {
         protocol: PROTOCOL_VERSION,
-        token: config.token.clone(),
-        device_id: config.device_id.clone(),
-        device_name: config.device_name.clone(),
+        device_id: device_id.clone(),
+        device_name,
         agent_version: env!("CARGO_PKG_VERSION").into(),
         platform: platform.platform.into(),
         arch: platform.arch.into(),
-        boot_id: platform.boot_id,
-        agent_instance_id: Uuid::new_v4(),
-        capabilities: vec!["status".into(), "exec".into()],
+        boot_id: platform.boot_id.clone(),
+        agent_instance_id,
+        capabilities: vec![
+            "status".into(),
+            "exec".into(),
+            "files".into(),
+            "processes".into(),
+            "jobs".into(),
+            "terminal".into(),
+        ],
         metadata: BTreeMap::from([("hostname".into(), platform.hostname)]),
-    });
-    ws_tx
-        .send(Message::Text(serde_json::to_string(&hello)?.into()))
-        .await?;
-
-    let ack = tokio::time::timeout(Duration::from_secs(5), ws_rx.next())
-        .await
-        .context("hello ack timeout")?
-        .ok_or_else(|| anyhow!("gateway closed before hello ack"))??;
-    let ack = match ack {
-        Message::Text(text) => serde_json::from_str::<GatewayToAgent>(text.as_str())?,
-        _ => return Err(anyhow!("unexpected hello ack frame")),
     };
-    let generation = match ack {
-        GatewayToAgent::HelloAck(ack) if ack.protocol == PROTOCOL_VERSION => {
-            ack.connection_generation
-        }
+
+    if let Some(identity) = &config.identity {
+        send_agent(
+            &mut ws_tx,
+            &AgentToGateway::AuthStart(DeviceAuthStart {
+                protocol: PROTOCOL_VERSION,
+                device_id: identity.device_id.clone(),
+                agent_instance_id,
+            }),
+        )
+        .await?;
+        let challenge = match next_gateway_message(&mut ws_rx, Duration::from_secs(5)).await? {
+            GatewayToAgent::AuthChallenge(challenge) => challenge,
+            other => return Err(anyhow!("expected auth challenge, got {other:?}")),
+        };
+        let signature = identity.sign_hello(&challenge.nonce, challenge.gateway_epoch, &hello);
+        send_agent(
+            &mut ws_tx,
+            &AgentToGateway::SignedHello(SignedDeviceHello {
+                hello: hello.clone(),
+                signature,
+            }),
+        )
+        .await?;
+    } else {
+        let token = config
+            .legacy_token
+            .clone()
+            .ok_or_else(|| anyhow!("legacy token missing"))?;
+        send_agent(
+            &mut ws_tx,
+            &AgentToGateway::LegacyHello(LegacyDeviceHello {
+                hello: hello.clone(),
+                token,
+            }),
+        )
+        .await?;
+    }
+
+    let ack = match next_gateway_message(&mut ws_rx, Duration::from_secs(5)).await? {
+        GatewayToAgent::HelloAck(ack) if ack.protocol == PROTOCOL_VERSION => ack,
         GatewayToAgent::HelloAck(ack) => {
             return Err(anyhow!(
                 "protocol mismatch: gateway {} agent {}",
@@ -106,9 +199,9 @@ async fn run_connection(config: Config) -> anyhow::Result<()> {
                 PROTOCOL_VERSION
             ));
         }
-        _ => return Err(anyhow!("gateway did not send hello ack")),
+        other => return Err(anyhow!("gateway did not send hello ack: {other:?}")),
     };
-    info!(device_id=%config.device_id, generation, "connected to Infra gateway");
+    info!(device_id=%device_id, generation=ack.connection_generation, "connected to Infra gateway");
 
     let (out_tx, mut out_rx) = mpsc::channel::<AgentToGateway>(64);
     let writer = tokio::spawn(async move {
@@ -119,6 +212,12 @@ async fn run_connection(config: Config) -> anyhow::Result<()> {
         Ok::<_, anyhow::Error>(())
     });
 
+    let mut items = context.jobs.reconcile_items();
+    items.extend(context.terminals.reconcile_items());
+    out_tx
+        .send(AgentToGateway::Reconcile(ReconcileSnapshot { items }))
+        .await?;
+
     let permits = Arc::new(Semaphore::new(MAX_CONCURRENT_REQUESTS));
     while let Some(frame) = ws_rx.next().await {
         let frame = frame?;
@@ -127,8 +226,9 @@ async fn run_connection(config: Config) -> anyhow::Result<()> {
                 Ok(GatewayToAgent::Request(request)) => {
                     let permit = permits.clone().acquire_owned().await?;
                     let out = out_tx.clone();
+                    let context = context.clone();
                     tokio::spawn(async move {
-                        let response = dispatch(request).await;
+                        let response = dispatch(request, context).await;
                         drop(permit);
                         let _ = out.send(AgentToGateway::Response(response)).await;
                     });
@@ -136,13 +236,12 @@ async fn run_connection(config: Config) -> anyhow::Result<()> {
                 Ok(GatewayToAgent::Ping) => {
                     out_tx.send(AgentToGateway::Pong).await?;
                 }
-                Ok(GatewayToAgent::HelloAck(_)) => warn!("duplicate hello ack ignored"),
+                Ok(GatewayToAgent::HelloAck(_)) | Ok(GatewayToAgent::AuthChallenge(_)) => {
+                    warn!("unexpected handshake frame ignored")
+                }
                 Err(err) => warn!(%err, "invalid gateway frame"),
             },
-            Message::Ping(payload) => {
-                // Tungstenite normally queues Pong automatically, but an explicit Pong keeps behavior obvious.
-                let _ = payload;
-            }
+            Message::Ping(_) => {}
             Message::Close(_) => break,
             _ => {}
         }
@@ -152,13 +251,37 @@ async fn run_connection(config: Config) -> anyhow::Result<()> {
     Ok(())
 }
 
-async fn dispatch(request: AgentRequest) -> AgentResponse {
+async fn send_agent<S>(sink: &mut S, message: &AgentToGateway) -> anyhow::Result<()>
+where
+    S: futures_util::Sink<Message> + Unpin,
+    S::Error: std::error::Error + Send + Sync + 'static,
+{
+    sink.send(Message::Text(serde_json::to_string(message)?.into()))
+        .await
+        .map_err(anyhow::Error::new)
+}
+
+async fn next_gateway_message<S>(
+    stream: &mut S,
+    timeout: Duration,
+) -> anyhow::Result<GatewayToAgent>
+where
+    S: futures_util::Stream<Item = Result<Message, tokio_tungstenite::tungstenite::Error>> + Unpin,
+{
+    let frame = tokio::time::timeout(timeout, stream.next())
+        .await
+        .context("gateway handshake timeout")?
+        .ok_or_else(|| anyhow!("gateway closed during handshake"))??;
+    match frame {
+        Message::Text(text) => Ok(serde_json::from_str(text.as_str())?),
+        _ => Err(anyhow!("unexpected handshake frame")),
+    }
+}
+
+async fn dispatch(request: AgentRequest, context: AgentContext) -> AgentResponse {
     let result = match request.operation {
         AgentOperation::Status => OperationResult::Ok {
-            body: serde_json::json!({
-                "pid": std::process::id(),
-                "protocol": PROTOCOL_VERSION,
-            }),
+            body: serde_json::json!({"pid": std::process::id(), "protocol": PROTOCOL_VERSION}),
         },
         AgentOperation::Exec {
             command,
@@ -171,6 +294,36 @@ async fn dispatch(request: AgentRequest) -> AgentResponse {
                 timeout_ms.unwrap_or(30_000).clamp(100, 120_000),
             )
             .await
+        }
+        AgentOperation::Files(request) => {
+            tokio::task::spawn_blocking(move || files::handle(request))
+                .await
+                .unwrap_or_else(|e| OperationResult::Failed {
+                    error: e.to_string(),
+                })
+        }
+        AgentOperation::Processes(request) => {
+            tokio::task::spawn_blocking(move || processes::handle(request))
+                .await
+                .unwrap_or_else(|e| OperationResult::Failed {
+                    error: e.to_string(),
+                })
+        }
+        AgentOperation::Jobs(request) => {
+            let jobs = context.jobs.clone();
+            tokio::task::spawn_blocking(move || jobs.handle(request))
+                .await
+                .unwrap_or_else(|e| OperationResult::Failed {
+                    error: e.to_string(),
+                })
+        }
+        AgentOperation::Terminal(request) => {
+            let terminals = context.terminals.clone();
+            tokio::task::spawn_blocking(move || terminals.handle(request))
+                .await
+                .unwrap_or_else(|e| OperationResult::Failed {
+                    error: e.to_string(),
+                })
         }
     };
     AgentResponse {
@@ -185,7 +338,6 @@ async fn exec(command: String, cwd: Option<String>, timeout_ms: u64) -> Operatio
             error: "command must be 1..32768 bytes".into(),
         };
     }
-
     #[cfg(windows)]
     let mut cmd = {
         let mut c = Command::new("cmd.exe");
@@ -204,7 +356,6 @@ async fn exec(command: String, cwd: Option<String>, timeout_ms: u64) -> Operatio
     cmd.stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
-
     let mut child = match cmd.spawn() {
         Ok(child) => child,
         Err(err) => {
@@ -217,7 +368,6 @@ async fn exec(command: String, cwd: Option<String>, timeout_ms: u64) -> Operatio
     let stderr = child.stderr.take().expect("stderr piped");
     let stdout_task = tokio::spawn(read_bounded(stdout, MAX_CAPTURE_BYTES));
     let stderr_task = tokio::spawn(read_bounded(stderr, MAX_CAPTURE_BYTES));
-
     let status = match tokio::time::timeout(Duration::from_millis(timeout_ms), child.wait()).await {
         Ok(Ok(status)) => Some(status),
         Ok(Err(err)) => {
@@ -234,7 +384,6 @@ async fn exec(command: String, cwd: Option<String>, timeout_ms: u64) -> Operatio
             return OperationResult::DeadlineExceeded;
         }
     };
-
     let (stdout, stdout_truncated) = stdout_task.await.unwrap_or_default();
     let (stderr, stderr_truncated) = stderr_task.await.unwrap_or_default();
     let output = ExecOutput {

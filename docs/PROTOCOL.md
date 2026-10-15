@@ -215,3 +215,19 @@ Never automatically replay a non-idempotent RPC purely because the connection dr
 ## 15. Observability
 
 Each operation should carry trace/request identifiers so gateway and agent logs can be correlated without logging the sensitive payload itself.
+
+## 16. Implemented v1 handshake and reconciliation
+
+The current Rust implementation uses the following signed path:
+
+1. agent sends `auth_start` with protocol, stable device ID, and fresh agent-instance ID;
+2. gateway loads the enrolled public key and rejects unknown/revoked devices;
+3. gateway sends a fresh random `auth_challenge` bound to the gateway epoch and a short expiry;
+4. agent signs a deterministic length-prefixed authentication message containing the nonce, gateway epoch, protocol, device ID, agent instance and boot ID;
+5. agent sends `signed_hello`;
+6. gateway verifies Ed25519 possession and returns `hello_ack` with connection generation;
+7. agent immediately sends its active job/terminal reconciliation snapshot.
+
+Enrollment codes are short-lived and stored hashed. The gateway retains an explicitly separate legacy bearer-token handshake only for migration/development. Non-idempotent requests are not automatically replayed after connection loss.
+
+The current PTY/job streams use byte-offset reads over typed RPC rather than the future general multiplexed binary-stream envelope. Binary/resumable transfer is still pending.

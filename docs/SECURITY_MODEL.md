@@ -170,3 +170,11 @@ If a device is lost:
 - remove active sessions/transfers
 
 If gateway credentials are suspected compromised, rotate them without requiring all device filesystems to be reinstalled when possible.
+
+## 14. Current implementation notes
+
+Implemented now: per-device Ed25519 keys, short-lived one-time enrollment codes stored only as hashes, fresh challenge-response authentication, independent device revocation, connection-generation replacement, and refusal to bind the unauthenticated development gateway to a non-loopback interface unless an explicit override is supplied.
+
+The agent currently stores its identity in its private state directory; Unix identity files use restrictive permissions. Platform-native Keychain/DPAPI/Secret Service storage is still required before calling credential storage complete. Public MCP/dashboard OAuth is also still pending.
+
+Persistent PTY workers accept control only on loopback and require a random capability token stored in private session metadata. Structured file access intentionally has the same user-level filesystem reach as the agent; permanent deletion is explicit and recoverable `trash` is not yet implemented.
