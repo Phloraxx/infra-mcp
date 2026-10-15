@@ -6,6 +6,8 @@ use infra_local_state::{
     write_config,
 };
 use serde::Serialize;
+#[cfg(target_os = "macos")]
+use std::process::Stdio;
 use std::{
     collections::HashSet,
     fs,
@@ -381,8 +383,31 @@ fn cleanup_persistent_workers(state_dir: &Path) -> usize {
         let _ = process.kill();
         stopped += 1;
     }
+    cleanup_platform_worker_registrations(state_dir);
     stopped
 }
+
+#[cfg(target_os = "macos")]
+fn cleanup_platform_worker_registrations(state_dir: &Path) {
+    for (directory, kind) in [("sessions", "pty"), ("jobs", "job")] {
+        let Ok(entries) = fs::read_dir(state_dir.join(directory)) else {
+            continue;
+        };
+        for entry in entries.flatten().filter(|entry| entry.path().is_dir()) {
+            let id = entry.file_name().to_string_lossy().into_owned();
+            let label = format!("io.phloraxx.infra.worker.{kind}.{id}");
+            let _ = Command::new("launchctl")
+                .args(["remove", &label])
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status();
+        }
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+fn cleanup_platform_worker_registrations(_state_dir: &Path) {}
 
 fn collect_worker_pids(root: &Path, meta_name: &str, key: &str, out: &mut HashSet<u32>) {
     let Ok(entries) = fs::read_dir(root) else {

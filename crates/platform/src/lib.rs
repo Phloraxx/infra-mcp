@@ -42,7 +42,12 @@ fn boot_id() -> anyhow::Result<String> {
     }
     #[cfg(not(target_os = "linux"))]
     {
-        Ok(format!("process-{}", std::process::id()))
+        let boot_time = sysinfo::System::boot_time();
+        if boot_time > 0 {
+            Ok(format!("boot-time-{boot_time}"))
+        } else {
+            Ok(format!("process-{}", std::process::id()))
+        }
     }
 }
 

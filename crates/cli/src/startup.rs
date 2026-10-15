@@ -8,6 +8,9 @@ use std::{
 };
 
 #[cfg(target_os = "macos")]
+use std::process::Stdio;
+
+#[cfg(target_os = "macos")]
 const LABEL: &str = "io.phloraxx.infra-agent";
 #[cfg(windows)]
 const WINDOWS_TASK: &str = "Infra MCP Agent";
@@ -59,6 +62,8 @@ pub fn install(agent: &Path, state_dir: &Path) -> anyhow::Result<()> {
     let domain = format!("gui/{}", current_uid()?);
     let _ = Command::new("launchctl")
         .args(["bootout", &domain, path.to_string_lossy().as_ref()])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
         .status();
     command_ok(Command::new("launchctl").args([
         "bootstrap",
@@ -111,6 +116,8 @@ pub fn uninstall() -> anyhow::Result<()> {
     let domain = format!("gui/{}", current_uid()?);
     let _ = Command::new("launchctl")
         .args(["bootout", &domain, path.to_string_lossy().as_ref()])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
         .status();
     if path.exists() {
         fs::remove_file(path)?;

@@ -1,4 +1,7 @@
-use crate::processes::terminate_process_tree;
+use crate::{
+    processes::terminate_process_tree,
+    worker_launch::{self, WorkerKind},
+};
 use infra_protocol::{
     DEFAULT_READ_LIMIT, JobAction, JobRequest, MAX_READ_LIMIT, OperationResult, ReconcileItem,
     ReconcileKind,
@@ -97,18 +100,10 @@ impl Jobs {
             output_truncated: false,
         };
         write_meta(&dir, &meta).map_err(|e| e.to_string())?;
-        let exe = std::env::current_exe().map_err(|e| e.to_string())?;
-        let child = Command::new(exe)
-            .arg("--job-worker")
-            .arg(&dir)
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()
-            .map_err(|e| format!("start job worker: {e}"))?;
-        meta.runner_pid = Some(child.id());
-        write_meta(&dir, &meta).map_err(|e| e.to_string())?;
-        drop(child);
+        if let Some(pid) = worker_launch::spawn(WorkerKind::Job, id, &dir)? {
+            meta.runner_pid = Some(pid);
+            write_meta(&dir, &meta).map_err(|e| e.to_string())?;
+        }
         Ok(serde_json::json!({"job": public_meta(&meta)}))
     }
 
@@ -133,6 +128,9 @@ impl Jobs {
             }
             if changed {
                 let _ = write_meta(&entry.path(), &meta);
+            }
+            if !matches!(meta.status.as_str(), "starting" | "running" | "canceling") {
+                worker_launch::cleanup_registration(WorkerKind::Job, meta.id);
             }
             jobs.push(public_meta(&meta));
         }

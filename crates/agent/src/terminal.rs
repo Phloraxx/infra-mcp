@@ -1,3 +1,4 @@
+use crate::worker_launch::{self, WorkerKind};
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use infra_protocol::{
     DEFAULT_READ_LIMIT, MAX_READ_LIMIT, OperationResult, ReconcileItem, ReconcileKind,
@@ -10,7 +11,6 @@ use std::{
     io::{BufRead, BufReader, Read, Seek, SeekFrom, Write},
     net::{TcpListener, TcpStream},
     path::{Path, PathBuf},
-    process::{Command, Stdio},
     sync::{
         Arc, Mutex,
         atomic::{AtomicBool, Ordering},
@@ -19,6 +19,9 @@ use std::{
 };
 use sysinfo::{Pid, System};
 use uuid::Uuid;
+
+#[cfg(windows)]
+use std::process::{Command, Stdio};
 
 const MAX_PTY_SPOOL: usize = 8 * 1024 * 1024;
 const RETAIN_PTY_SPOOL: usize = 4 * 1024 * 1024;
@@ -144,18 +147,10 @@ impl Terminals {
             exit_code: None,
         };
         write_meta(&dir, &meta).map_err(|e| e.to_string())?;
-        let exe = std::env::current_exe().map_err(|e| e.to_string())?;
-        let child = Command::new(exe)
-            .arg("--pty-worker")
-            .arg(&dir)
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()
-            .map_err(|e| format!("start PTY worker: {e}"))?;
-        meta.worker_pid = Some(child.id());
-        write_meta(&dir, &meta).map_err(|e| e.to_string())?;
-        drop(child);
+        if let Some(pid) = worker_launch::spawn(WorkerKind::Pty, id, &dir)? {
+            meta.worker_pid = Some(pid);
+            write_meta(&dir, &meta).map_err(|e| e.to_string())?;
+        }
         let deadline = std::time::Instant::now() + Duration::from_secs(5);
         while std::time::Instant::now() < deadline {
             if let Ok(current) = read_meta(&dir) {
@@ -190,6 +185,9 @@ impl Terminals {
                 meta.status = "interrupted".into();
                 meta.finished_at_unix_ms = Some(now_ms());
                 let _ = write_meta(&entry.path(), &meta);
+            }
+            if !matches!(meta.status.as_str(), "starting" | "running") {
+                worker_launch::cleanup_registration(WorkerKind::Pty, meta.id);
             }
             sessions.push(public_meta(&meta));
         }

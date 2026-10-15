@@ -11,6 +11,7 @@ mod service_ops;
 mod system_ops;
 mod terminal;
 mod transfer;
+mod worker_launch;
 
 use anyhow::{Context, anyhow};
 use futures_util::{SinkExt, StreamExt};

@@ -20,7 +20,7 @@ This file records what exists in code. Product intent remains in the other desig
 - Native filename/content search with regex or literal matching, git-ignore awareness, hidden-file control, glob filtering, context lines, bounded results, and binary/large-file skipping.
 - Cross-platform process listing/filtering and direct process-tree termination without shell interpolation.
 - Durable agent-side jobs with separate worker processes, metadata/output spooling, byte-offset reads, bounded retained output, cancellation, boot identity, and reconnect reconciliation.
-- Real PTY/ConPTY sessions using `portable-pty`: open/list/read/write/resize/close, byte-offset transcript reads, bounded rolling transcript, independent worker process, loopback capability-token control, boot identity, and reconnect reconciliation. Windows ConPTY startup terminal queries (DSR/DA1) are answered by the worker path rather than exposed as transcript noise.
+- Real PTY/ConPTY sessions using `portable-pty`: open/list/read/write/resize/close, byte-offset transcript reads, bounded rolling transcript, independent worker process, loopback capability-token control, boot identity, and reconnect reconciliation. Windows ConPTY startup terminal queries (DSR/DA1) are answered by the worker path rather than exposed as transcript noise. macOS durable PTY/job workers are submitted as independent launchd jobs so controller kickstarts do not tear them down; non-Linux boot identity uses the OS boot timestamp rather than controller PID.
 - Resumable binary transfer with persistent metadata: upload begin/chunk/commit, download begin/chunk, status/list/cancel, offset resume, idempotent upload chunk retries, declared-size enforcement, SHA-256 verification, staging files, and final rename.
 - Active job/terminal/transfer reconciliation sent after reconnect and persisted by the gateway.
 - Structured system operations via `sysinfo`: machine/CPU/memory/load summary, disks/filesystems, and network-interface counters/addresses.
@@ -47,7 +47,7 @@ On the Linux ARM64 development host:
 
 - `cargo fmt --all -- --check`
 - `cargo clippy --workspace --all-targets -- -D warnings`
-- `cargo test --workspace` — 47 Rust tests, including real PTY/job workers, search/edit/hash, resumable transfer, structured system/network parsers, Git, container redaction and local lifecycle tests.
+- `cargo test --workspace` — 48 Rust tests, including real PTY/job workers, search/edit/hash, resumable transfer, structured system/network parsers, Git, container redaction and local lifecycle tests.
 - `./scripts/smoke-v1.sh`
 - `./scripts/smoke-install-dashboard.sh`
 
@@ -64,7 +64,7 @@ The latest pushed matrix confirmed Ubuntu x64, Ubuntu ARM64, and macOS. Windows 
 - Higher-level device-to-device transfer orchestration and throughput reporting. Binary device upload/download/resume exists at the MCP layer.
 - Privileged helper and semantic desktop automation.
 - Full dashboard device-detail/terminal/files/permission/diagnostic controls. The current dashboard is a functional control/status foundation, not the finished product.
-- Linux PTY survival through a user-service controller restart is verified on Oracle by requiring fresh post-restart I/O. Equivalent real-service persistence still needs validation on macOS and Windows.
+- Linux PTY survival through a user-service controller restart is verified on Oracle by requiring fresh post-restart I/O. A real Mac burn-in exposed launchd descendant teardown and PID-based boot identity; independent launchd workers + stable boot identity are now implemented and awaiting the next native artifact validation. Windows real-device validation remains pending.
 - PTYs/jobs never claim to survive a full machine reboot; stale-boot entries are marked interrupted.
 - Windows atomic replacement semantics need a platform-specific upgrade; overwrite may require destination removal before rename.
 
