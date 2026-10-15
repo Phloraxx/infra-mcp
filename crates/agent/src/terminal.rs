@@ -391,54 +391,55 @@ fn handle_control(
     killer: &Arc<Mutex<Box<dyn portable_pty::ChildKiller + Send + Sync>>>,
     close_requested: &Arc<AtomicBool>,
 ) {
-    let cloned = match stream.try_clone() {
-        Ok(stream) => stream,
-        Err(_) => return,
-    };
     let mut line = String::new();
-    if BufReader::new(cloned).read_line(&mut line).is_err() {
-        return;
-    }
-    let response = match serde_json::from_str::<ControlRequest>(&line) {
-        Ok(ControlRequest::Write {
-            token: supplied,
-            data,
-        }) if supplied == token => writer
-            .lock()
-            .map_err(|_| "writer lock poisoned".to_string())
-            .and_then(|mut writer| {
-                writer
-                    .write_all(data.as_bytes())
-                    .map_err(|e| e.to_string())?;
-                writer.flush().map_err(|e| e.to_string())
-            }),
-        Ok(ControlRequest::Resize {
-            token: supplied,
-            rows,
-            cols,
-        }) if supplied == token => master
-            .lock()
-            .map_err(|_| "PTY lock poisoned".to_string())
-            .and_then(|master| {
-                master
-                    .resize(PtySize {
-                        rows: rows.clamp(1, 500),
-                        cols: cols.clamp(1, 1000),
-                        pixel_width: 0,
-                        pixel_height: 0,
-                    })
-                    .map_err(|e| e.to_string())
-            }),
-        Ok(ControlRequest::Close { token: supplied }) if supplied == token => {
-            close_requested.store(true, Ordering::Relaxed);
-            killer
+    let read_result = {
+        let mut reader = BufReader::new(&mut stream);
+        reader.read_line(&mut line)
+    };
+    let response = match read_result {
+        Err(error) => Err(format!("read control request: {error}")),
+        Ok(0) => Err("empty terminal control request".into()),
+        Ok(_) => match serde_json::from_str::<ControlRequest>(&line) {
+            Ok(ControlRequest::Write {
+                token: supplied,
+                data,
+            }) if supplied == token => writer
                 .lock()
-                .map_err(|_| "killer lock poisoned".to_string())
-                .and_then(|mut killer| killer.kill().map_err(|e| e.to_string()))
-        }
-        Ok(ControlRequest::Status { token: supplied }) if supplied == token => Ok(()),
-        Ok(_) => Err("invalid terminal capability token".into()),
-        Err(error) => Err(format!("invalid control request: {error}")),
+                .map_err(|_| "writer lock poisoned".to_string())
+                .and_then(|mut writer| {
+                    writer
+                        .write_all(data.as_bytes())
+                        .map_err(|e| e.to_string())?;
+                    writer.flush().map_err(|e| e.to_string())
+                }),
+            Ok(ControlRequest::Resize {
+                token: supplied,
+                rows,
+                cols,
+            }) if supplied == token => master
+                .lock()
+                .map_err(|_| "PTY lock poisoned".to_string())
+                .and_then(|master| {
+                    master
+                        .resize(PtySize {
+                            rows: rows.clamp(1, 500),
+                            cols: cols.clamp(1, 1000),
+                            pixel_width: 0,
+                            pixel_height: 0,
+                        })
+                        .map_err(|e| e.to_string())
+                }),
+            Ok(ControlRequest::Close { token: supplied }) if supplied == token => {
+                close_requested.store(true, Ordering::Relaxed);
+                killer
+                    .lock()
+                    .map_err(|_| "killer lock poisoned".to_string())
+                    .and_then(|mut killer| killer.kill().map_err(|e| e.to_string()))
+            }
+            Ok(ControlRequest::Status { token: supplied }) if supplied == token => Ok(()),
+            Ok(_) => Err("invalid terminal capability token".into()),
+            Err(error) => Err(format!("invalid control request: {error}")),
+        },
     };
     let reply = match response {
         Ok(()) => ControlResponse {
