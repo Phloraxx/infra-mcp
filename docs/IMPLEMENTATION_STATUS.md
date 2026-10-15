@@ -7,7 +7,7 @@ This file records what exists in code. Product intent remains in the other desig
 ### Implemented
 
 - Native Rust workspace with `protocol`, `gateway`, `agent`, `platform`, `local-state`, and `cli` crates.
-- MCP Streamable HTTP gateway with compact `devices`, `exec`, `files`, `search`, `processes`, `jobs`, `terminal`, and `transfer` tools.
+- MCP Streamable HTTP gateway with compact `devices`, `exec`, `files`, `search`, `processes`, `jobs`, `terminal`, `transfer`, `system`, `network`, `services`, `containers`, and `git` tools.
 - WebSocket/WSS outbound agent connection with reconnect/backoff and connection-generation supersession.
 - SQLite gateway persistence for enrolled devices, last-seen/revocation state, one-time enrollments, reconciliation snapshots, and bounded audit metadata.
 - Offline enrolled devices remain visible after gateway restart.
@@ -23,6 +23,11 @@ This file records what exists in code. Product intent remains in the other desig
 - Real PTY/ConPTY sessions using `portable-pty`: open/list/read/write/resize/close, byte-offset transcript reads, bounded rolling transcript, independent worker process, loopback capability-token control, boot identity, and reconnect reconciliation.
 - Resumable binary transfer with persistent metadata: upload begin/chunk/commit, download begin/chunk, status/list/cancel, offset resume, idempotent upload chunk retries, declared-size enforcement, SHA-256 verification, staging files, and final rename.
 - Active job/terminal/transfer reconciliation sent after reconnect and persisted by the gateway.
+- Structured system operations via `sysinfo`: machine/CPU/memory/load summary, disks/filesystems, and network-interface counters/addresses.
+- Structured network operations: DNS resolution, bounded TCP reachability checks, and listener enumeration via direct platform utilities (`ss`, `lsof`, or `netstat`) without shell interpolation.
+- Structured service operations: list/status/start/stop/restart using systemd-user on Linux, current-user launchd domain on macOS, and Windows SCM as the current OS user. These do not bypass OS privilege checks; broader elevated service control remains a privileged-helper task.
+- Structured Docker operations: list, inspect, bounded logs, start, stop and restart through direct argv calls. Inspect output redacts sensitive environment/key fields by default.
+- Structured Git operations: status, diff, log, branches, remotes, fetch, fast-forward-only pull, and push through direct argv calls with interactive credential prompts disabled. HTTP remote userinfo is redacted from returned URLs/output.
 - Local `config.json` and `runtime.json` state shared by agent and CLI. Runtime status records PID, connection state, stable device identity, generation, last successful connection, and sanitized last error.
 - `infra` CLI: `status`, `doctor`, `install`, `repair`, `reconnect`, and `uninstall`, including JSON status/doctor output.
 - Startup adapters implemented for Linux systemd user services, macOS LaunchAgents, and Windows logon Scheduled Tasks.
@@ -41,11 +46,11 @@ On the Linux ARM64 development host:
 
 - `cargo fmt --all -- --check`
 - `cargo clippy --workspace --all-targets -- -D warnings`
-- `cargo test --workspace` — 34 Rust tests, including real PTY/job workers, search/edit/hash and resumable transfer tests.
+- `cargo test --workspace` — 44 Rust tests, including real PTY/job workers, search/edit/hash, resumable transfer, structured system/network parsers, Git, container redaction and local lifecycle tests.
 - `./scripts/smoke-v1.sh`
 - `./scripts/smoke-install-dashboard.sh`
 
-The previous cross-platform Rust workflow passed Ubuntu and macOS. Windows compiled and passed clippy but its PTY test used the Unix `cat` command; the test now selects `more` on Windows and must be confirmed by the next CI run.
+The latest pushed matrix confirmed Ubuntu x64, Ubuntu ARM64, and macOS. Windows reached project compilation but failed its strict clippy step on cfg-specific code; this working tree includes Windows cfg cleanup and still requires confirmation from the next GitHub run.
 
 ### Intentionally incomplete
 
@@ -56,7 +61,6 @@ The previous cross-platform Rust workflow passed Ubuntu and macOS. Windows compi
 - Real-device installer/startup testing across macOS and Windows. Startup adapters compile cross-platform, but the isolated Linux smoke intentionally skips service registration.
 - Unified patch, line-range read, tail/watch and recoverable platform trash.
 - Higher-level device-to-device transfer orchestration and throughput reporting. Binary device upload/download/resume exists at the MCP layer.
-- Structured system/services/network/container/Git modules.
 - Privileged helper and semantic desktop automation.
 - Full dashboard device-detail/terminal/files/permission/diagnostic controls. The current dashboard is a functional control/status foundation, not the finished product.
 - Guaranteed PTY/job survival through every service-manager restart. Workers survive MCP/gateway/network loss and ordinary controller exit, but installer/service-manager behavior still needs real-device validation.

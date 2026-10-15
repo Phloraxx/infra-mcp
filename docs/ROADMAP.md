@@ -64,12 +64,13 @@ Linux real-device startup/reboot validation remains required before declaring th
 
 ## Phase 5 — structured system modules
 
-- [ ] system summary/disks/resources
-- [ ] network listeners/port ownership/connectivity
-- [ ] service abstraction
-- [ ] Docker/container module
-- [ ] Git module
+- [x] system summary/disks/resources/network-interface summary
+- [x] network listeners/DNS/TCP connectivity; listener PID ownership where the platform utility exposes it
+- [x] user/current-context service abstraction across systemd-user, launchd and Windows SCM
+- [x] Docker/container list/inspect/log/start/stop/restart foundation
+- [x] Git status/diff/log/branches/remotes/fetch/pull/push foundation
 - [ ] structured result pagination/filters where current bounded results are insufficient
+- [ ] privileged/system-wide service operations through the future privileged helper
 
 ## Phase 6 — privileged helper
 

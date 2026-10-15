@@ -186,3 +186,9 @@ The current bootstrap installers verify SHA-256 release sidecars before installi
 The embedded dashboard is loopback/private-development infrastructure until browser OAuth/session authentication is implemented. The gateway refuses non-loopback binding by default unless an explicit development override is set. Enrollment creation and revocation support an admin bearer token, while read-only dashboard APIs are not a substitute for production authentication.
 
 SQLite audit events store only bounded metadata (time, device association, action family, outcome and request ID). Tool payloads, stdout/stderr, file contents, enrollment codes and private device keys are deliberately excluded.
+
+## 15. Structured external-tool boundary
+
+The current structured service/container/Git/listener implementations invoke platform-native commands or established CLIs with direct argv arrays; user-controlled identifiers are never concatenated into a shell command. OS permissions remain authoritative. Linux service mutation is currently restricted to `systemctl --user`; Windows SCM actions may fail when the current user lacks rights; there is no hidden elevation path.
+
+Structured inspection also reduces accidental secret exposure. Docker inspect recursively redacts common password/token/secret/key fields and sensitive environment variables. Git remote HTTP(S) userinfo is removed before returning URLs and common command output URL tokens are sanitized. macOS launchd status returns only selected non-secret status keys instead of raw `launchctl print` output. Explicit logs/diffs can still contain application/user-authored sensitive content and should be requested deliberately.

@@ -68,17 +68,109 @@ if [ -z "$DEVICE_ID" ]; then
   exit 1
 fi
 
-CALL="$(python3 - "$DEVICE_ID" <<'PY'
+mcp_request() {
+  curl -fsS -X POST \
+    -H 'Content-Type: application/json' \
+    -H 'Accept: application/json, text/event-stream' \
+    -H 'MCP-Protocol-Version: 2025-06-18' \
+    --data "$1" "http://127.0.0.1:$PORT/mcp"
+}
+
+TOOLS_CALL='{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}'
+TOOLS_RESULT="$(mcp_request "$TOOLS_CALL")"
+python3 -c 'import json,sys; r=json.load(sys.stdin); names={x["name"] for x in r["result"]["tools"]}; required={"devices","exec","files","search","processes","jobs","terminal","transfer","system","network","services","containers","git"}; assert required <= names, (required-names,names)' <<<"$TOOLS_RESULT"
+
+CALL="$(python3 - "$DEVICE_ID" <<'PYA'
 import json,sys
-print(json.dumps({"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"exec","arguments":{"device":sys.argv[1],"command":"printf infra-smoke-ok"}}}))
-PY
+print(json.dumps({"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"exec","arguments":{"device":sys.argv[1],"command":"printf infra-smoke-ok"}}}))
+PYA
 )"
-RESULT="$(curl -fsS -X POST \
-  -H 'Content-Type: application/json' \
-  -H 'Accept: application/json, text/event-stream' \
-  -H 'MCP-Protocol-Version: 2025-06-18' \
-  --data "$CALL" "http://127.0.0.1:$PORT/mcp")"
+RESULT="$(mcp_request "$CALL")"
 python3 -c 'import json,sys; r=json.load(sys.stdin); text=json.dumps(r); assert "infra-smoke-ok" in text and "ok" in text, text' <<<"$RESULT"
+
+SYSTEM_CALL="$(python3 - "$DEVICE_ID" <<'PYB'
+import json,sys
+print(json.dumps({"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"system","arguments":{"device":sys.argv[1],"action":"summary"}}}))
+PYB
+)"
+SYSTEM_RESULT="$(mcp_request "$SYSTEM_CALL")"
+python3 -c 'import json,sys; b=json.load(sys.stdin)["result"]["structuredContent"]["body"]; assert b["cpu_count"] > 0 and b["total_memory"] > 0, b' <<<"$SYSTEM_RESULT"
+
+FILE_PATH="$TMP/structured-file.txt"
+FILES_WRITE="$(python3 - "$DEVICE_ID" "$FILE_PATH" <<'PYC'
+import json,sys
+print(json.dumps({"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"files","arguments":{"device":sys.argv[1],"action":"write","path":sys.argv[2],"content":"alpha beta alpha"}}}))
+PYC
+)"
+mcp_request "$FILES_WRITE" >/dev/null
+FILES_EDIT="$(python3 - "$DEVICE_ID" "$FILE_PATH" <<'PYD'
+import json,sys
+print(json.dumps({"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"files","arguments":{"device":sys.argv[1],"action":"exact_edit","path":sys.argv[2],"old":"alpha","new":"omega","expected_replacements":2}}}))
+PYD
+)"
+mcp_request "$FILES_EDIT" >/dev/null
+[ "$(cat "$FILE_PATH")" = 'omega beta omega' ]
+FILES_HASH="$(python3 - "$DEVICE_ID" "$FILE_PATH" <<'PYE'
+import json,sys
+print(json.dumps({"jsonrpc":"2.0","id":6,"method":"tools/call","params":{"name":"files","arguments":{"device":sys.argv[1],"action":"hash","path":sys.argv[2]}}}))
+PYE
+)"
+HASH_RESULT="$(mcp_request "$FILES_HASH")"
+python3 -c 'import json,sys; b=json.load(sys.stdin)["result"]["structuredContent"]["body"]; assert len(b["sha256"])==64, b' <<<"$HASH_RESULT"
+
+SEARCH_CALL="$(python3 - "$DEVICE_ID" "$TMP" <<'PYF'
+import json,sys
+print(json.dumps({"jsonrpc":"2.0","id":7,"method":"tools/call","params":{"name":"search","arguments":{"device":sys.argv[1],"root":sys.argv[2],"query":"omega beta omega","mode":"content","literal":True,"max_results":10}}}))
+PYF
+)"
+SEARCH_RESULT="$(mcp_request "$SEARCH_CALL")"
+python3 -c 'import json,sys; b=json.load(sys.stdin)["result"]["structuredContent"]["body"]; assert b["results"], b' <<<"$SEARCH_RESULT"
+
+NETWORK_CALL="$(python3 - "$DEVICE_ID" "$PORT" <<'PYG'
+import json,sys
+print(json.dumps({"jsonrpc":"2.0","id":8,"method":"tools/call","params":{"name":"network","arguments":{"device":sys.argv[1],"action":"tcp_check","host":"127.0.0.1","port":int(sys.argv[2]),"timeout_ms":2000}}}))
+PYG
+)"
+NETWORK_RESULT="$(mcp_request "$NETWORK_CALL")"
+python3 -c 'import json,sys; b=json.load(sys.stdin)["result"]["structuredContent"]["body"]; assert b["reachable"] is True, b' <<<"$NETWORK_RESULT"
+
+GIT_CALL="$(python3 - "$DEVICE_ID" "$ROOT" <<'PYH'
+import json,sys
+print(json.dumps({"jsonrpc":"2.0","id":9,"method":"tools/call","params":{"name":"git","arguments":{"device":sys.argv[1],"action":"status","repo":sys.argv[2]}}}))
+PYH
+)"
+GIT_RESULT="$(mcp_request "$GIT_CALL")"
+python3 -c 'import json,sys; b=json.load(sys.stdin)["result"]["structuredContent"]["body"]; assert "changes" in b and "branch" in b, b' <<<"$GIT_RESULT"
+
+TRANSFER_PATH="$TMP/transfer-smoke.bin"
+TRANSFER_DATA='Infra binary transfer smoke payload'
+TRANSFER_META="$(python3 - "$TRANSFER_DATA" <<'PYI'
+import base64,hashlib,json,sys
+b=sys.argv[1].encode(); print(json.dumps({"size":len(b),"sha256":hashlib.sha256(b).hexdigest(),"base64":base64.b64encode(b).decode()}))
+PYI
+)"
+UPLOAD_BEGIN="$(python3 - "$DEVICE_ID" "$TRANSFER_PATH" "$TRANSFER_META" <<'PYJ'
+import json,sys
+m=json.loads(sys.argv[3]); print(json.dumps({"jsonrpc":"2.0","id":10,"method":"tools/call","params":{"name":"transfer","arguments":{"device":sys.argv[1],"action":"upload_begin","path":sys.argv[2],"size":m["size"],"sha256":m["sha256"]}}}))
+PYJ
+)"
+UPLOAD_BEGIN_RESULT="$(mcp_request "$UPLOAD_BEGIN")"
+TRANSFER_ID="$(python3 -c 'import json,sys; print(json.load(sys.stdin)["result"]["structuredContent"]["body"]["transfer"]["id"])' <<<"$UPLOAD_BEGIN_RESULT")"
+UPLOAD_CHUNK="$(python3 - "$DEVICE_ID" "$TRANSFER_ID" "$TRANSFER_META" <<'PYK'
+import json,sys
+m=json.loads(sys.argv[3]); print(json.dumps({"jsonrpc":"2.0","id":11,"method":"tools/call","params":{"name":"transfer","arguments":{"device":sys.argv[1],"action":"upload_chunk","transfer_id":sys.argv[2],"offset":0,"data_base64":m["base64"]}}}))
+PYK
+)"
+mcp_request "$UPLOAD_CHUNK" >/dev/null
+mcp_request "$UPLOAD_CHUNK" >/dev/null
+UPLOAD_COMMIT="$(python3 - "$DEVICE_ID" "$TRANSFER_ID" <<'PYL'
+import json,sys
+print(json.dumps({"jsonrpc":"2.0","id":12,"method":"tools/call","params":{"name":"transfer","arguments":{"device":sys.argv[1],"action":"upload_commit","transfer_id":sys.argv[2]}}}))
+PYL
+)"
+UPLOAD_COMMIT_RESULT="$(mcp_request "$UPLOAD_COMMIT")"
+python3 -c 'import json,sys; b=json.load(sys.stdin)["result"]["structuredContent"]["body"]; assert b["transfer"]["status"]=="completed" and len(b["sha256"])==64, b' <<<"$UPLOAD_COMMIT_RESULT"
+[ "$(cat "$TRANSFER_PATH")" = "$TRANSFER_DATA" ]
 
 # Kill only the controller. Its persisted identity must be reusable without the enrollment code.
 kill "$AGENT_PID" 2>/dev/null || true
@@ -98,4 +190,4 @@ for _ in $(seq 1 100); do
 done
 [ "$ONLINE" = True ] || { echo 'Signed identity reconnect failed.' >&2; exit 1; }
 
-echo "Infra v1 smoke test passed: enrollment, signed auth, MCP exec, identity reconnect."
+echo "Infra v1 smoke passed: enrollment/auth/reconnect plus exec, system, files, search, network, git and resumable transfer through MCP."

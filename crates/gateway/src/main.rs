@@ -17,12 +17,13 @@ use axum::{
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use ed25519_dalek::{Signature, VerifyingKey};
 use infra_protocol::{
-    AgentOperation, AgentRequest, AgentResponse, AgentToGateway, AuthChallenge,
-    DEFAULT_CONTROL_FRAME_LIMIT, DeviceAuthStart, DeviceHello, ExecOutput, FileAction, FileRequest,
-    GatewayToAgent, HelloAck, JobAction, JobRequest, LegacyDeviceHello, OperationResult,
+    AgentOperation, AgentRequest, AgentResponse, AgentToGateway, AuthChallenge, ContainerAction,
+    ContainerRequest, DEFAULT_CONTROL_FRAME_LIMIT, DeviceAuthStart, DeviceHello, ExecOutput,
+    FileAction, FileRequest, GatewayToAgent, GitAction, GitRequest, HelloAck, JobAction,
+    JobRequest, LegacyDeviceHello, NetworkAction, NetworkRequest, OperationResult,
     PROTOCOL_VERSION, ProcessAction, ProcessRequest, ReconcileSnapshot, SearchMode, SearchRequest,
-    SignedDeviceHello, TerminalAction, TerminalRequest, TransferAction, TransferRequest,
-    signed_auth_message,
+    ServiceAction, ServiceRequest, SignedDeviceHello, SystemAction, SystemRequest, TerminalAction,
+    TerminalRequest, TransferAction, TransferRequest, signed_auth_message,
 };
 use rmcp::{
     Json as McpJson,
@@ -313,6 +314,59 @@ struct McpTransferInput {
     data_base64: Option<String>,
     #[serde(default)]
     length: Option<usize>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+struct McpSystemInput {
+    device: String,
+    action: String,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+struct McpNetworkInput {
+    device: String,
+    action: String,
+    #[serde(default)]
+    host: Option<String>,
+    #[serde(default)]
+    port: Option<u16>,
+    #[serde(default)]
+    timeout_ms: Option<u64>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+struct McpServiceInput {
+    device: String,
+    action: String,
+    #[serde(default)]
+    name: Option<String>,
+    #[serde(default)]
+    query: Option<String>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+struct McpContainerInput {
+    device: String,
+    action: String,
+    #[serde(default)]
+    container: Option<String>,
+    #[serde(default)]
+    tail: Option<usize>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+struct McpGitInput {
+    device: String,
+    action: String,
+    repo: String,
+    #[serde(default)]
+    staged: Option<bool>,
+    #[serde(default)]
+    limit: Option<usize>,
+    #[serde(default)]
+    remote: Option<String>,
+    #[serde(default)]
+    branch: Option<String>,
 }
 
 #[derive(Clone)]
@@ -612,6 +666,173 @@ impl InfraMcp {
             input.device,
             AgentOperation::Transfer(TransferRequest { action }),
             300_000,
+        )
+        .await
+    }
+
+    #[tool(
+        name = "system",
+        description = "Structured system information. Actions: summary, disks, networks."
+    )]
+    async fn system(
+        &self,
+        Parameters(input): Parameters<McpSystemInput>,
+    ) -> Result<McpJson<serde_json::Value>, String> {
+        let action = match input.action.as_str() {
+            "summary" => SystemAction::Summary,
+            "disks" => SystemAction::Disks,
+            "networks" => SystemAction::Networks,
+            _ => return Err("unknown system action".into()),
+        };
+        tool_operation(
+            &self.state,
+            input.device,
+            AgentOperation::System(SystemRequest { action }),
+            30_000,
+        )
+        .await
+    }
+
+    #[tool(
+        name = "network",
+        description = "Structured network diagnostics. Actions: listeners, resolve, tcp_check."
+    )]
+    async fn network(
+        &self,
+        Parameters(input): Parameters<McpNetworkInput>,
+    ) -> Result<McpJson<serde_json::Value>, String> {
+        let action = match input.action.as_str() {
+            "listeners" => NetworkAction::Listeners,
+            "resolve" => NetworkAction::Resolve {
+                host: required(input.host, "host")?,
+            },
+            "tcp_check" => NetworkAction::TcpCheck {
+                host: required(input.host, "host")?,
+                port: input.port.ok_or("port is required")?,
+                timeout_ms: input.timeout_ms,
+            },
+            _ => return Err("unknown network action".into()),
+        };
+        tool_operation(
+            &self.state,
+            input.device,
+            AgentOperation::Network(NetworkRequest { action }),
+            45_000,
+        )
+        .await
+    }
+
+    #[tool(
+        name = "services",
+        description = "User-level/native service control without shell interpolation. Actions: list, status, start, stop, restart."
+    )]
+    async fn services(
+        &self,
+        Parameters(input): Parameters<McpServiceInput>,
+    ) -> Result<McpJson<serde_json::Value>, String> {
+        let action = match input.action.as_str() {
+            "list" => ServiceAction::List { query: input.query },
+            "status" => ServiceAction::Status {
+                name: required(input.name, "name")?,
+            },
+            "start" => ServiceAction::Start {
+                name: required(input.name, "name")?,
+            },
+            "stop" => ServiceAction::Stop {
+                name: required(input.name, "name")?,
+            },
+            "restart" => ServiceAction::Restart {
+                name: required(input.name, "name")?,
+            },
+            _ => return Err("unknown services action".into()),
+        };
+        tool_operation(
+            &self.state,
+            input.device,
+            AgentOperation::Services(ServiceRequest { action }),
+            65_000,
+        )
+        .await
+    }
+
+    #[tool(
+        name = "containers",
+        description = "Docker container operations using direct argv execution. Actions: list, inspect, logs, start, stop, restart."
+    )]
+    async fn containers(
+        &self,
+        Parameters(input): Parameters<McpContainerInput>,
+    ) -> Result<McpJson<serde_json::Value>, String> {
+        let action = match input.action.as_str() {
+            "list" => ContainerAction::List,
+            "inspect" => ContainerAction::Inspect {
+                container: required(input.container, "container")?,
+            },
+            "logs" => ContainerAction::Logs {
+                container: required(input.container, "container")?,
+                tail: input.tail,
+            },
+            "start" => ContainerAction::Start {
+                container: required(input.container, "container")?,
+            },
+            "stop" => ContainerAction::Stop {
+                container: required(input.container, "container")?,
+            },
+            "restart" => ContainerAction::Restart {
+                container: required(input.container, "container")?,
+            },
+            _ => return Err("unknown containers action".into()),
+        };
+        tool_operation(
+            &self.state,
+            input.device,
+            AgentOperation::Containers(ContainerRequest { action }),
+            90_000,
+        )
+        .await
+    }
+
+    #[tool(
+        name = "git",
+        description = "Structured Git operations without a shell. Actions: status, diff, log, branches, remotes, fetch, pull, push."
+    )]
+    async fn git(
+        &self,
+        Parameters(input): Parameters<McpGitInput>,
+    ) -> Result<McpJson<serde_json::Value>, String> {
+        let action = match input.action.as_str() {
+            "status" => GitAction::Status { repo: input.repo },
+            "diff" => GitAction::Diff {
+                repo: input.repo,
+                staged: input.staged.unwrap_or(false),
+            },
+            "log" => GitAction::Log {
+                repo: input.repo,
+                limit: input.limit,
+            },
+            "branches" => GitAction::Branches { repo: input.repo },
+            "remotes" => GitAction::Remotes { repo: input.repo },
+            "fetch" => GitAction::Fetch {
+                repo: input.repo,
+                remote: input.remote,
+            },
+            "pull" => GitAction::Pull {
+                repo: input.repo,
+                remote: input.remote,
+                branch: input.branch,
+            },
+            "push" => GitAction::Push {
+                repo: input.repo,
+                remote: input.remote,
+                branch: input.branch,
+            },
+            _ => return Err("unknown git action".into()),
+        };
+        tool_operation(
+            &self.state,
+            input.device,
+            AgentOperation::Git(GitRequest { action }),
+            130_000,
         )
         .await
     }
@@ -1001,6 +1222,11 @@ fn operation_label(operation: &AgentOperation) -> &'static str {
         AgentOperation::Jobs(_) => "jobs",
         AgentOperation::Terminal(_) => "terminal",
         AgentOperation::Transfer(_) => "transfer",
+        AgentOperation::System(_) => "system",
+        AgentOperation::Network(_) => "network",
+        AgentOperation::Services(_) => "services",
+        AgentOperation::Containers(_) => "containers",
+        AgentOperation::Git(_) => "git",
     }
 }
 

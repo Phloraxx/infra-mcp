@@ -98,6 +98,146 @@ pub enum AgentOperation {
     Jobs(JobRequest),
     Terminal(TerminalRequest),
     Transfer(TransferRequest),
+    System(SystemRequest),
+    Network(NetworkRequest),
+    Services(ServiceRequest),
+    Containers(ContainerRequest),
+    Git(GitRequest),
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SystemRequest {
+    pub action: SystemAction,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "action", rename_all = "snake_case")]
+pub enum SystemAction {
+    Summary,
+    Disks,
+    Networks,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct NetworkRequest {
+    pub action: NetworkAction,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "action", rename_all = "snake_case")]
+pub enum NetworkAction {
+    Resolve {
+        host: String,
+    },
+    TcpCheck {
+        host: String,
+        port: u16,
+        #[serde(default)]
+        timeout_ms: Option<u64>,
+    },
+    Listeners,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ServiceRequest {
+    pub action: ServiceAction,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "action", rename_all = "snake_case")]
+pub enum ServiceAction {
+    List {
+        #[serde(default)]
+        query: Option<String>,
+    },
+    Status {
+        name: String,
+    },
+    Start {
+        name: String,
+    },
+    Stop {
+        name: String,
+    },
+    Restart {
+        name: String,
+    },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ContainerRequest {
+    pub action: ContainerAction,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "action", rename_all = "snake_case")]
+pub enum ContainerAction {
+    List,
+    Inspect {
+        container: String,
+    },
+    Logs {
+        container: String,
+        #[serde(default)]
+        tail: Option<usize>,
+    },
+    Start {
+        container: String,
+    },
+    Stop {
+        container: String,
+    },
+    Restart {
+        container: String,
+    },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct GitRequest {
+    pub action: GitAction,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "action", rename_all = "snake_case")]
+pub enum GitAction {
+    Status {
+        repo: String,
+    },
+    Diff {
+        repo: String,
+        #[serde(default)]
+        staged: bool,
+    },
+    Log {
+        repo: String,
+        #[serde(default)]
+        limit: Option<usize>,
+    },
+    Branches {
+        repo: String,
+    },
+    Remotes {
+        repo: String,
+    },
+    Fetch {
+        repo: String,
+        #[serde(default)]
+        remote: Option<String>,
+    },
+    Pull {
+        repo: String,
+        #[serde(default)]
+        remote: Option<String>,
+        #[serde(default)]
+        branch: Option<String>,
+    },
+    Push {
+        repo: String,
+        #[serde(default)]
+        remote: Option<String>,
+        #[serde(default)]
+        branch: Option<String>,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

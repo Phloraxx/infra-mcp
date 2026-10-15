@@ -245,7 +245,7 @@ Avoid returning huge raw process lists, terminal histories, or file contents whe
 
 ## Current implemented subset — 2026-10-15
 
-Available through the Rust MCP gateway now: `devices`, `exec`, `files`, `search`, `processes`, `jobs`, `terminal`, and `transfer`.
+Available through the Rust MCP gateway now: `devices`, `exec`, `files`, `search`, `processes`, `jobs`, `terminal`, `transfer`, `system`, `network`, `services`, `containers`, and `git`.
 
 - `files`: byte-range UTF-8 read, atomic-style write, append, exact edit with expected replacement count, SHA-256 hash, list, stat, mkdir, copy, move, explicit permanent delete; recoverable `trash` currently reports unsupported.
 - `search`: filename or content mode, regex/literal, case control, hidden-file control, git-ignore-aware walking, glob file filtering, bounded results and bounded context.
@@ -253,4 +253,10 @@ Available through the Rust MCP gateway now: `devices`, `exec`, `files`, `search`
 - `terminal`: open/list/read/write/resize/close using persistent PTY/ConPTY workers.
 - `transfer`: persistent upload/download begin/chunk/commit/status/list/cancel, explicit byte offsets, idempotent upload retries, bounded base64 chunks, staging files and SHA-256 verification. Device-to-device relay is orchestration on top of the two device endpoints and is not optimized yet.
 
-Still targeted: line-range reads, unified patch, tail/watch, richer process inspection/signals, structured system/service/network/container/Git modules, semantic desktop control and privileged operations.
+- `system`: summary, disks/filesystems and network-interface counters/addresses.
+- `network`: listener discovery, DNS resolution and TCP reachability. Listener PID/process metadata is returned when the platform utility exposes it.
+- `services`: list/status/start/stop/restart. Linux is deliberately user-service scope until a privileged helper exists; macOS uses the current GUI domain; Windows uses SCM with the current user's OS permissions.
+- `containers`: Docker list/inspect/log/start/stop/restart via direct argv execution. Inspect redacts sensitive env/key fields by default.
+- `git`: status/diff/log/branches/remotes/fetch/pull/push via direct argv execution, noninteractive credentials, fast-forward-only pull, and returned HTTP remote credential redaction.
+
+Still targeted: line-range reads, unified patch, tail/watch, richer process signals, deeper pagination/filtering, semantic desktop control and privileged operations.

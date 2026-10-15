@@ -1,7 +1,8 @@
 use anyhow::{Context, anyhow};
 use serde::Serialize;
+#[cfg(not(windows))]
+use std::fs;
 use std::{
-    fs,
     path::{Path, PathBuf},
     process::Command,
 };
@@ -233,6 +234,7 @@ fn macos_plist_path() -> anyhow::Result<PathBuf> {
     Ok(home_dir()?.join(format!("Library/LaunchAgents/{LABEL}.plist")))
 }
 
+#[cfg(not(windows))]
 fn home_dir() -> anyhow::Result<PathBuf> {
     #[cfg(windows)]
     let key = "USERPROFILE";

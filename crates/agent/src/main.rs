@@ -1,8 +1,14 @@
+mod command_runner;
+mod container_ops;
 mod files;
+mod git_ops;
 mod identity;
 mod jobs;
+mod network_ops;
 mod processes;
 mod search;
+mod service_ops;
+mod system_ops;
 mod terminal;
 mod transfer;
 
@@ -284,6 +290,11 @@ async fn run_connection(
             "jobs".into(),
             "terminal".into(),
             "transfer".into(),
+            "system".into(),
+            "network".into(),
+            "services".into(),
+            "containers".into(),
+            "git".into(),
         ],
         metadata: BTreeMap::from([("hostname".into(), platform.hostname)]),
     };
@@ -480,6 +491,35 @@ async fn dispatch(request: AgentRequest, context: AgentContext) -> AgentResponse
         AgentOperation::Transfer(request) => {
             let transfers = context.transfers.clone();
             tokio::task::spawn_blocking(move || transfers.handle(request))
+                .await
+                .unwrap_or_else(|e| OperationResult::Failed {
+                    error: e.to_string(),
+                })
+        }
+        AgentOperation::System(request) => {
+            tokio::task::spawn_blocking(move || system_ops::handle(request))
+                .await
+                .unwrap_or_else(|e| OperationResult::Failed {
+                    error: e.to_string(),
+                })
+        }
+        AgentOperation::Network(request) => network_ops::handle(request).await,
+        AgentOperation::Services(request) => {
+            tokio::task::spawn_blocking(move || service_ops::handle(request))
+                .await
+                .unwrap_or_else(|e| OperationResult::Failed {
+                    error: e.to_string(),
+                })
+        }
+        AgentOperation::Containers(request) => {
+            tokio::task::spawn_blocking(move || container_ops::handle(request))
+                .await
+                .unwrap_or_else(|e| OperationResult::Failed {
+                    error: e.to_string(),
+                })
+        }
+        AgentOperation::Git(request) => {
+            tokio::task::spawn_blocking(move || git_ops::handle(request))
                 .await
                 .unwrap_or_else(|e| OperationResult::Failed {
                     error: e.to_string(),

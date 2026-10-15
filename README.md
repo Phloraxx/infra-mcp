@@ -4,7 +4,7 @@ Infra MCP is a personal multi-device control plane that lets ChatGPT operate aut
 
 The product goal is not to be a thin SSH wrapper or a clone of Desktop Commander. The goal is a smaller, faster, more reliable, AI-native remote-control system with persistent terminals, structured system operations, resumable file transfer, multi-device routing, strong auditing, and eventually semantic desktop automation.
 
-> **Current status:** **Infra v1 is actively implemented in Rust alongside the working v0.3 deployment.** The Rust control plane now covers signed device enrollment/authentication, persistent SQLite state/audit metadata, MCP `devices`/`exec`/`files`/`search`/`processes`/`jobs`/`terminal`/`transfer`, durable workers and PTYs, resumable binary transfer, native installers/startup adapters, `infra` status/doctor/repair commands, and a live embedded dashboard foundation. The live v0.3 runtime remains untouched until the benchmark/cutover criteria are met.
+> **Current status:** **Infra v1 is actively implemented in Rust alongside the working v0.3 deployment.** The Rust control plane now covers signed device enrollment/authentication, persistent SQLite state/audit metadata, MCP `devices`/`exec`/`files`/`search`/`processes`/`jobs`/`terminal`/`transfer` plus structured `system`/`network`/`services`/`containers`/`git`, durable workers and PTYs, resumable binary transfer, native installers/startup adapters, `infra` status/doctor/repair commands, and a live embedded dashboard foundation. The live v0.3 runtime remains untouched until the benchmark/cutover criteria are met.
 
 ## Product principles
 
