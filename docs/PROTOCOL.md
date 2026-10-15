@@ -1,0 +1,217 @@
+# Agent protocol
+
+This document defines protocol semantics, not a final wire encoding. Keep transport and message semantics separable.
+
+## 1. Goals
+
+The gateway↔agent protocol must support:
+
+- reliable RPC
+- multiple concurrent logical streams
+- incremental output
+- cancellation
+- durable jobs and PTYs
+- resumable transfers
+- clean reconnect/supersession
+- bounded memory use
+- protocol version negotiation
+- explicit unknown-outcome states
+
+## 2. Transport
+
+Initial implementation: WebSocket over TLS.
+
+Do not tie business logic directly to a specific WebSocket library. Define a transport trait/interface so QUIC/WebTransport can be added later without rewriting session logic.
+
+Even on WebSocket, multiplex independent logical streams at the protocol layer.
+
+## 3. Identity
+
+A paired device should eventually possess an asymmetric keypair generated locally.
+
+Conceptual pairing flow:
+
+1. dashboard/gateway creates a short-lived one-time pairing code.
+2. agent generates a device keypair locally.
+3. agent submits code, public key, requested device name, platform metadata, and a pairing request ID.
+4. gateway validates/consumes the code and registers a stable `device_id`.
+5. agent stores private identity using protected local storage when possible.
+6. future connections authenticate possession of that device key.
+
+A temporary bearer-token implementation is acceptable only during bootstrap if the migration plan is explicit.
+
+## 4. Connection handshake
+
+Agent hello should include fields conceptually equivalent to:
+
+```json
+{
+  "protocol": 1,
+  "device_id": "...",
+  "device_name": "...",
+  "agent_version": "...",
+  "platform": "linux|darwin|windows",
+  "arch": "arm64|x86_64",
+  "boot_id": "...",
+  "agent_instance_id": "...",
+  "capabilities": ["exec", "files", "pty"],
+  "resume": {"last_gateway_epoch": "..."}
+}
+```
+
+Gateway hello-ack returns negotiated protocol version, connection generation, server epoch, limits, and any session-resume instructions.
+
+A valid newer connection may supersede the previous connection for the same `device_id`.
+
+## 5. Message envelope
+
+Every logical message should have a common envelope similar to:
+
+```json
+{
+  "v": 1,
+  "kind": "request|response|event|data|cancel|ack|error",
+  "id": "message-id",
+  "stream_id": "optional-stream-id",
+  "seq": 42,
+  "body": {}
+}
+```
+
+Do not depend on timestamps for ordering; use sequence numbers/offsets where ordering matters.
+
+## 6. RPC
+
+RPC request fields:
+
+- request ID
+- operation name
+- typed payload
+- optional deadline
+- idempotency/retry metadata where useful
+
+Response states should distinguish:
+
+- `ok`
+- `failed`
+- `canceled`
+- `deadline_exceeded`
+- `outcome_unknown`
+- `unsupported`
+- `unauthorized`
+
+`outcome_unknown` is essential for non-idempotent operations interrupted after dispatch.
+
+## 7. Streaming
+
+Streams need:
+
+- `stream_id`
+- monotonically increasing byte/event offset or sequence
+- bounded receiver windows/backpressure
+- end-of-stream marker
+- cancellation
+- optional resume position
+
+Never assume that “one request = one complete payload.”
+
+## 8. Terminal semantics
+
+PTY session state lives primarily on the agent.
+
+Operations:
+
+- open
+- write input
+- read from offset
+- resize
+- signal
+- metadata/status
+- detach
+- attach/resume
+- close
+
+Agent should spool a bounded amount of output to disk or ring storage. Reads use explicit offsets. The gateway can therefore recover after a temporary disconnection without duplicating the full terminal transcript.
+
+A terminal session should have both a session ID and the underlying process identity.
+
+## 9. Job semantics
+
+Jobs differ from PTYs:
+
+- normally non-interactive
+- durable metadata
+- stdout/stderr spool
+- explicit completion status
+- cancel/signal support
+
+A job started successfully should continue even if the MCP caller disconnects, unless the request explicitly asks for attached lifetime semantics.
+
+## 10. File transfer
+
+Large binary transfer must be chunked and resumable.
+
+Metadata includes:
+
+- transfer ID
+- source/destination path
+- total size when known
+- current offset
+- chunk size
+- hash algorithm and expected hash when known
+- temp/staging destination
+
+Upload should write to a staging file and atomically rename into place after verification where the filesystem permits.
+
+Download resume uses byte offsets and may verify prefix/full hashes as appropriate.
+
+Do not base64 huge files inside ordinary RPC JSON.
+
+## 11. Desktop stream
+
+Desktop automation may generate:
+
+- screenshots/frame payloads
+- changed-region metadata
+- accessibility tree snapshots/deltas
+- input/action acknowledgements
+
+The protocol should allow binary payload channels without forcing the gateway to persist raw frames.
+
+## 12. Limits
+
+Gateway and agent negotiate limits such as:
+
+- maximum control-frame size
+- maximum concurrent streams
+- maximum outstanding RPCs
+- chunk size
+- spool limit per PTY/job
+- idle session timeout defaults
+
+Oversized inputs fail explicitly. Do not truncate structured request data silently.
+
+## 13. Versioning
+
+Protocol changes are versioned independently from application versions.
+
+Rules:
+
+- backward-compatible optional fields may be added within a protocol version.
+- incompatible semantics require a new negotiated protocol version.
+- agents should fail with a clear `protocol_mismatch` rather than connecting partially.
+
+## 14. Reconnect and resume
+
+After reconnect:
+
+- gateway identifies sessions it still tracks.
+- agent reports locally alive terminals/jobs/transfers.
+- both sides reconcile IDs and offsets.
+- stale unknown sessions are marked appropriately.
+
+Never automatically replay a non-idempotent RPC purely because the connection dropped.
+
+## 15. Observability
+
+Each operation should carry trace/request identifiers so gateway and agent logs can be correlated without logging the sensitive payload itself.

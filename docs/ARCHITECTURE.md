@@ -1,166 +1,234 @@
-# Architecture
+# Infra v1 architecture
 
-## Goal
+## 1. Goal
 
-`infra-mcp` lets ChatGPT inspect and operate infrastructure through explicit MCP tools while avoiding a direct arbitrary shell, direct SSH exposure, or a Docker socket mounted into the Internet-facing MCP process.
+Infra v1 is an AI-native remote computer control plane. A single ChatGPT MCP connection should be able to discover and operate multiple authorized macOS, Windows, and Linux machines with low latency and consistent semantics.
 
-## Components
+The architecture is deliberately split into a gateway/control plane and device-side execution agents.
 
-### 1. MCP gateway
-
-The MCP gateway is the only component ChatGPT talks to. It should run as an unprivileged container and expose Streamable HTTP at `/mcp`.
-
-Responsibilities:
-
-- Advertise narrowly scoped MCP tools.
-- Validate user/model inputs before forwarding them.
-- Mark read-only and consequential tools with MCP annotations.
-- Call the host agent over an authenticated Unix socket.
-- Later, call Dokploy and OCI APIs using separately scoped credentials.
-
-The gateway must not:
-
-- Mount `/var/run/docker.sock`.
-- Receive arbitrary shell commands.
-- Store root credentials.
-- Expose internal agent credentials in MCP tool output.
-
-### 2. Host agent
-
-The host agent runs directly on the Linux VM under systemd. It listens only on `/run/infra-mcp/agent.sock`; there is no TCP listener.
-
-The initial agent supports only:
-
-- Host health/status.
-- Docker container listing.
-- Bounded Docker log reads.
-- Failed systemd service inspection.
-- Restarting one validated, explicitly named container.
-
-Commands are launched using `execFile(command, args)` with fixed binaries and fixed argument shapes. User input is never passed to a shell.
-
-The service account is placed in the Docker group so it can inspect and restart containers. Docker-group membership is effectively a high-privilege capability, so the agent remains part of the trusted computing base even though it does not run as UID 0.
-
-### 3. Dokploy integration (planned)
-
-Deployment operations should use Dokploy's API/webhooks instead of reproducing deployment logic with low-level Docker commands.
-
-Proposed tools:
-
-- `list_projects`
-- `deployment_status`
-- `deploy_project`
-- `redeploy_project`
-
-Use a dedicated Dokploy API credential with the narrowest permissions available.
-
-### 4. OCI integration (planned)
-
-OCI APIs are the preferred path for cloud-level lifecycle and recovery actions.
-
-Proposed tools:
-
-- `instance_status`
-- `start_instance`
-- `stop_instance`
-- `reboot_instance`
-- `vulnerability_report`
-- `security_findings`
-
-Use a dedicated OCI principal and IAM policy. Do not give the MCP gateway tenancy-wide administrator permissions.
-
-OCI Run Command should be retained as an emergency recovery path when the local host agent is unavailable, not as the primary path for interactive log retrieval and routine diagnostics.
-
-## Trust boundaries
+## 2. High-level system
 
 ```text
-Untrusted / model-controlled input
-            |
-            v
-+---------------------------+
-| MCP Gateway               |
-| - schema validation       |
-| - tool allowlist          |
-| - no Docker socket        |
-| - no arbitrary shell      |
-+-------------+-------------+
-              |
-              | Unix socket + internal bearer token
-              v
-+---------------------------+
-| Host Agent                |
-| - fixed operations only   |
-| - fixed binaries/args     |
-| - Docker-group privilege  |
-+-------------+-------------+
-              |
-              v
-       Docker / systemd
+                         ChatGPT
+                            |
+                  MCP Streamable HTTP + OAuth
+                            |
+                            v
+              +-----------------------------+
+              |        infra-gateway        |
+              |-----------------------------|
+              | MCP tool server             |
+              | authentication              |
+              | device/session broker       |
+              | SQLite state                |
+              | job/session metadata        |
+              | audit log                   |
+              | policy/confirmation hints   |
+              +--------------+--------------+
+                             |
+                  outbound agent connections
+                   WSS initially; pluggable
+                             |
+       +---------------------+---------------------+
+       |                     |                     |
+       v                     v                     v
++--------------+      +--------------+      +--------------+
+| macOS agent  |      |Windows agent |      | Linux agent  |
+| user context |      | user context |      | user context |
++------+-------+      +------+-------+      +------+-------+
+       |                     |                     |
+       +---- optional -------+------ optional -----+
+             privileged local helper/service
 ```
 
-A compromise of the MCP gateway should not automatically grant arbitrary shell execution. However, because the gateway is allowed to request consequential agent operations, authentication and tool-level confirmation remain mandatory parts of the production design.
+Device agents make outbound connections to the gateway. No inbound port is required on a laptop/desktop.
 
-## Authentication
+## 3. Gateway responsibilities
 
-### Development
+The gateway owns:
 
-Keep the MCP endpoint private. Preferred options:
+- MCP Streamable HTTP endpoint.
+- MCP client authentication/authorization.
+- device registry and revocation state.
+- pairing workflow.
+- connection routing and supersession.
+- logical stream/session registry.
+- persistent metadata for jobs, sessions, transfers, and audit events.
+- tool schemas and translation from MCP calls into protocol requests.
+- bounded result shaping so models do not receive unnecessary output.
 
-1. OpenAI Secure MCP Tunnel.
-2. A local/private endpoint during development.
+The gateway should **not** implement platform-specific shell/filesystem/process logic. It asks the agent to perform those operations.
 
-Do not put the current no-auth `/mcp` endpoint directly on a public hostname.
+The gateway should be restartable without permanently losing device registrations or durable jobs. SQLite is the default state store.
 
-### Production
+## 4. Device agent responsibilities
 
-Implement MCP-compatible OAuth using an established identity provider. Validate access tokens in the MCP gateway, including issuer, audience, expiration, and scopes.
+The normal agent runs as the logged-in/installed user and owns:
 
-Suggested scopes:
+- shell and process execution in that user context.
+- persistent PTY/ConPTY sessions.
+- user-accessible filesystem operations.
+- search, watch, tail, hashing, and file transfer.
+- process inspection and signaling.
+- structured Git/Docker/network/service operations that do not require elevation.
+- desktop/accessibility operations available to that user/session.
+- local capability discovery.
+- reconnect, backoff, and protocol resumption.
+- access to platform credential storage for device identity.
 
-- `infra:read` — diagnostics, status, logs.
-- `infra:operate` — routine restarts and deployments.
-- `infra:admin` — VM lifecycle, security updates, or other high-impact operations.
+It is a headless native binary. A tray application may supervise or configure it, but core functionality must not require a GUI.
 
-Keep the host-agent bearer token separate from user OAuth. The agent token is internal service-to-service authentication and must never be returned through MCP.
+## 5. Privileged helper
 
-## Rollout
+A separate optional helper handles operations that require elevation.
 
-### Phase 1 — read-heavy diagnostics
+```text
+normal agent
+    |
+    | authenticated local IPC
+    v
+privileged helper
+    |
+    +-- service control requiring elevation
+    +-- protected system files
+    +-- package management
+    +-- selected networking/firewall operations
+    +-- other explicitly implemented admin operations
+```
 
-- `system_status`
-- `list_containers`
-- `container_logs`
-- `failed_services`
+The helper must not expose a network listener. It should validate the caller and each requested operation. The normal agent must not simply forward an unconstrained root shell string to the helper by default.
 
-Validate ChatGPT connectivity and audit behavior before adding more write tools.
+User-level arbitrary shell is a product capability; arbitrary **root** shell is a separate, higher-risk design decision and should not be assumed.
 
-### Phase 2 — routine operations
+## 6. Agent transport
 
-- `restart_container`
-- Dokploy deploy/redeploy operations
-- Restart selected system services through explicit allowlists
+### Initial production transport
 
-### Phase 3 — cloud and security
+Use WebSocket over TLS first because it is widely deployable and easy to proxy. Build transport behind an interface so higher-performance transports can be added later.
 
-- OCI instance lifecycle
-- OCI security/vulnerability findings
-- Patch/update inspection
-- Explicit, confirmation-gated security update workflows
+One physical connection carries multiple logical streams. The protocol, not the WebSocket API, defines stream IDs, sequence numbers, cancellation, offsets, and backpressure.
 
-### Phase 4 — recovery
+### Future transport
 
-- OCI Run Command for repairing/restarting the host agent
-- Out-of-band MCP hosting if the primary VM must be controllable while powered off
+QUIC/WebTransport is desirable for independent native streams and reduced head-of-line blocking, especially when terminal traffic, file transfer, and desktop frames coexist. It should be added after protocol semantics are stable rather than delaying v1 parity.
 
-## Rules for adding tools
+## 7. Logical stream types
 
-Before adding an MCP tool:
+The protocol must support at least:
 
-1. Decide whether it can be read-only.
-2. Use a strict schema and bounded output.
-3. Avoid accepting command strings, paths, URLs, or environment-variable names unless absolutely necessary.
-4. Prefer an upstream API over shell commands.
-5. If a command is necessary, use a fixed executable and an argument array; never concatenate into a shell command.
-6. Mark write/consequential behavior accurately in MCP annotations.
-7. Log the operation without logging credentials or sensitive output.
-8. Add tests for rejected/malicious inputs.
+- RPC request/response
+- terminal input/output
+- job output
+- file upload/download
+- filesystem tail/watch events
+- desktop frames/events
+
+Streams are independently cancellable and resumable when the operation type allows it.
+
+## 8. Identity and connection lifecycle
+
+A device has stable identity independent of a particular socket.
+
+Suggested identifiers:
+
+- `device_id` — stable UUID/ULID assigned at pairing.
+- `boot_id` — changes on OS reboot where available.
+- `agent_instance_id` — changes each agent process start.
+- `connection_generation` — monotonically increases when the gateway accepts a new connection for the device.
+
+A newer valid connection should supersede a stale one. Do not reject a healthy reconnect merely because an old TCP/WebSocket connection has not timed out yet.
+
+## 9. Persistent terminals
+
+Interactive shells are long-lived resources, not giant `exec()` calls.
+
+Conceptually:
+
+```text
+terminal.open -> terminal_id
+terminal.write(terminal_id, bytes)
+terminal.read(terminal_id, offset)
+terminal.resize(terminal_id, cols, rows)
+terminal.signal(terminal_id, signal)
+terminal.detach(terminal_id)
+terminal.attach(terminal_id)
+terminal.close(terminal_id)
+```
+
+The agent maintains a bounded output ring/spool so the gateway can resume reads after reconnection. Session metadata may be mirrored in SQLite at the gateway.
+
+## 10. Files and transfer architecture
+
+Text file operations and raw binary transfer should be separate but coordinated primitives.
+
+Required semantics include:
+
+- line and byte-range reads
+- atomic write/replace
+- exact block edit and patch
+- copy/move/mkdir
+- trash vs permanent delete
+- glob/grep/tree/search
+- watch/tail
+- hash
+- binary upload/download with chunking
+- offset-based resume
+- integrity verification
+
+Large files must never be embedded wholesale into one JSON response.
+
+## 11. Structured system modules
+
+Infra should provide structured operations for frequently used domains such as processes, services, network listeners, containers, Git, and system resource inspection.
+
+These modules may call OS tools internally when that is the simplest reliable implementation, but they should return normalized structured results and avoid making the model build fragile command pipelines for routine tasks.
+
+## 12. Desktop architecture
+
+Desktop control should be layered:
+
+1. accessibility/UI automation tree
+2. window/application metadata
+3. semantic actions against elements
+4. screenshot/screen regions for visual reasoning
+5. coordinate mouse/keyboard fallback
+
+Platform implementations:
+
+- macOS: Accessibility APIs plus native screen/input APIs.
+- Windows: UI Automation plus Windows capture/input APIs.
+- Linux desktop: AT-SPI where available, with environment-specific fallbacks.
+
+Desktop control is not required for the first parity milestone.
+
+## 13. Persistence
+
+Gateway SQLite should eventually contain tables equivalent to:
+
+- devices
+- device_credentials/public_keys
+- connections
+- pairing_requests
+- terminal_sessions
+- jobs
+- transfers
+- audit_events
+- policies/settings
+- schema_migrations
+
+Do not store terminal/file payloads in SQLite by default. Use bounded spool files/object storage where payload persistence is needed.
+
+## 14. Failure semantics
+
+Operations are classified as:
+
+- **idempotent/retryable** — e.g. status read.
+- **resumable** — e.g. file download by offset.
+- **persistent** — e.g. background job or PTY session.
+- **non-idempotent** — e.g. command that changes state.
+
+If connectivity fails after dispatch of a non-idempotent operation and the outcome cannot be proven, return an `outcome_unknown` state. Never silently repeat a potentially consequential command.
+
+## 15. Repository transition
+
+The desired Rust workspace should be introduced alongside the existing TypeScript scaffold. Existing code remains available as reference until parity is proven. See `MIGRATION.md`.

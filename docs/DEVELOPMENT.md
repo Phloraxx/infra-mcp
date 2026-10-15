@@ -1,0 +1,129 @@
+# Development guide for Infra v1
+
+This document describes the intended development workflow before the Rust workspace exists.
+
+## Branching
+
+Keep `main` buildable. Use focused feature branches/PRs for protocol, agent, gateway, and platform work. Avoid giant “rewrite everything” commits once implementation begins.
+
+The documentation transition may land before code; that is intentional.
+
+## Rust baseline
+
+Use the current stable Rust toolchain when implementation starts. Commit a `rust-toolchain.toml` only if pinning is needed for repeatability.
+
+Expected checks:
+
+```text
+cargo fmt --check
+cargo clippy --workspace --all-targets
+cargo test --workspace
+```
+
+Add stricter linting deliberately rather than enabling large warning sets that create busywork.
+
+## Workspace boundaries
+
+Recommended:
+
+```text
+crates/protocol
+crates/gateway
+crates/agent
+crates/platform
+crates/privileged-helper
+```
+
+Keep protocol types independent from gateway HTTP/MCP types and from OS-specific implementation details.
+
+## Configuration
+
+Use explicit config files/environment variables for deploy-time settings, but do not require environment variables for every local preference.
+
+Never commit secrets. Provide examples with obvious placeholders.
+
+Suggested config concepts:
+
+Gateway:
+
+- bind/listen address
+- public MCP URL
+- database path
+- OAuth settings
+- agent listener URL
+- logging level
+
+Agent:
+
+- gateway URL
+- device identity/key reference
+- friendly name
+- spool/state directory
+- logging level
+- update channel
+
+## Logging
+
+Use structured tracing.
+
+Logs should include:
+
+- component
+- request/trace ID
+- device ID where relevant
+- operation
+- duration/outcome
+
+Logs should avoid full terminal/file payloads and secrets by default.
+
+## Testing pyramid
+
+### Unit
+
+- protocol serialization/validation
+- path/limit handling
+- retry classifications
+- state transitions
+
+### Integration
+
+- gateway + simulated agent
+- agent + test gateway
+- reconnect/supersession
+- PTY lifecycle
+- transfer resume
+- SQLite migration/restart
+
+### Real-device smoke
+
+Run against actual Linux/macOS/Windows devices for platform-specific behavior.
+
+### Failure injection
+
+Test:
+
+- kill gateway mid-command
+- kill agent mid-transfer
+- network disconnect
+- stale connection remains half-open
+- disk full while spooling/writing
+- permission denied
+- malformed protocol frames
+
+## Protocol fixtures
+
+Keep versioned handshake/message fixtures so refactors cannot accidentally change the wire protocol without review.
+
+## Compatibility
+
+During migration, v1 does not need wire compatibility with the Node v0.3 agent unless implementing a temporary bridge substantially reduces rollout risk. Behavioral parity is more important than preserving an ad-hoc wire format.
+
+## Performance work
+
+Measure before optimizing. Preserve useful benchmark scripts/results under a dedicated `bench/` or `tests/benchmarks/` area once they exist.
+
+Avoid dependencies that add large resident memory/runtime requirements for convenience only.
+
+## Documentation rule
+
+If an implementation decision contradicts a locked decision in `DECISIONS.md`, update the decision intentionally in the same change rather than allowing code and docs to diverge silently.

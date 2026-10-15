@@ -1,137 +1,141 @@
-# infra-mcp
+# Infra MCP
 
-Secure MCP gateway for observing and controlling self-hosted infrastructure from ChatGPT. The project is designed to provide narrowly scoped, auditable access to Linux system diagnostics, Docker workloads, Dokploy deployments, and Oracle Cloud Infrastructure (OCI) without exposing an unrestricted shell or the Docker socket directly to the public MCP service.
+Infra MCP is a personal multi-device control plane that lets ChatGPT operate authorized macOS, Windows, and Linux computers through MCP.
 
-> **Status:** Initial scaffold. Start with read-only diagnostics and container logs, then add carefully scoped write operations after the deployment and authentication path is verified.
+The product goal is not to be a thin SSH wrapper or a clone of Desktop Commander. The goal is a smaller, faster, more reliable, AI-native remote-control system with persistent terminals, structured system operations, resumable file transfer, multi-device routing, strong auditing, and eventually semantic desktop automation.
 
-## Architecture
+> **Current status:** design and migration phase for **Infra v1**. The existing TypeScript code in this repository is an older scaffold and should be treated as legacy/prototype reference. A separately deployed v0.3 prototype has already validated the ChatGPT → gateway → device-agent architecture with shell, files, process inspection, jobs, pairing, and automatic reconnect. The v1 implementation should be built cleanly rather than extending the Node agent indefinitely.
+
+## Product principles
+
+1. **Native and lightweight.** The agent should be one native binary with no Node/npm runtime dependency.
+2. **Multi-device first.** One ChatGPT connection should control many authorized devices consistently.
+3. **Persistent interaction.** PTYs, jobs, transfers, and sessions must survive individual MCP requests and temporary network interruptions where possible.
+4. **Structured tools plus an escape hatch.** Prefer typed operations for common tasks, while retaining arbitrary user-level shell execution for flexibility.
+5. **Privilege separation.** The normal agent runs as the signed-in user. Elevated operations go through a separate, optional privileged helper.
+6. **AI-native desktop control.** Prefer accessibility/UI trees and semantic element targeting; use screenshots and coordinates as fallback mechanisms.
+7. **Auditable by default.** Every consequential operation should have a durable, searchable audit record without leaking secrets.
+8. **Easy to install, repair, update, and remove.** Reboot persistence and reconnection are product requirements, not manual setup notes.
+
+## Target architecture
 
 ```text
-ChatGPT Web
-    |
-    | MCP over HTTPS / Secure MCP Tunnel
-    v
-MCP Gateway (unprivileged container)
-    |
-    | authenticated Unix socket
-    v
-Host Agent (systemd service, allowlisted operations)
-    |
-    +-- Docker / container logs
-    +-- systemd / journal
-    +-- host health and diagnostics
-    |
-    +----------------------+
-                           |
-MCP Gateway ---------------+-- Dokploy API
-                           +-- OCI APIs
+                         ChatGPT
+                            |
+                     MCP Streamable HTTP
+                            |
+                            v
+                  +---------------------+
+                  |    infra-gateway    |
+                  |        Rust         |
+                  | OAuth + SQLite      |
+                  | sessions + audit    |
+                  +----------+----------+
+                             |
+                 persistent agent transport
+                   WSS first; QUIC-capable
+                             |
+          +------------------+------------------+
+          |                  |                  |
+          v                  v                  v
+   +-------------+     +-------------+    +-------------+
+   | macOS agent |     |Windows agent|    | Linux agent |
+   |    Rust     |     |    Rust     |    |    Rust     |
+   +------+------+     +------+------+    +------+------+
+          |                   |                  |
+      optional            optional           optional
+  privileged helper   privileged helper  privileged helper
 ```
 
-The MCP gateway never receives arbitrary shell access and does not mount `/var/run/docker.sock`. Privileged host operations are isolated behind a small host agent with explicit allowlists and strict input validation.
+The gateway is the MCP-facing control plane. Device agents make outbound authenticated connections to the gateway, so individual computers do not need public inbound ports.
 
-## Initial capabilities
+## Planned tool surface
 
-- System status: uptime, CPU load, memory, and root filesystem usage.
-- Docker: list containers and fetch bounded container logs.
-- Docker actions: restart a named container as an explicit write operation.
-- systemd: inspect failed services.
-- Health endpoints for the MCP gateway and host agent.
+The MCP interface should remain compact. The target families are:
 
-Planned integrations include Dokploy deployments, OCI instance lifecycle controls, OCI Vulnerability Scanning/Cloud Guard findings, package/security update workflows, and emergency recovery through OCI Run Command.
+- `devices`
+- `exec`
+- `terminal`
+- `files`
+- `search`
+- `processes`
+- `system`
+- `services`
+- `network`
+- `containers`
+- `git`
+- `desktop`
+- `transfer`
 
-## Repository layout
+Do not create dozens of tiny MCP tools when one coherent typed family is easier for the model to choose correctly.
+
+## Technology direction
+
+- **Rust** for the gateway and device agent.
+- **Tokio** async runtime.
+- **MCP Streamable HTTP** for ChatGPT ↔ gateway.
+- **SQLite** for device metadata, sessions, jobs, audit events, and policy state.
+- **WebSocket over TLS** for the first production agent transport, behind a transport abstraction.
+- **QUIC/WebTransport** as an optional later transport after the protocol and resumability semantics are stable.
+- Platform-native PTY, credential-store, accessibility, screen-capture, and service APIs behind Rust traits/modules.
+- Optional **Tauri** tray/dashboard shell later; the headless agent must not depend on it.
+
+Exact crates are implementation choices unless locked by `docs/DECISIONS.md`.
+
+## Proposed v1 repository layout
 
 ```text
 infra-mcp/
+├── Cargo.toml
+├── crates/
+│   ├── protocol/            # versioned agent protocol types
+│   ├── gateway/             # MCP, OAuth, device/session broker, SQLite
+│   ├── agent/               # headless cross-platform agent
+│   ├── platform/            # platform abstractions and implementations
+│   └── privileged-helper/   # optional elevated helper
 ├── apps/
-│   ├── mcp-server/       # ChatGPT-facing MCP gateway
-│   └── host-agent/       # Privileged host-side allowlisted agent
-├── deploy/
-│   └── systemd/          # Host-agent service unit
+│   └── dashboard/           # optional web/tray UI when needed
 ├── docs/
-│   ├── ARCHITECTURE.md
-│   └── DEPLOYMENT.md
-├── .env.example
-├── docker-compose.yml
-├── package.json
-└── tsconfig.base.json
+└── legacy/                  # old prototype code after migration begins
 ```
 
-## Security model
+Do not move/delete the current TypeScript code merely to match this layout. Preserve it until v1 reaches parity and the migration is explicitly performed.
 
-1. **No arbitrary shell tool.** MCP tools map to explicit operations only.
-2. **No Docker socket in the MCP container.** Docker access stays in the host agent.
-3. **Unix-socket boundary.** The MCP gateway talks to the host agent through `/run/infra-mcp/agent.sock`.
-4. **Shared agent token.** Requests over the local socket still require an internal bearer token for defense in depth.
-5. **Bounded inputs.** Container names are validated and log output is capped.
-6. **Read vs. write annotations.** MCP tools advertise read-only/destructive intent so ChatGPT can apply confirmation policies appropriately.
-7. **Secrets stay outside Git.** Runtime secrets belong in Dokploy/environment configuration.
+## Start here
 
-See [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) for trust boundaries and [`docs/DEPLOYMENT.md`](docs/DEPLOYMENT.md) for the Oracle VM + Dokploy setup and ChatGPT connection steps.
+An implementation agent should read, in order:
 
-## Development
+1. [`AGENTS.md`](AGENTS.md)
+2. [`docs/PRODUCT_SPEC.md`](docs/PRODUCT_SPEC.md)
+3. [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md)
+4. [`docs/PROTOCOL.md`](docs/PROTOCOL.md)
+5. [`docs/TOOLS.md`](docs/TOOLS.md)
+6. [`docs/SECURITY_MODEL.md`](docs/SECURITY_MODEL.md)
+7. [`docs/ROADMAP.md`](docs/ROADMAP.md)
+8. [`docs/MIGRATION.md`](docs/MIGRATION.md)
+9. [`docs/BENCHMARK.md`](docs/BENCHMARK.md)
 
-Requirements:
+Supporting documents:
 
-- Node.js 22+
-- npm 10+
-- Docker for the MCP gateway image
-- Linux + systemd for the host agent deployment
+- [`docs/PLATFORM.md`](docs/PLATFORM.md)
+- [`docs/DEVELOPMENT.md`](docs/DEVELOPMENT.md)
+- [`docs/DEPLOYMENT.md`](docs/DEPLOYMENT.md)
+- [`docs/DECISIONS.md`](docs/DECISIONS.md)
 
-```bash
-npm install
-npm run build
-```
+## First implementation milestone
 
-Run the host agent locally:
+The first useful v1 milestone is deliberately smaller than the complete product:
 
-```bash
-cp .env.example .env
-npm run dev:agent
-```
+- Rust workspace and protocol crate.
+- Rust gateway with MCP health/device listing.
+- Rust agent on Linux ARM64.
+- authenticated pairing/device identity.
+- `exec`, basic `files`, and `processes` parity.
+- persistent reconnect.
+- tests proving the v1 agent can run beside v0.3 without disrupting it.
 
-Run the MCP server in another terminal:
-
-```bash
-npm run dev:mcp
-```
-
-The MCP endpoint is exposed at:
-
-```text
-http://localhost:3000/mcp
-```
-
-For ChatGPT, deploy behind HTTPS or use OpenAI Secure MCP Tunnel. Do not expose a no-auth development endpoint directly to the public Internet.
-
-## ChatGPT app metadata
-
-Suggested app name:
-
-```text
-Infra MCP
-```
-
-Suggested app description:
-
-```text
-Securely inspect and operate my self-hosted infrastructure, including Linux host health, Docker containers and logs, Dokploy deployments, and OCI resources. Use read-only diagnostics first and request confirmation before consequential operations.
-```
-
-## Deployment direction
-
-The intended production layout for the current Oracle VM + Dokploy setup is:
-
-- `mcp-server`: deployed as a normal Dokploy application/container.
-- `host-agent`: installed as a systemd service on the VM host.
-- `/run/infra-mcp`: bind-mounted into the MCP container.
-- ChatGPT: connected to the `/mcp` endpoint as a developer-mode app.
-- Authentication: add standards-compliant OAuth before exposing the MCP endpoint publicly; alternatively use a private Secure MCP Tunnel where appropriate.
-
-## Why not OCI Run Command for everything?
-
-OCI Run Command is useful as an emergency/fallback path, but everyday diagnostics such as container logs are better served by the low-latency host agent. The long-term design keeps OCI APIs for VM lifecycle/recovery and uses the local agent for interactive host operations.
+Only after this foundation works should implementation expand into PTY sessions, resumable binary transfer, structured system modules, privilege helpers, and desktop automation.
 
 ## License
 
-No license has been selected yet. Add one before encouraging third-party reuse or contributions.
+No license has been selected yet. Do not assume third-party redistribution rights until a license is added.

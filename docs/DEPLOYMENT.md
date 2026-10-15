@@ -1,161 +1,122 @@
-# Deployment guide
+# Infra v1 deployment direction
 
-This guide describes the intended first deployment on a Linux Oracle Cloud VM that already runs Docker and Dokploy.
+Infra v1 is not implemented yet. This document defines how development and eventual rollout should work without breaking the current remote-control setup.
 
-## 1. Prepare the repository on the host
+## 1. Do not replace v0.3 in place during development
 
-Clone the repository into `/opt/infra-mcp` and build the host agent:
+The working Node-based deployment remains the fallback until v1 passes the replacement benchmark.
 
-```bash
-sudo git clone https://github.com/Phloraxx/infra-mcp.git /opt/infra-mcp
-cd /opt/infra-mcp
-sudo npm install
-sudo npm run build
-```
+Run v1 with separate:
 
-For repeatable production deployments, add and commit a lockfile once dependency validation is complete, then use `npm ci` instead of `npm install`.
+- service names
+- state/config directories
+- gateway listener/port or staging hostname
+- device credentials
+- logs
 
-## 2. Create the host-agent service account
+Do not point the existing production installer/update path at unfinished v1 binaries.
 
-Create a dedicated group and system user explicitly, then grant the user Docker access:
+## 2. Initial development deployment
 
-```bash
-sudo groupadd --system infra-mcp
-sudo useradd --system \
-  --gid infra-mcp \
-  --home /nonexistent \
-  --shell /usr/sbin/nologin \
-  infra-mcp
-sudo usermod -aG docker infra-mcp
-getent group infra-mcp
-```
+The first target is the existing Linux ARM64 Oracle host because it can run gateway and a local test agent side-by-side.
 
-If the `infra-mcp` user or group already exists, skip the corresponding creation command rather than recreating it.
-
-Record the numeric GID shown by `getent group infra-mcp`; configure that value as `INFRA_MCP_GID` for the MCP container so it can traverse `/run/infra-mcp` and access the Unix socket.
-
-> Docker-group membership is effectively root-equivalent privilege on a typical Docker host. The security boundary is the host agent's fixed operation allowlist; do not expose the agent socket to unrelated containers or users.
-
-## 3. Configure the internal agent token
-
-Generate a random secret:
-
-```bash
-openssl rand -hex 32
-```
-
-Create the environment directory and file:
-
-```bash
-sudo install -d -m 0750 /etc/infra-mcp
-sudo sh -c 'umask 077; cat > /etc/infra-mcp/host-agent.env'
-```
-
-Add:
+Recommended temporary components:
 
 ```text
-AGENT_TOKEN=<generated-secret>
-AGENT_SOCKET_MODE=0660
+infra-v1-gateway
+infra-v1-agent
 ```
 
-The MCP gateway must receive the same `AGENT_TOKEN` through Dokploy's environment configuration. Never commit the real value.
+The gateway should initially bind privately/locally and be exposed to ChatGPT only through an authenticated staging path.
 
-## 4. Install the systemd service
+## 3. Gateway production shape
+
+Eventually the gateway needs:
+
+- TLS termination/reverse proxy
+- authenticated MCP Streamable HTTP endpoint
+- persistent SQLite volume
+- agent listener
+- release/update metadata endpoint if self-hosted updates are used
+- health/readiness endpoint
+
+The gateway itself should not require Docker, but container deployment on Oracle is acceptable if operationally convenient.
+
+## 4. Agent installation shape
+
+Final installation should converge toward:
+
+### macOS/Linux
 
 ```bash
-sudo cp /opt/infra-mcp/deploy/systemd/infra-mcp-agent.service /etc/systemd/system/
-sudo systemctl daemon-reload
-sudo systemctl enable --now infra-mcp-agent
-sudo systemctl status infra-mcp-agent
+curl -fsSL https://<gateway>/install | sh -s -- <pair-code>
 ```
 
-Verify the socket exists and is owned by the intended user/group:
+### Windows
 
-```bash
-sudo ls -l /run/infra-mcp/agent.sock
-```
+A signed PowerShell/bootstrap command or signed installer package that downloads the correct native binary and pairs it.
 
-## 5. Deploy the MCP gateway in Dokploy
+The steady-state installed agent should not require Node/npm.
 
-Create a Dokploy Docker Compose deployment from this repository using `docker-compose.yml`.
+## 5. Local CLI
 
-Configure:
+Desired commands:
 
 ```text
-AGENT_TOKEN=<same generated secret>
-INFRA_MCP_GID=<numeric GID of infra-mcp group>
+infra status
+infra start
+infra stop
+infra reconnect
+infra doctor
+infra logs
+infra update
+infra repair
+infra uninstall
 ```
 
-The Compose file publishes port 3000 only on the VM loopback interface by default. This is useful for local verification and a private tunnel. Do not change it to a public unauthenticated bind.
+Exact command surface may evolve, but troubleshooting must remain simple.
 
-Verify locally on the VM:
+## 6. Startup
 
-```bash
-curl http://127.0.0.1:3000/healthz
-```
+- Linux: systemd user service by default; system service only when specifically selected.
+- macOS: launchd user agent.
+- Windows: robust user startup for normal mode; Windows service for privileged helper/system mode.
 
-Expected response:
+Installers must verify that the agent actually reconnects before claiming success.
 
-```json
-{"status":"ok","service":"infra-mcp"}
-```
+## 7. Updates
 
-If you later route the service through a Dokploy-managed domain, configure the domain for service `mcp-server` and container port `3000`. Dokploy can add the required Traefik routing/network configuration during deployment. Keep the MCP endpoint authenticated; a public hostname by itself is not an authentication boundary.
+Production updates should:
 
-## 6. Connect ChatGPT
+1. fetch authenticated release metadata.
+2. download the correct platform/architecture artifact.
+3. verify signature/hash.
+4. stage beside current binary.
+5. restart into new version.
+6. run health/connection check.
+7. roll back automatically if the new version fails.
 
-The safest first test is to keep the MCP endpoint private and use OpenAI Secure MCP Tunnel. Alternatively, add standards-compliant OAuth before publishing an HTTPS `/mcp` endpoint.
+## 8. Rollout order
 
-Once the MCP endpoint is reachable by ChatGPT:
+1. Linux ARM64 canary.
+2. macOS ARM64.
+3. Windows x64.
+4. enable v1 as the default MCP during a burn-in period.
+5. benchmark against Desktop Commander.
+6. remove old services only after explicit cutover.
 
-1. In ChatGPT Web, keep Developer mode enabled.
-2. Open **Settings → Apps** (or your workspace's **Workspace Settings → Apps**) and create/test the custom MCP app using the Developer mode controls available on your account.
-3. Suggested app name: `Infra MCP`.
-4. Suggested app description:
+## 9. Secrets
 
-   `Securely inspect and operate my self-hosted infrastructure, including Linux host health, Docker containers and logs, Dokploy deployments, and OCI resources. Use read-only diagnostics first and request confirmation before consequential operations.`
+Never commit live:
 
-5. Set the MCP server URL to your HTTPS `/mcp` endpoint, or use the configured Secure MCP Tunnel connection.
-6. After the app connects, confirm that the advertised tools match the expected allowlist.
-7. Keep consequential/write actions confirmation-gated while the integration is new.
+- device private keys
+- bearer/bootstrap tokens
+- OAuth credentials
+- gateway signing keys
+- update signing private keys
 
-OpenAI's current MCP availability differs by ChatGPT plan/workspace. Read-only MCP access may be available where full write/modify MCP actions are not. Verify that the account/workspace you use supports write actions before relying on tools such as `restart_container`, deploy, update, or reboot.
+Example configuration in Git must use placeholders only.
 
-Test with read-only prompts first:
+## 10. Legacy deployment documentation
 
-```text
-Check my server health.
-List my Docker containers.
-Show the last 100 log lines from <container-name>.
-Check for failed system services.
-```
-
-Only after those behave correctly, and only on a ChatGPT plan/workspace that permits MCP write actions, test the write tool:
-
-```text
-Restart <container-name>.
-```
-
-## 7. Before adding public OAuth
-
-Do not treat the internal `AGENT_TOKEN` as ChatGPT user authentication. It protects only the local gateway-to-agent hop. For a public remote MCP deployment, use MCP-compatible OAuth and validate issuer, audience, expiry, and scopes on authenticated requests.
-
-Recommended scope split:
-
-```text
-infra:read
-infra:operate
-infra:admin
-```
-
-Use an established identity provider rather than writing an authorization server from scratch.
-
-## 8. Next integrations
-
-After the base path is proven:
-
-1. Add Dokploy API integration for deploy/redeploy/status.
-2. Add OCI SDK integration with a least-privilege OCI principal.
-3. Add OCI vulnerability/security findings as read-only tools.
-4. Add update inspection before any update-installation tool.
-5. Keep OCI Run Command as an emergency recovery path for a failed host agent.
+The previous documentation described a restricted Docker/systemd diagnostics gateway and no longer represents the v1 target. Refer to Git history if that deployment model must be reproduced.

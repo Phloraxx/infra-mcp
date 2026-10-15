@@ -1,38 +1,48 @@
 # Security Policy
 
-`infra-mcp` is infrastructure-control software. Treat every deployment as security-sensitive.
+Infra MCP is remote-control software. Treat the gateway, device agent, privileged helper, protocol, installers, and update channel as security-sensitive components.
+
+The v1 design intentionally supports arbitrary **user-level** shell commands and broad user-level filesystem access on authorized devices. Security therefore comes from strong authentication, explicit trust boundaries, privilege separation, transport security, auditing, and safe defaults—not from pretending the product is a read-only diagnostics service.
+
+See [`docs/SECURITY_MODEL.md`](docs/SECURITY_MODEL.md) for the full design.
 
 ## Current status
 
-The repository is an early scaffold and is **not ready to expose as an unauthenticated public MCP endpoint**.
+Infra v1 is not implemented yet. Existing TypeScript code is prototype/legacy material and should not be exposed as a new public production service merely because the repository documentation now describes v1.
 
-The initial MCP gateway intentionally contains no arbitrary shell tool and does not mount the Docker socket. The host agent is still privileged through Docker-group membership and must be treated as trusted code.
+A separate v0.3 deployment exists and remains the fallback during migration.
 
-## Deployment requirements
+## Non-negotiable requirements
 
-- Keep `AGENT_TOKEN` secret and use at least 32 random bytes of entropy.
-- Never commit `.env` files or real credentials.
-- Keep `/run/infra-mcp/agent.sock` accessible only to the intended service group/container.
-- Do not expose the host agent over TCP.
-- Do not mount `/var/run/docker.sock` into the MCP gateway.
-- Do not add tools that accept arbitrary shell commands.
-- Keep the MCP endpoint private until standards-compliant authentication is configured, or connect through a secure private tunnel.
-- Use separate, least-privilege credentials for Dokploy and OCI integrations.
-- Treat diagnostic output and container logs as potentially sensitive. Do not log passwords, API keys, tokens, or other secrets in application logs; anything returned by an MCP tool may become part of the ChatGPT conversation/tool context.
-- Keep diagnostic responses bounded. Large or historical log analysis should use a dedicated logging backend with its own access controls rather than unbounded Docker log reads.
+- Never commit live credentials, private keys, OAuth secrets, passwords, session cookies, or `.env` files.
+- All remote agent traffic must be encrypted in transit.
+- Each paired device must have independently revocable credentials/identity.
+- The normal device agent must run with ordinary user privileges by default.
+- Elevated/root/SYSTEM operations must be isolated in the optional privileged helper.
+- The gateway must authenticate ChatGPT/MCP clients and devices separately.
+- Device private keys should be stored using platform-native protected storage where practical.
+- Sensitive tool output must be treated as conversation-visible data.
+- Audit logs should record metadata and outcomes without indiscriminately copying secrets, full file contents, or terminal output.
+- Update artifacts must be authenticated before installation; rollback must be possible.
+- Destructive operations must be clearly distinguishable from read-only and reversible operations in tool metadata and API semantics.
 
-## Reporting vulnerabilities
+## High-impact areas requiring extra review
 
-Until a private security-reporting channel is configured for this repository, do not publish credentials, tokens, or live server details in a public GitHub issue. Rotate any credential that may have been exposed.
+- privileged-helper IPC and authorization
+- arbitrary command execution
+- filesystem write/delete primitives
+- file upload/download paths
+- desktop input injection and accessibility automation
+- screen capture and clipboard access
+- agent auto-update
+- device pairing and credential rotation
+- gateway OAuth/token handling
+- service/package/firewall/network operations
+- container deletion, volume deletion, image pruning, or host mounts
+- VM shutdown/reboot and disk operations
 
-## High-impact changes
+## Vulnerability handling
 
-Changes involving any of the following require additional review before deployment:
+Do not post secrets or live infrastructure details in a public issue. If a credential may have been exposed, rotate/revoke it first and investigate second.
 
-- Arbitrary command execution.
-- File read/write access outside explicitly allowed paths.
-- Docker `exec`, privileged container creation, volume deletion, or host mounts.
-- Package installation or OS upgrades.
-- VM shutdown/reboot operations.
-- Firewall, IAM, or networking changes.
-- Database backup restoration or destructive database operations.
+A private security-reporting mechanism should be enabled before this project is promoted for third-party use.
