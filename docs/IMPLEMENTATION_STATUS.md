@@ -50,7 +50,7 @@ On the Linux ARM64 development host:
 - `./scripts/smoke-v1.sh`
 - `./scripts/smoke-install-dashboard.sh`
 
-The latest pushed matrix confirmed Ubuntu x64, Ubuntu ARM64, and macOS. Windows reached project compilation but failed its strict clippy step on cfg-specific code; this working tree includes Windows cfg cleanup and still requires confirmation from the next GitHub run.
+The latest pushed matrix confirmed Ubuntu x64, Ubuntu ARM64, and macOS. Windows now passes formatting and strict clippy; its remaining failure was the interactive PTY test using LF-only input with `more`. The next head tests a real `cmd.exe` ConPTY session with CRLF input and an expanded cold-start deadline; Windows test confirmation remains a release gate.
 
 ### Intentionally incomplete
 

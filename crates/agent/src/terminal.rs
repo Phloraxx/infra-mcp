@@ -537,7 +537,9 @@ mod tests {
         let meta = SessionMeta {
             id,
             command: if cfg!(windows) {
-                "more".into()
+                // Use an interactive shell rather than `more`: ConPTY console input treats
+                // Enter as CR/CRLF, while `more` may buffer LF-only input indefinitely.
+                "cmd.exe /D /Q /K".into()
             } else {
                 "cat".into()
             },
@@ -583,10 +585,15 @@ mod tests {
         terminals
             .control(id, |token| ControlRequest::Write {
                 token,
-                data: "infra-pty-test\n".into(),
+                data: if cfg!(windows) {
+                    "echo infra-pty-test\r\n".into()
+                } else {
+                    "infra-pty-test\n".into()
+                },
             })
             .unwrap();
-        let deadline = std::time::Instant::now() + Duration::from_secs(3);
+        // A cold Windows ConPTY can take longer than Unix PTYs to emit its first frame.
+        let deadline = std::time::Instant::now() + Duration::from_secs(8);
         loop {
             let value = terminals.read(id, 0, 4096).unwrap();
             if value["output"]
@@ -598,7 +605,8 @@ mod tests {
             }
             assert!(
                 std::time::Instant::now() < deadline,
-                "PTY output never arrived"
+                "PTY output never arrived; output={:?}",
+                value["output"].as_str().unwrap_or_default()
             );
             std::thread::sleep(Duration::from_millis(25));
         }
