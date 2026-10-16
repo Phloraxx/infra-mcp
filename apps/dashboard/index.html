@@ -6,6 +6,7 @@
   <meta name="color-scheme" content="light dark">
   <title>Infra</title>
   <link rel="stylesheet" href="/styles.css">
+  <link rel="stylesheet" href="/vendor/xterm.css">
 </head>
 <body>
   <div class="shell">
@@ -51,7 +52,46 @@
       </section>
 
       <section id="sessions" class="view">
+        <div class="filters"><label>Device<select id="session-device"><option value="">All devices</option></select></label><label>Type<select id="session-kind"><option value="">All types</option><option value="terminal">Terminals</option><option value="job">Jobs</option><option value="transfer">Transfers</option></select></label></div>
         <div class="panel"><div id="all-sessions"></div></div>
+      </section>
+
+      <section id="device-detail" class="view">
+        <button class="text-button back" data-view-target="devices">← Devices</button>
+        <div id="device-summary" class="panel"></div>
+        <nav id="device-tabs" class="tabs" aria-label="Device views">
+          <button class="tab active" data-device-tab="overview">Overview</button>
+          <button class="tab" data-device-tab="terminal">Terminal</button>
+          <button class="tab" data-device-tab="files">Files</button>
+          <button class="tab" data-device-tab="sessions">Sessions</button>
+          <button class="tab" data-device-tab="activity">Activity</button>
+        </nav>
+        <div id="device-overview" class="device-pane panel"><h2>Capabilities</h2><div id="device-capabilities" class="detail-grid"></div><button id="device-status" class="secondary">Check agent</button><pre id="device-status-output" class="hidden"></pre></div>
+        <div id="device-terminal" class="device-pane panel hidden">
+          <h2>Open a terminal</h2><p class="small">Sessions stay running when you leave. You can also attach to a terminal started through ChatGPT.</p>
+          <form id="terminal-open" class="form-row"><label>Shell or command<input id="terminal-command" required maxlength="32768"></label><label>Working directory<input id="terminal-cwd" placeholder="Default directory"></label><button class="primary">Open terminal</button></form>
+          <div id="device-terminals"></div>
+        </div>
+        <div id="device-files" class="device-pane panel hidden">
+          <form id="files-browse" class="form-row"><label>Directory<input id="files-path" value="." required></label><button class="secondary">Browse</button><button id="files-up" type="button" class="text-button">Parent</button></form>
+          <p id="files-note" class="muted small"></p><div id="files-list"></div>
+          <section id="file-preview" class="hidden"><div class="section-head"><h2 id="file-name"></h2><button id="file-close" class="text-button">Close preview</button></div><pre id="file-content"></pre><p id="file-range" class="muted small"></p><button id="file-next" class="secondary hidden">Next 32 KB</button></section>
+        </div>
+        <div id="device-sessions" class="device-pane panel hidden"></div>
+        <div id="device-activity" class="device-pane panel hidden"></div>
+        <p id="device-error" class="error" role="alert"></p>
+      </section>
+
+      <section id="session-detail" class="view">
+        <button class="text-button back" data-view-target="sessions">← Sessions</button>
+        <div class="panel">
+          <div class="section-head"><div><h2 id="session-heading"></h2><p id="session-meta" class="small"></p></div><button id="session-stop" class="secondary danger">Close terminal</button></div>
+          <div id="terminal-tools" class="toolbar hidden"><label>Columns<input id="terminal-cols" type="number" min="20" max="300" value="100"></label><label>Rows<input id="terminal-rows" type="number" min="5" max="100" value="28"></label><button id="terminal-resize" class="secondary">Resize</button><button id="terminal-interrupt" class="secondary">Ctrl+C</button></div>
+          <div id="terminal-screen" class="hidden" aria-label="Interactive terminal"></div>
+          <pre id="session-output" class="hidden"></pre>
+          <p id="session-read-state" class="muted small" aria-live="polite"></p><p id="session-error" class="error" role="alert"></p><button id="session-resume" class="secondary hidden">Resume connection</button>
+          <p class="muted small">Leaving this page detaches the view. Close or cancel ends the session on the device.</p>
+        </div>
       </section>
 
       <section id="activity" class="view">
@@ -85,6 +125,7 @@
     </form>
   </dialog>
 
+  <script src="/vendor/xterm.js" defer></script>
   <script src="/app.js" defer></script>
 </body>
 </html>

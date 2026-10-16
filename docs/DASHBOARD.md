@@ -167,3 +167,36 @@ The gateway now embeds a dependency-free dashboard under `/` with Overview, Devi
 The dashboard is backed by persisted `/api/devices`, reconciled `/api/sessions`, and bounded `/api/activity` metadata. The activity store records action family, outcome, request ID, timestamp and device association; it intentionally does not persist command output, arbitrary file contents or enrollment/private-key material.
 
 This is the control/status foundation, not the finished dashboard. Device-detail actions, human terminal attachment, file browser/transfer controls, permission onboarding, doctor/repair UI, update progress, standards-compatible public OAuth and richer attention states remain. Private-mode bearer/cookie authentication is implemented; Internet-facing deployment still requires the final OAuth/TLS edge rather than treating the admin credential as a public identity system.
+
+## Device and session controls — 2026-10-16
+
+The dashboard now includes addressable device detail views (Overview, Terminal,
+Files, Sessions and Activity). Device status, version, capabilities, last seen and
+active-work counts use the existing registry. Check agent sends a real status RPC;
+it is a connectivity check, not a substitute for local `infra doctor`.
+
+The browser terminal uses a locally bundled, MIT-licensed xterm.js 5.5.0 renderer.
+It opens and attaches to the same durable PTY IDs that MCP uses, with incremental
+32 KB transcript reads, serialized/batched input, resize, Ctrl+C and explicit close.
+Leaving the page detaches the viewer. Refreshing a session URL reattaches to that
+ID; it never opens a replacement terminal. Lost/ambiguous writes pause input and
+require an explicit Resume connection action; they are never automatically replayed.
+Terminal history expiry is reported. Job output is bounded in the browser, and jobs
+and transfers have explicit cancellation controls naming the device and session.
+
+Sessions can be filtered by device and type. Files supports directory browsing,
+parent navigation and bounded UTF-8 preview with byte ranges/next-chunk controls.
+File and terminal text are rendered as text, not injected as HTML. Sign-out clears
+private views; offline/revoked devices cannot receive browser actions.
+
+`POST /api/devices/{device_id}/operations` is inside the existing bearer/signed
+cookie + CSRF boundary. It accepts only the currently supported status, terminal,
+job list/read/cancel, file list/read/stat/hash and transfer list/status/cancel
+operations, and shares MCP's dispatcher/audit path. Responses use `no-store`.
+The static CSP allows inline **styles** for xterm's generated grid, while scripts
+remain self-only and inline scripts/remote assets remain blocked.
+
+Remaining dashboard work: file upload/download and mutation UX, full doctor/repair
+and sanitized export, permission onboarding, updater/rollback views, richer session
+metadata/history, automatic terminal fitting, and broader real-device/mobile
+acceptance. The current checks do not claim those features are implemented.

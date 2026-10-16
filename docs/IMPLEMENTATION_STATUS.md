@@ -73,3 +73,48 @@ The current code head is green on Ubuntu x64, Ubuntu ARM64, macOS ARM64, and Win
 ## Migration safety
 
 All v1 development remains side-by-side. The deployed Node v0.3 remote-control service has not been modified, restarted, or migrated by this branch.
+
+## 2026-10-16 — dashboard device/session milestone
+
+- Current security commit `e5fd994` passed both CI workflows, including Ubuntu x64,
+  Ubuntu ARM64, macOS ARM64 and Windows x64. Its fresh Mac binaries were downloaded,
+  verified independently by SHA-256, switched only in the v1 burn-in installation,
+  and successfully reconnected with Keychain-backed signed identity. After reconnect,
+  the fresh non-interactive `infra doctor --json` reported all checks healthy,
+  including credential-storage proof. Real Windows/Rose acceptance is still pending
+  because that device is offline.
+- Device detail tabs, live capability/work metadata, real agent status check and
+  device-scoped sessions/activity now exist.
+- Browser terminal uses the same PTY IDs/operations as MCP, with local xterm.js,
+  offset reads, input serialization, resize, Ctrl+C, explicit close and detach on
+  navigation. Browser refresh reattaches by URL. Ambiguous writes are not replayed.
+- Job output/cancel, transfer status/cancel, session device/type filters and directory
+  browse/bounded text preview are implemented. Full transfer/file-manager UX,
+  local doctor/repair, permission and update UI remain unfinished.
+- API acceptance extends the existing installer smoke: unauthorized/CSRF rejection,
+  restricted operation surface, shared browser/MCP PTY identity/transcript,
+  open/write/read/resize/close and bounded text preview without payload auditing.
+- `scripts/test-dashboard-browser.cjs` is an optional Playwright gate using fixture
+  API responses; it complements the real gateway/agent smoke rather than claiming
+  a full real-device browser acceptance test.
+
+### Milestone validation and private deployment
+
+- Linux ARM64 strict clippy, all 56 workspace Rust tests, both real product smokes,
+  and optimized gateway build passed.
+- The browser fixture gate passed in Chromium, including 390 px mobile layout and
+  CSP checks. It is now a dedicated GitHub Actions job using an isolated pinned
+  Playwright development dependency.
+- The Tailscale v1 acceptance gateway had an older manually launched process holding
+  its port while the configured systemd unit repeatedly failed with address-in-use.
+  Only that verified v1 process was stopped; the tested gateway was installed with
+  a retained previous binary, and its existing user service now owns the endpoint
+  with zero restarts. No v0.3 or Desktop Commander service was changed.
+- The older private listener still accepted unauthenticated device-API reads. After
+  the upgrade, unauthenticated reads return 401 and cookie mutations without CSRF
+  return 403. Real Mac signed reconnect and cookie-authenticated browser API
+  status/PTY open/write/read/resize/close passed; session reconciliation returned
+  to zero afterward.
+- Current-head GitHub CI remains to be observed after pushing this milestone. No
+  Windows-device, machine reboot, sleep/wake or full replacement benchmark claim
+  is implied by these results.

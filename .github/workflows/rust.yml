@@ -9,6 +9,20 @@ permissions:
   contents: read
 
 jobs:
+  dashboard:
+    name: Dashboard browser
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Install isolated browser test dependency
+        run: npm install --prefix "$RUNNER_TEMP/infra-dashboard-browser" --no-package-lock --ignore-scripts --no-audit --no-fund playwright@1.62.1
+      - name: Install Chromium
+        run: node "$RUNNER_TEMP/infra-dashboard-browser/node_modules/playwright/cli.js" install --with-deps chromium
+      - name: Test dashboard interactions
+        run: NODE_PATH="$RUNNER_TEMP/infra-dashboard-browser/node_modules" node scripts/test-dashboard-browser.cjs
   check:
     name: ${{ matrix.os }}
     strategy:

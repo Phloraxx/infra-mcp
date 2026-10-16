@@ -118,6 +118,42 @@ done
 curl -fsS -b "$COOKIE_JAR" "http://127.0.0.1:$PORT/api/sessions" | python3 -c 'import json,sys; assert isinstance(json.load(sys.stdin), list)'
 curl -fsS -b "$COOKIE_JAR" "http://127.0.0.1:$PORT/api/activity" | python3 -c 'import json,sys; a=json.load(sys.stdin); assert any(x["action"]=="device.connect" for x in a), a'
 
+# Browser controls share the actual agent PTY workers used by MCP.
+OP_URL="http://127.0.0.1:$PORT/api/devices/$DEVICE_ID/operations"
+dashboard_call() {
+  curl -fsS -b "$COOKIE_JAR" -H 'Content-Type: application/json' \
+    -H 'X-Infra-CSRF: 1' --data-binary "$1" "$OP_URL"
+}
+[ "$(curl -sS -o /dev/null -w '%{http_code}' -H 'Content-Type: application/json' --data '{"op":"status"}' "$OP_URL")" = 401 ]
+[ "$(curl -sS -b "$COOKIE_JAR" -o /dev/null -w '%{http_code}' -H 'Content-Type: application/json' --data '{"op":"status"}' "$OP_URL")" = 403 ]
+[ "$(curl -sS -b "$COOKIE_JAR" -o /dev/null -w '%{http_code}' -H 'Content-Type: application/json' -H 'X-Infra-CSRF: 1' --data '{"op":"exec","command":"echo must-not-run"}' "$OP_URL")" = 400 ]
+dashboard_call '{"op":"status"}' | python3 -c 'import json,sys; r=json.load(sys.stdin); assert r["status"]=="ok" and r["body"]["pid"]>0, r'
+curl -fsS "http://127.0.0.1:$PORT/vendor/xterm.js" -o "$TMP/xterm.js"
+grep -q 'Terminal' "$TMP/xterm.js"
+OPEN="$(dashboard_call '{"op":"terminal","action":{"action":"open","command":"cat","rows":24,"cols":80}}')"
+SESSION="$(python3 -c 'import json,sys; print(json.load(sys.stdin)["body"]["session"]["id"])' <<<"$OPEN")"
+dashboard_call "{\"op\":\"terminal\",\"action\":{\"action\":\"write\",\"session_id\":\"$SESSION\",\"data\":\"infra-dashboard-pty-marker\\n\"}}" >/dev/null
+SEEN=0
+for _ in $(seq 1 100); do
+  READ="$(dashboard_call "{\"op\":\"terminal\",\"action\":{\"action\":\"read\",\"session_id\":\"$SESSION\",\"offset\":0,\"length\":32768}}")"
+  if grep -q 'infra-dashboard-pty-marker' <<<"$READ"; then SEEN=1; break; fi
+  sleep .05
+done
+[ "$SEEN" = 1 ]
+# MCP sees the same session ID and transcript; no second dashboard terminal exists.
+MCP_REQUEST="$(python3 -c 'import json,sys; print(json.dumps({"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"terminal","arguments":{"device":sys.argv[1],"action":"read","session_id":sys.argv[2],"offset":0}}}))' "$DEVICE_ID" "$SESSION")"
+printf 'header = "Authorization: Bearer %s"\n' "$ADMIN_TOKEN" | curl --config - -fsS \
+  -H 'Content-Type: application/json' -H 'Accept: application/json, text/event-stream' \
+  -H 'MCP-Protocol-Version: 2025-06-18' --data-binary "$MCP_REQUEST" "http://127.0.0.1:$PORT/mcp" | \
+  python3 -c 'import json,sys; r=json.load(sys.stdin)["result"]["structuredContent"]; assert "infra-dashboard-pty-marker" in r["body"]["output"], r'
+dashboard_call "{\"op\":\"terminal\",\"action\":{\"action\":\"resize\",\"session_id\":\"$SESSION\",\"rows\":30,\"cols\":100}}" >/dev/null
+dashboard_call "{\"op\":\"terminal\",\"action\":{\"action\":\"close\",\"session_id\":\"$SESSION\"}}" >/dev/null
+# Text preview is bounded and metadata auditing does not persist its content.
+printf 'dashboard-private-file-content' > "$TMP/preview.txt"
+FILE_REQUEST="$(python3 -c 'import json,sys; print(json.dumps({"op":"files","action":{"action":"read","path":sys.argv[1],"length":9}}))' "$TMP/preview.txt")"
+dashboard_call "$FILE_REQUEST" | python3 -c 'import json,sys; r=json.load(sys.stdin)["body"]; assert r["content"]=="dashboard" and r["has_more"] is True, r'
+! curl -fsS -b "$COOKIE_JAR" "http://127.0.0.1:$PORT/api/activity" | grep -q 'dashboard-private-file-content'
+
 DOCTOR="$(HOME="$TMP/home" $TMP/bin/infra doctor --json --state-dir "$TMP/state" || true)"
 python3 - <<'PY' "$DOCTOR"
 import json,sys
@@ -134,4 +170,4 @@ PY
 curl -fsS -b "$COOKIE_JAR" -c "$COOKIE_JAR" -X DELETE -H 'X-Infra-CSRF: 1' "http://127.0.0.1:$PORT/api/auth/session" >/dev/null
 [ "$(curl -sS -b "$COOKIE_JAR" -o /dev/null -w '%{http_code}' "http://127.0.0.1:$PORT/api/devices")" = 401 ]
 
-echo "Infra installer/dashboard smoke passed: dashboard HttpOnly session auth, enrollment, native install, persisted identity/config, online agent, status and doctor."
+echo "Infra installer/dashboard smoke passed: dashboard HttpOnly session auth, enrollment, native install, persisted identity/config, online agent, status/doctor, shared browser/MCP PTY controls and bounded file preview."

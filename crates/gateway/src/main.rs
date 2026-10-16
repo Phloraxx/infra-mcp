@@ -920,6 +920,10 @@ fn build_app(state: AppState) -> Router {
         .route("/api/events", get(dashboard_events))
         .route("/api/enrollments", post(create_enrollment))
         .route("/api/devices/{device_id}/revoke", post(revoke_device))
+        .route(
+            "/api/devices/{device_id}/operations",
+            post(dashboard_operation),
+        )
         .route_layer(middleware::from_fn_with_state(
             state.clone(),
             require_api_auth,
@@ -930,6 +934,8 @@ fn build_app(state: AppState) -> Router {
         .route("/", get(dashboard_index))
         .route("/app.js", get(dashboard_js))
         .route("/styles.css", get(dashboard_css))
+        .route("/vendor/xterm.js", get(dashboard_terminal_js))
+        .route("/vendor/xterm.css", get(dashboard_terminal_css))
         .route("/downloads/install.sh", get(download_install_sh))
         .route("/downloads/install.ps1", get(download_install_ps1))
         .route("/healthz", get(health))
@@ -959,6 +965,18 @@ async fn dashboard_js() -> Response {
 async fn dashboard_css() -> Response {
     static_response(DASHBOARD_CSS, "text/css; charset=utf-8")
 }
+async fn dashboard_terminal_js() -> Response {
+    static_response(
+        include_str!("../../../apps/dashboard/vendor/xterm.js"),
+        "text/javascript; charset=utf-8",
+    )
+}
+async fn dashboard_terminal_css() -> Response {
+    static_response(
+        include_str!("../../../apps/dashboard/vendor/xterm.css"),
+        "text/css; charset=utf-8",
+    )
+}
 async fn download_install_sh() -> Response {
     static_response(INSTALL_SH, "text/x-shellscript; charset=utf-8")
 }
@@ -974,7 +992,9 @@ fn static_response(body: &'static str, content_type: &'static str) -> Response {
             (header::X_CONTENT_TYPE_OPTIONS, "nosniff"),
             (
                 header::CONTENT_SECURITY_POLICY,
-                "default-src 'self'; connect-src 'self'; img-src 'self' data:; style-src 'self'; script-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'",
+                // xterm renders its grid using generated styles. Script execution
+                // remains self-only; no remote assets or inline scripts are allowed.
+                "default-src 'self'; connect-src 'self'; img-src 'self' data:; style-src 'self' 'unsafe-inline'; script-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'",
             ),
         ],
         body,
@@ -1018,6 +1038,56 @@ async fn list_activity_http(State(state): State<AppState>) -> Response {
         Ok(activity) => Json(activity).into_response(),
         Err(error) => (StatusCode::INTERNAL_SERVER_ERROR, error.to_string()).into_response(),
     }
+}
+
+// The browser and MCP use the same typed operations, dispatcher, durable workers
+// and audit path. Keep the browser surface limited to the implemented controls.
+async fn dashboard_operation(
+    State(state): State<AppState>,
+    Path(device_id): Path<String>,
+    Json(operation): Json<AgentOperation>,
+) -> Response {
+    let supported = matches!(
+        &operation,
+        AgentOperation::Status
+            | AgentOperation::Terminal(_)
+            | AgentOperation::Jobs(JobRequest {
+                action: JobAction::List | JobAction::Read { .. } | JobAction::Cancel { .. }
+            })
+            | AgentOperation::Files(FileRequest {
+                action: FileAction::List { .. }
+                    | FileAction::Read { .. }
+                    | FileAction::Stat { .. }
+                    | FileAction::Hash { .. }
+            })
+            | AgentOperation::Transfer(TransferRequest {
+                action: TransferAction::List
+                    | TransferAction::Status { .. }
+                    | TransferAction::Cancel { .. }
+            })
+    );
+    let response = if !supported {
+        (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error":"operation is not available in the dashboard"})),
+        )
+            .into_response()
+    } else {
+        match tool_operation(&state, device_id, operation, 15_000).await {
+            Ok(McpJson(value)) => Json(value).into_response(),
+            Err(error) => (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(serde_json::json!({"error":error})),
+            )
+                .into_response(),
+        }
+    };
+    let mut response = response;
+    response.headers_mut().insert(
+        header::CACHE_CONTROL,
+        axum::http::HeaderValue::from_static("no-store"),
+    );
+    response
 }
 
 async fn dashboard_sessions(state: &AppState) -> Result<Vec<DashboardSession>, StoreError> {

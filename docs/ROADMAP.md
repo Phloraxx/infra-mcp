@@ -112,7 +112,9 @@ A full reboot remains required before declaring Linux startup validation complet
 - [x] SSE device/session/activity refresh
 - [x] private-mode MCP bearer authentication + signed HttpOnly dashboard session/CSRF boundary
 - [ ] standards-compatible public OAuth/token validation and production TLS edge
-- [ ] finished device-detail, terminal, file, permission, diagnostics and update UI
+- [x] device detail tabs, shared browser/MCP terminal and session controls
+- [x] file directory browsing and bounded UTF-8 preview
+- [ ] file upload/download/mutation, full doctor/repair, permission and update UI
 - [ ] optional tray application
 
 ## Phase 9 — benchmark and cutover
