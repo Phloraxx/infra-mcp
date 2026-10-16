@@ -256,6 +256,18 @@ fn update_runtime(
     }
 }
 
+fn mark_credential_verified(state_dir: &std::path::Path, storage: &str) {
+    let Ok(Some(mut runtime)) = infra_local_state::read_runtime(state_dir) else {
+        return;
+    };
+    runtime.credential_storage = Some(storage.to_string());
+    runtime.credential_verified_unix_ms = Some(now_ms());
+    runtime.updated_unix_ms = now_ms();
+    if let Err(error) = write_runtime(state_dir, &runtime) {
+        warn!(%error, "failed to record credential verification state");
+    }
+}
+
 async fn run_connection(
     config: Config,
     context: AgentContext,
@@ -358,6 +370,9 @@ async fn run_connection(
         Some(hello.device_name.clone()),
         Some(ack.connection_generation),
     );
+    if let Some(identity) = &config.identity {
+        mark_credential_verified(state_dir, identity.storage_label());
+    }
 
     let (out_tx, mut out_rx) = mpsc::channel::<AgentToGateway>(64);
     let writer = tokio::spawn(async move {

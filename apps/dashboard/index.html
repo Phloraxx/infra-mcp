@@ -60,9 +60,9 @@
 
       <section id="settings" class="view">
         <div class="panel settings-grid">
-          <div><h2>Gateway</h2><p class="muted">The dashboard uses the same gateway API as MCP and updates over server-sent events.</p></div>
-          <label>Admin token <input id="admin-token" type="password" autocomplete="off" placeholder="Only needed when configured"></label>
-          <button id="save-token" class="secondary">Use for this browser session</button>
+          <div><h2>Gateway</h2><p class="muted">The dashboard uses an HttpOnly browser session. Your admin credential is exchanged once and is never stored in Web Storage.</p><p id="auth-state" class="muted small">Checking authentication…</p></div>
+          <label>Admin credential <input id="admin-token" type="password" autocomplete="current-password" placeholder="Required on protected gateways"></label>
+          <div><button id="save-token" class="secondary" type="button">Sign in</button> <button id="logout-session" class="text-button" type="button">Sign out</button></div>
         </div>
       </section>
     </main>

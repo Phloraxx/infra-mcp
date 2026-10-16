@@ -26,6 +26,18 @@ ADMIN_TOKEN="$(python3 - <<'PY'
 import secrets; print(secrets.token_urlsafe(32))
 PY
 )"
+auth_config() {
+  printf 'header = "Authorization: Bearer %s"\n' "$ADMIN_TOKEN"
+}
+
+auth_curl() {
+  curl --config <(auth_config) "$@"
+}
+if INFRA_GATEWAY_BIND="0.0.0.0:$PORT" INFRA_DB_PATH="$TMP/reject.db" target/debug/infra-gateway >"$TMP/reject.log" 2>&1; then
+  echo "gateway unexpectedly allowed non-loopback bind without admin credential" >&2
+  exit 1
+fi
+grep -q 'refusing non-loopback bind without INFRA_ADMIN_TOKEN' "$TMP/reject.log"
 INFRA_GATEWAY_BIND="127.0.0.1:$PORT" \
 INFRA_DB_PATH="$TMP/infra.db" \
 INFRA_ADMIN_TOKEN="$ADMIN_TOKEN" \
@@ -39,10 +51,13 @@ for _ in $(seq 1 80); do
 done
 curl -fsS "http://127.0.0.1:$PORT/healthz" >/dev/null
 
-ENROLL_JSON="$(curl -fsS -X POST \
-  -H "Authorization: Bearer $ADMIN_TOKEN" \
+# Protected control surfaces reject unauthenticated callers when an admin credential exists.
+[ "$(curl -sS -o /dev/null -w '%{http_code}' "http://127.0.0.1:$PORT/api/devices")" = 401 ]
+[ "$(curl -sS -o /dev/null -w '%{http_code}' -X POST -H 'Content-Type: application/json' --data '{"jsonrpc":"2.0","id":0,"method":"tools/list","params":{}}' "http://127.0.0.1:$PORT/mcp")" = 401 ]
+
+ENROLL_JSON="$(printf '%s' '{"ttl_seconds":120}' | auth_curl -fsS -X POST \
   -H 'Content-Type: application/json' \
-  --data '{"ttl_seconds":120}' \
+  --data-binary @- \
   "http://127.0.0.1:$PORT/api/enrollments")"
 CODE="$(python3 -c 'import json,sys; print(json.load(sys.stdin)["code"])' <<<"$ENROLL_JSON")"
 
@@ -56,7 +71,7 @@ AGENT_PID=$!
 
 DEVICE_ID=''
 for _ in $(seq 1 100); do
-  DEVICES="$(curl -fsS "http://127.0.0.1:$PORT/api/devices")"
+  DEVICES="$(auth_curl -fsS "http://127.0.0.1:$PORT/api/devices")"
   DEVICE_ID="$(python3 -c 'import json,sys; d=json.load(sys.stdin); print(next((x["device_id"] for x in d if x.get("online")), ""))' <<<"$DEVICES")"
   [ -z "$DEVICE_ID" ] || break
   sleep .1
@@ -69,11 +84,11 @@ if [ -z "$DEVICE_ID" ]; then
 fi
 
 mcp_request() {
-  curl -fsS -X POST \
+  printf '%s' "$1" | auth_curl -fsS -X POST \
     -H 'Content-Type: application/json' \
     -H 'Accept: application/json, text/event-stream' \
     -H 'MCP-Protocol-Version: 2025-06-18' \
-    --data "$1" "http://127.0.0.1:$PORT/mcp"
+    --data-binary @- "http://127.0.0.1:$PORT/mcp"
 }
 
 TOOLS_CALL='{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}'
@@ -183,7 +198,7 @@ RUST_LOG=warn \
   target/debug/infra-agent >"$TMP/agent-reconnect.log" 2>&1 &
 AGENT_PID=$!
 for _ in $(seq 1 100); do
-  DEVICES="$(curl -fsS "http://127.0.0.1:$PORT/api/devices")"
+  DEVICES="$(auth_curl -fsS "http://127.0.0.1:$PORT/api/devices")"
   ONLINE="$(python3 -c 'import json,sys; d=json.load(sys.stdin); print(any(x.get("device_id")==sys.argv[1] and x.get("online") for x in d))' "$DEVICE_ID" <<<"$DEVICES")"
   [ "$ONLINE" != True ] || break
   sleep .1

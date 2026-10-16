@@ -4,10 +4,11 @@ use anyhow::Context;
 use axum::{
     Json, Router,
     extract::{
-        Path, State, WebSocketUpgrade,
+        Path, Request, State, WebSocketUpgrade,
         ws::{Message, WebSocket},
     },
     http::{HeaderMap, StatusCode, header},
+    middleware::{self, Next},
     response::{
         IntoResponse, Response,
         sse::{Event, KeepAlive, Sse},
@@ -16,6 +17,7 @@ use axum::{
 };
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use ed25519_dalek::{Signature, VerifyingKey};
+use hmac::{Hmac, Mac};
 use infra_protocol::{
     AgentOperation, AgentRequest, AgentResponse, AgentToGateway, AuthChallenge, ContainerAction,
     ContainerRequest, DEFAULT_CONTROL_FRAME_LIMIT, DeviceAuthStart, DeviceHello, ExecOutput,
@@ -35,6 +37,7 @@ use rmcp::{
 };
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
+use sha2::Sha256;
 use std::{
     collections::HashMap,
     convert::Infallible,
@@ -53,6 +56,9 @@ use uuid::Uuid;
 
 const AGENT_HEARTBEAT_INTERVAL: Duration = Duration::from_secs(10);
 const AGENT_HEARTBEAT_TIMEOUT: Duration = Duration::from_secs(30);
+const BROWSER_SESSION_COOKIE: &str = "infra_session";
+const BROWSER_CSRF_HEADER: &str = "x-infra-csrf";
+const BROWSER_SESSION_TTL_MS: u64 = 12 * 60 * 60 * 1000;
 
 #[derive(Clone)]
 struct AppState {
@@ -168,6 +174,19 @@ struct EnrollInput {
 struct EnrollOutput {
     device_id: String,
     device_name: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct BrowserLoginInput {
+    token: String,
+}
+
+#[derive(Debug, Serialize)]
+struct BrowserSessionView {
+    authenticated: bool,
+    mode: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    expires_at_unix_ms: Option<u64>,
 }
 
 #[derive(Debug)]
@@ -855,11 +874,15 @@ async fn main() -> anyhow::Result<()> {
         .unwrap_or_else(|_| "127.0.0.1:8788".into())
         .parse()
         .context("invalid INFRA_GATEWAY_BIND")?;
-    if !bind.ip().is_loopback()
-        && std::env::var("INFRA_ALLOW_UNAUTHENTICATED_PUBLIC").as_deref() != Ok("1")
-    {
+    let admin = std::env::var("INFRA_ADMIN_TOKEN")
+        .ok()
+        .filter(|value| !value.trim().is_empty());
+    if admin.as_deref().is_some_and(|value| value.len() < 32) {
+        anyhow::bail!("INFRA_ADMIN_TOKEN must be at least 32 bytes when configured");
+    }
+    if !bind.ip().is_loopback() && admin.is_none() {
         anyhow::bail!(
-            "refusing non-loopback bind until production OAuth exists; set INFRA_ALLOW_UNAUTHENTICATED_PUBLIC=1 only for an explicitly protected development deployment"
+            "refusing non-loopback bind without INFRA_ADMIN_TOKEN; terminate TLS before the gateway and configure an admin credential"
         );
     }
     let db_path = PathBuf::from(
@@ -869,7 +892,6 @@ async fn main() -> anyhow::Result<()> {
     let legacy = std::env::var("INFRA_LEGACY_AGENT_TOKEN")
         .ok()
         .or_else(|| std::env::var("INFRA_AGENT_TOKEN").ok());
-    let admin = std::env::var("INFRA_ADMIN_TOKEN").ok();
     let state = AppState::new(store, legacy, admin);
     let app = build_app(state.clone());
     let listener = tokio::net::TcpListener::bind(bind).await?;
@@ -888,20 +910,35 @@ fn build_app(state: AppState) -> Router {
                 .with_legacy_session_mode(false)
                 .with_json_response(true),
         );
-    Router::new()
-        .nest_service("/mcp", mcp_service)
-        .route("/", get(dashboard_index))
-        .route("/app.js", get(dashboard_js))
-        .route("/styles.css", get(dashboard_css))
-        .route("/downloads/install.sh", get(download_install_sh))
-        .route("/downloads/install.ps1", get(download_install_ps1))
-        .route("/healthz", get(health))
+    let mcp = Router::new().nest_service("/mcp", mcp_service).route_layer(
+        middleware::from_fn_with_state(state.clone(), require_mcp_auth),
+    );
+    let protected_api = Router::new()
         .route("/api/devices", get(list_devices_http))
         .route("/api/sessions", get(list_sessions_http))
         .route("/api/activity", get(list_activity_http))
         .route("/api/events", get(dashboard_events))
         .route("/api/enrollments", post(create_enrollment))
         .route("/api/devices/{device_id}/revoke", post(revoke_device))
+        .route_layer(middleware::from_fn_with_state(
+            state.clone(),
+            require_api_auth,
+        ));
+    Router::new()
+        .merge(mcp)
+        .merge(protected_api)
+        .route("/", get(dashboard_index))
+        .route("/app.js", get(dashboard_js))
+        .route("/styles.css", get(dashboard_css))
+        .route("/downloads/install.sh", get(download_install_sh))
+        .route("/downloads/install.ps1", get(download_install_ps1))
+        .route("/healthz", get(health))
+        .route(
+            "/api/auth/session",
+            get(browser_session_status)
+                .post(browser_login)
+                .delete(browser_logout),
+        )
         .route("/enroll", post(enroll))
         .route("/agent", get(agent_upgrade))
         .with_state(state)
@@ -1033,12 +1070,8 @@ async fn list_devices_http(State(state): State<AppState>) -> Response {
 
 async fn create_enrollment(
     State(state): State<AppState>,
-    headers: HeaderMap,
     Json(input): Json<CreateEnrollmentInput>,
 ) -> Response {
-    if !admin_authorized(&state, &headers) {
-        return (StatusCode::UNAUTHORIZED, "admin authorization required").into_response();
-    }
     let ttl_ms = input.ttl_seconds.unwrap_or(300).clamp(30, 900) * 1000;
     match state.store.create_enrollment(ttl_ms) {
         Ok(created) => {
@@ -1112,14 +1145,7 @@ async fn enroll(State(state): State<AppState>, Json(input): Json<EnrollInput>) -
     }
 }
 
-async fn revoke_device(
-    State(state): State<AppState>,
-    Path(device_id): Path<String>,
-    headers: HeaderMap,
-) -> Response {
-    if !admin_authorized(&state, &headers) {
-        return (StatusCode::UNAUTHORIZED, "admin authorization required").into_response();
-    }
+async fn revoke_device(State(state): State<AppState>, Path(device_id): Path<String>) -> Response {
     match state.store.revoke(&device_id) {
         Ok(true) => {
             state.devices.write().await.remove(&device_id);
@@ -1134,14 +1160,203 @@ async fn revoke_device(
     }
 }
 
-fn admin_authorized(state: &AppState, headers: &HeaderMap) -> bool {
+fn constant_time_eq(left: &[u8], right: &[u8]) -> bool {
+    if left.len() != right.len() {
+        return false;
+    }
+    let mut difference = 0_u8;
+    for (&a, &b) in left.iter().zip(right) {
+        difference |= a ^ b;
+    }
+    difference == 0
+}
+
+fn bearer_authorized(state: &AppState, headers: &HeaderMap) -> bool {
     let Some(expected) = &state.admin_token else {
         return true;
     };
     headers
-        .get(axum::http::header::AUTHORIZATION)
-        .and_then(|v| v.to_str().ok())
-        .is_some_and(|v| v.strip_prefix("Bearer ") == Some(expected.as_ref()))
+        .get(header::AUTHORIZATION)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.strip_prefix("Bearer "))
+        .is_some_and(|provided| constant_time_eq(provided.as_bytes(), expected.as_bytes()))
+}
+
+fn browser_cookie(headers: &HeaderMap) -> Option<&str> {
+    let cookies = headers.get(header::COOKIE)?.to_str().ok()?;
+    cookies.split(';').find_map(|part| {
+        let (name, value) = part.trim().split_once('=')?;
+        (name == BROWSER_SESSION_COOKIE).then_some(value)
+    })
+}
+
+type HmacSha256 = Hmac<Sha256>;
+
+fn signed_session_message(expires_at_unix_ms: u64, nonce: &str) -> String {
+    format!("infra-browser-session-v1|{expires_at_unix_ms}|{nonce}")
+}
+
+fn browser_session_signature(secret: &[u8], expires_at_unix_ms: u64, nonce: &str) -> String {
+    let mut mac = HmacSha256::new_from_slice(secret).expect("HMAC accepts arbitrary key length");
+    mac.update(signed_session_message(expires_at_unix_ms, nonce).as_bytes());
+    URL_SAFE_NO_PAD.encode(mac.finalize().into_bytes())
+}
+
+fn create_browser_session_cookie(secret: &[u8]) -> Result<(String, u64), &'static str> {
+    let mut nonce = [0_u8; 24];
+    getrandom::fill(&mut nonce).map_err(|_| "OS random source unavailable")?;
+    let nonce = URL_SAFE_NO_PAD.encode(nonce);
+    let expires = now_ms().saturating_add(BROWSER_SESSION_TTL_MS);
+    let signature = browser_session_signature(secret, expires, &nonce);
+    Ok((format!("v1.{expires}.{nonce}.{signature}"), expires))
+}
+
+fn browser_session_expiry(state: &AppState, headers: &HeaderMap) -> Option<u64> {
+    let secret = state.admin_token.as_deref()?;
+    let cookie = browser_cookie(headers)?;
+    let mut fields = cookie.split('.');
+    if fields.next()? != "v1" {
+        return None;
+    }
+    let expires = fields.next()?.parse::<u64>().ok()?;
+    let nonce = fields.next()?;
+    let signature = fields.next()?;
+    if fields.next().is_some() || nonce.len() > 128 || expires <= now_ms() {
+        return None;
+    }
+    let signature = URL_SAFE_NO_PAD.decode(signature).ok()?;
+    let mut mac = HmacSha256::new_from_slice(secret.as_bytes()).ok()?;
+    mac.update(signed_session_message(expires, nonce).as_bytes());
+    mac.verify_slice(&signature).ok()?;
+    Some(expires)
+}
+
+async fn require_mcp_auth(State(state): State<AppState>, request: Request, next: Next) -> Response {
+    if bearer_authorized(&state, request.headers()) {
+        next.run(request).await
+    } else {
+        (StatusCode::UNAUTHORIZED, "bearer authorization required").into_response()
+    }
+}
+
+async fn require_api_auth(State(state): State<AppState>, request: Request, next: Next) -> Response {
+    if state.admin_token.is_none() || bearer_authorized(&state, request.headers()) {
+        return next.run(request).await;
+    }
+    if browser_session_expiry(&state, request.headers()).is_none() {
+        return (StatusCode::UNAUTHORIZED, "dashboard authorization required").into_response();
+    }
+    let safe_method = matches!(
+        *request.method(),
+        axum::http::Method::GET | axum::http::Method::HEAD | axum::http::Method::OPTIONS
+    );
+    let csrf_ok = request
+        .headers()
+        .get(BROWSER_CSRF_HEADER)
+        .and_then(|value| value.to_str().ok())
+        == Some("1");
+    if safe_method || csrf_ok {
+        next.run(request).await
+    } else {
+        (StatusCode::FORBIDDEN, "CSRF header required").into_response()
+    }
+}
+
+fn secure_cookie_requested(headers: &HeaderMap) -> bool {
+    headers
+        .get("x-forwarded-proto")
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(|value| value.eq_ignore_ascii_case("https"))
+}
+
+fn session_cookie(value: &str, max_age_seconds: u64, secure: bool) -> String {
+    format!(
+        "{BROWSER_SESSION_COOKIE}={value}; Path=/; HttpOnly; SameSite=Strict; Max-Age={max_age_seconds}{}",
+        if secure { "; Secure" } else { "" }
+    )
+}
+
+async fn browser_session_status(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Json<BrowserSessionView> {
+    if state.admin_token.is_none() {
+        return Json(BrowserSessionView {
+            authenticated: true,
+            mode: "open_loopback",
+            expires_at_unix_ms: None,
+        });
+    }
+    if bearer_authorized(&state, &headers) {
+        return Json(BrowserSessionView {
+            authenticated: true,
+            mode: "bearer",
+            expires_at_unix_ms: None,
+        });
+    }
+    let expires = browser_session_expiry(&state, &headers);
+    Json(BrowserSessionView {
+        authenticated: expires.is_some(),
+        mode: if expires.is_some() {
+            "browser_session"
+        } else {
+            "none"
+        },
+        expires_at_unix_ms: expires,
+    })
+}
+
+async fn browser_login(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(input): Json<BrowserLoginInput>,
+) -> Response {
+    let Some(expected) = &state.admin_token else {
+        return Json(BrowserSessionView {
+            authenticated: true,
+            mode: "open_loopback",
+            expires_at_unix_ms: None,
+        })
+        .into_response();
+    };
+    if !constant_time_eq(input.token.as_bytes(), expected.as_bytes()) {
+        return (StatusCode::UNAUTHORIZED, "invalid admin credential").into_response();
+    }
+    let (session, expires) = match create_browser_session_cookie(expected.as_bytes()) {
+        Ok(value) => value,
+        Err(error) => return (StatusCode::INTERNAL_SERVER_ERROR, error).into_response(),
+    };
+    let mut response = Json(BrowserSessionView {
+        authenticated: true,
+        mode: "browser_session",
+        expires_at_unix_ms: Some(expires),
+    })
+    .into_response();
+    let cookie = session_cookie(
+        &session,
+        BROWSER_SESSION_TTL_MS / 1000,
+        secure_cookie_requested(&headers),
+    );
+    if let Ok(value) = axum::http::HeaderValue::from_str(&cookie) {
+        response.headers_mut().insert(header::SET_COOKIE, value);
+    }
+    response
+}
+
+async fn browser_logout(headers: HeaderMap) -> Response {
+    if headers
+        .get(BROWSER_CSRF_HEADER)
+        .and_then(|value| value.to_str().ok())
+        != Some("1")
+    {
+        return (StatusCode::FORBIDDEN, "CSRF header required").into_response();
+    }
+    let mut response = StatusCode::NO_CONTENT.into_response();
+    let cookie = session_cookie("", 0, secure_cookie_requested(&headers));
+    if let Ok(value) = axum::http::HeaderValue::from_str(&cookie) {
+        response.headers_mut().insert(header::SET_COOKIE, value);
+    }
+    response
 }
 
 async fn device_views(state: &AppState) -> Result<Vec<McpDeviceView>, StoreError> {
@@ -1693,6 +1908,37 @@ mod tests {
         .await
         .unwrap()
     }
+    #[test]
+    fn browser_session_survives_gateway_state_restart() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(dir.path().join("first.db")).unwrap();
+        let state = AppState::new(store, None, Some(TEST_TOKEN.into()));
+        let (cookie, expires) = create_browser_session_cookie(TEST_TOKEN.as_bytes()).unwrap();
+        assert!(expires > now_ms());
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            header::COOKIE,
+            axum::http::HeaderValue::from_str(&format!("{BROWSER_SESSION_COOKIE}={cookie}"))
+                .unwrap(),
+        );
+        assert!(browser_session_expiry(&state, &headers).is_some());
+
+        let restarted = AppState::new(
+            Store::open(dir.path().join("second.db")).unwrap(),
+            None,
+            Some(TEST_TOKEN.into()),
+        );
+        assert!(browser_session_expiry(&restarted, &headers).is_some());
+        assert!(!bearer_authorized(&restarted, &headers));
+
+        let mut tampered = headers.clone();
+        tampered.insert(
+            header::COOKIE,
+            axum::http::HeaderValue::from_static("infra_session=v1.1.invalid.invalid"),
+        );
+        assert!(browser_session_expiry(&restarted, &tampered).is_none());
+    }
+
     #[tokio::test]
     async fn legacy_handshake_and_exec_round_trip() {
         let (_dir, state, addr, server) = spawn_test_gateway().await;

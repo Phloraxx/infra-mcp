@@ -110,8 +110,9 @@ A full reboot remains required before declaring Linux startup validation complet
 - [x] functional embedded dashboard foundation
 - [x] dashboard enrollment and generated install command
 - [x] SSE device/session/activity refresh
+- [x] private-mode MCP bearer authentication + signed HttpOnly dashboard session/CSRF boundary
+- [ ] standards-compatible public OAuth/token validation and production TLS edge
 - [ ] finished device-detail, terminal, file, permission, diagnostics and update UI
-- [ ] production browser authentication/session
 - [ ] optional tray application
 
 ## Phase 9 — benchmark and cutover

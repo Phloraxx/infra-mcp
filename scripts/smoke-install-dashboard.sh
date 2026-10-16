@@ -43,10 +43,40 @@ curl -fsS "http://127.0.0.1:$PORT/healthz" >/dev/null
 curl -fsS "http://127.0.0.1:$PORT/" | grep -q '<title>Infra</title>'
 curl -fsS "http://127.0.0.1:$PORT/app.js" | grep -q 'create-enrollment'
 curl -fsS "http://127.0.0.1:$PORT/downloads/install.sh" | grep -q 'Infra installer'
+! grep -q 'sessionStorage' apps/dashboard/app.js
 
-ENROLL_JSON="$(curl -fsS -X POST \
-  -H "Authorization: Bearer $ADMIN_TOKEN" \
+COOKIE_JAR="$TMP/browser.cookies"
+[ "$(curl -sS -o /dev/null -w '%{http_code}' "http://127.0.0.1:$PORT/api/devices")" = 401 ]
+python3 - "$ADMIN_TOKEN" <<'PY' | curl -fsS -c "$COOKIE_JAR" -H 'Content-Type: application/json' --data-binary @- \
+  "http://127.0.0.1:$PORT/api/auth/session" | \
+  python3 -c 'import json,sys; r=json.load(sys.stdin); assert r["authenticated"] is True and r["mode"]=="browser_session", r'
+import json,sys
+print(json.dumps({"token":sys.argv[1]}))
+PY
+grep -q 'infra_session' "$COOKIE_JAR"
+curl -fsS -b "$COOKIE_JAR" "http://127.0.0.1:$PORT/api/auth/session" | \
+  python3 -c 'import json,sys; r=json.load(sys.stdin); assert r["authenticated"] is True, r'
+
+# Signed browser sessions survive a gateway restart as long as the admin credential is unchanged.
+kill "$GW_PID"
+wait "$GW_PID" 2>/dev/null || true
+INFRA_GATEWAY_BIND="127.0.0.1:$PORT" \
+INFRA_DB_PATH="$TMP/infra.db" \
+INFRA_ADMIN_TOKEN="$ADMIN_TOKEN" \
+RUST_LOG=warn \
+  target/debug/infra-gateway >"$TMP/gateway.log" 2>&1 &
+GW_PID=$!
+for _ in $(seq 1 100); do
+  curl -fsS "http://127.0.0.1:$PORT/healthz" >/dev/null 2>&1 && break
+  sleep .05
+done
+curl -fsS -b "$COOKIE_JAR" "http://127.0.0.1:$PORT/api/auth/session" | \
+  python3 -c 'import json,sys; r=json.load(sys.stdin); assert r["authenticated"] is True and r["mode"]=="browser_session", r'
+
+[ "$(curl -sS -b "$COOKIE_JAR" -o /dev/null -w '%{http_code}' -X POST -H 'Content-Type: application/json' --data '{"ttl_seconds":120}' "http://127.0.0.1:$PORT/api/enrollments")" = 403 ]
+ENROLL_JSON="$(curl -fsS -b "$COOKIE_JAR" -X POST \
   -H 'Content-Type: application/json' \
+  -H 'X-Infra-CSRF: 1' \
   --data '{"ttl_seconds":120}' \
   "http://127.0.0.1:$PORT/api/enrollments")"
 CODE="$(python3 -c 'import json,sys; print(json.load(sys.stdin)["code"])' <<<"$ENROLL_JSON")"
@@ -77,7 +107,7 @@ RUST_LOG=warn "$TMP/bin/infra-agent" --state-dir "$TMP/state" >"$TMP/agent.log" 
 AGENT_PID=$!
 DEVICE_ID=''
 for _ in $(seq 1 100); do
-  DEVICES="$(curl -fsS "http://127.0.0.1:$PORT/api/devices")"
+  DEVICES="$(curl -fsS -b "$COOKIE_JAR" "http://127.0.0.1:$PORT/api/devices")"
   DEVICE_ID="$(python3 -c 'import json,sys; d=json.load(sys.stdin); print(next((x["device_id"] for x in d if x.get("online")), ""))' <<<"$DEVICES")"
   [ -z "$DEVICE_ID" ] || break
   sleep .05
@@ -85,8 +115,8 @@ done
 [ -n "$DEVICE_ID" ] || { cat "$TMP/agent.log" >&2; exit 1; }
 
 # Dashboard session/activity APIs are live and activity is persisted.
-curl -fsS "http://127.0.0.1:$PORT/api/sessions" | python3 -c 'import json,sys; assert isinstance(json.load(sys.stdin), list)'
-curl -fsS "http://127.0.0.1:$PORT/api/activity" | python3 -c 'import json,sys; a=json.load(sys.stdin); assert any(x["action"]=="device.connect" for x in a), a'
+curl -fsS -b "$COOKIE_JAR" "http://127.0.0.1:$PORT/api/sessions" | python3 -c 'import json,sys; assert isinstance(json.load(sys.stdin), list)'
+curl -fsS -b "$COOKIE_JAR" "http://127.0.0.1:$PORT/api/activity" | python3 -c 'import json,sys; a=json.load(sys.stdin); assert any(x["action"]=="device.connect" for x in a), a'
 
 DOCTOR="$(HOME="$TMP/home" $TMP/bin/infra doctor --json --state-dir "$TMP/state" || true)"
 python3 - <<'PY' "$DOCTOR"
@@ -101,4 +131,7 @@ assert checks["gateway"]["status"] == "ok", r
 assert checks["startup"]["status"] == "problem", r
 PY
 
-echo "Infra installer/dashboard smoke passed: dashboard, enrollment, native install, persisted identity/config, online agent, status and doctor."
+curl -fsS -b "$COOKIE_JAR" -c "$COOKIE_JAR" -X DELETE -H 'X-Infra-CSRF: 1' "http://127.0.0.1:$PORT/api/auth/session" >/dev/null
+[ "$(curl -sS -b "$COOKIE_JAR" -o /dev/null -w '%{http_code}' "http://127.0.0.1:$PORT/api/devices")" = 401 ]
+
+echo "Infra installer/dashboard smoke passed: dashboard HttpOnly session auth, enrollment, native install, persisted identity/config, online agent, status and doctor."

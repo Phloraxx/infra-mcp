@@ -29,6 +29,18 @@ if [ -z "${DBUS_SESSION_BUS_ADDRESS:-}" ] && [ -S "$XDG_RUNTIME_DIR/bus" ]; then
   export DBUS_SESSION_BUS_ADDRESS="unix:path=$XDG_RUNTIME_DIR/bus"
 fi
 
+admin_token() {
+  sed -n 's/^INFRA_ADMIN_TOKEN=//p' "$GW_ENV"
+}
+
+auth_config() {
+  printf 'header = "Authorization: Bearer %s"\n' "$(admin_token)"
+}
+
+auth_curl() {
+  curl --config <(auth_config) "$@"
+}
+
 wait_health() {
   for _ in $(seq 1 120); do
     curl -fsS "$GW_URL/healthz" >/dev/null 2>&1 && return 0
@@ -39,7 +51,7 @@ wait_health() {
 }
 
 online_device() {
-  curl -fsS "$GW_URL/api/devices" | python3 -c 'import json,sys; d=json.load(sys.stdin); print(next((x["device_id"] for x in d if x.get("online")), ""))'
+  auth_curl -fsS "$GW_URL/api/devices" | python3 -c 'import json,sys; d=json.load(sys.stdin); print(next((x["device_id"] for x in d if x.get("online")), ""))'
 }
 
 wait_device() {
@@ -55,7 +67,7 @@ wait_device() {
 
 mcp_call() {
   local name="$1" args_json="$2"
-  python3 - "$name" "$args_json" <<'PY' | curl -fsS -X POST \
+  python3 - "$name" "$args_json" <<'PY' | auth_curl -fsS -X POST \
     -H 'Content-Type: application/json' \
     -H 'Accept: application/json, text/event-stream' \
     -H 'MCP-Protocol-Version: 2025-06-18' \
@@ -106,9 +118,8 @@ UNIT
 
   local code_args=()
   if [ ! -f "$AGENT_STATE/identity.json" ]; then
-    local token code
-    token="$(sed -n 's/^INFRA_ADMIN_TOKEN=//p' "$GW_ENV")"
-    code="$(curl -fsS -X POST -H "Authorization: Bearer $token" -H 'Content-Type: application/json' --data '{"ttl_seconds":180}' "$GW_URL/api/enrollments" | python3 -c 'import json,sys; print(json.load(sys.stdin)["code"])')"
+    local code
+    code="$(printf '%s' '{"ttl_seconds":180}' | auth_curl -fsS -X POST -H 'Content-Type: application/json' --data-binary @- "$GW_URL/api/enrollments" | python3 -c 'import json,sys; print(json.load(sys.stdin)["code"])')"
     code_args=(--code "$code")
   fi
 
@@ -138,7 +149,7 @@ pty_write_expect() {
 wait_no_active_work() {
   local device="$1" summary=''
   for _ in $(seq 1 150); do
-    summary="$(curl -fsS "$GW_URL/api/devices" | python3 -c 'import json,sys; d=json.load(sys.stdin); target=sys.argv[1]; x=next((v for v in d if v.get("device_id")==target), None); print("missing" if x is None else "{}:{}:{}".format(x.get("active_jobs",0),x.get("active_terminals",0),x.get("active_transfers",0)))' "$device")"
+    summary="$(auth_curl -fsS "$GW_URL/api/devices" | python3 -c 'import json,sys; d=json.load(sys.stdin); target=sys.argv[1]; x=next((v for v in d if v.get("device_id")==target), None); print("missing" if x is None else "{}:{}:{}".format(x.get("active_jobs",0),x.get("active_terminals",0),x.get("active_transfers",0)))' "$device")"
     [ "$summary" = "0:0:0" ] && return 0
     sleep .1
   done
@@ -210,7 +221,7 @@ run_test() {
 status_burnin() {
   systemctl --user --no-pager --full status infra-v1-burnin-gateway.service infra-agent.service || true
   [ ! -x "$BIN/infra" ] || "$BIN/infra" --state-dir "$AGENT_STATE" status
-  [ ! -f "$GW_STATE/infra.db" ] || curl -fsS "$GW_URL/api/devices" || true
+  [ ! -f "$GW_STATE/infra.db" ] || auth_curl -fsS "$GW_URL/api/devices" || true
   printf '\nUser linger: '
   loginctl show-user "$USER" -p Linger --value 2>/dev/null || echo unknown
 }

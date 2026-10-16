@@ -249,11 +249,11 @@ async fn doctor(state_dir: &Path) -> DoctorReport {
         false,
     ));
 
+    let runtime = read_runtime(state_dir).ok().flatten();
     if enrolled {
-        checks.push(identity_storage_check(state_dir));
+        checks.push(identity_storage_check(state_dir, runtime.as_ref()));
     }
 
-    let runtime = read_runtime(state_dir).ok().flatten();
     let alive = runtime
         .as_ref()
         .is_some_and(|runtime| process_alive(runtime.pid));
@@ -372,7 +372,7 @@ fn remove_native_identity_credentials(state_dir: &Path) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn identity_storage_check(state_dir: &Path) -> DoctorCheck {
+fn identity_storage_check(state_dir: &Path, runtime: Option<&RuntimeStatus>) -> DoctorCheck {
     let path = identity_path(state_dir);
     let bytes = match fs::read(&path) {
         Ok(bytes) => bytes,
@@ -405,32 +405,46 @@ fn identity_storage_check(state_dir: &Path) -> DoctorCheck {
         ),
         Some(2) => match value["storage"].as_str() {
             Some("native_keyring") => {
-                let Some(key_id) = value["key_id"].as_str() else {
+                if value["key_id"].as_str().is_none() {
                     return check(
                         "credential_storage",
                         false,
                         "native credential metadata is missing key_id".into(),
                         false,
                     );
-                };
-                match infra_platform::secret_store::get_device_identity(key_id) {
-                    Ok(secret) if secret.len() == 32 => check(
+                }
+                match runtime {
+                    Some(runtime)
+                        if runtime.state == "online"
+                            && runtime.credential_storage.as_deref() == Some("native_keyring")
+                            && runtime.credential_verified_unix_ms.is_some() =>
+                    {
+                        check(
+                            "credential_storage",
+                            true,
+                            format!(
+                                "native OS credential was loaded successfully by the online agent and used for signed authentication (verified at {})",
+                                runtime.credential_verified_unix_ms.unwrap_or_default()
+                            ),
+                            false,
+                        )
+                    }
+                    Some(runtime)
+                        if runtime.credential_storage.as_deref() == Some("native_keyring")
+                            && runtime.credential_verified_unix_ms.is_some() =>
+                    {
+                        check(
+                            "credential_storage",
+                            false,
+                            "native OS credential was verified previously, but the agent is not currently online; reconnect the agent to verify it non-interactively".into(),
+                            true,
+                        )
+                    }
+                    _ => check(
                         "credential_storage",
+                        false,
+                        "native OS credential is configured but has not yet been verified by a successful signed agent connection".into(),
                         true,
-                        "device signing key is available from the native OS credential store".into(),
-                        false,
-                    ),
-                    Ok(_) => check(
-                        "credential_storage",
-                        false,
-                        "native credential contains an invalid signing-key length".into(),
-                        false,
-                    ),
-                    Err(error) => check(
-                        "credential_storage",
-                        false,
-                        format!("native credential is unavailable: {error}"),
-                        false,
                     ),
                 }
             }
@@ -722,5 +736,33 @@ mod tests {
         );
         assert!(take_flag(&mut args, "--json"));
         assert!(args.is_empty());
+    }
+
+    #[test]
+    fn native_credential_doctor_uses_agent_runtime_proof() {
+        let dir = tempfile::tempdir().unwrap();
+        infra_local_state::ensure_state_dir(dir.path()).unwrap();
+        fs::write(
+            identity_path(dir.path()),
+            serde_json::to_vec_pretty(&serde_json::json!({
+                "version": 2,
+                "device_id": "test-device",
+                "device_name": "Test Device",
+                "key_id": "does-not-need-to-exist-for-doctor",
+                "storage": "native_keyring"
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        let mut runtime = RuntimeStatus::new("online");
+        runtime.pid = std::process::id();
+        runtime.credential_storage = Some("native_keyring".into());
+        runtime.credential_verified_unix_ms = Some(123);
+        infra_local_state::write_runtime(dir.path(), &runtime).unwrap();
+
+        let result = identity_storage_check(dir.path(), Some(&runtime));
+        assert_eq!(result.status, "ok");
+        assert!(result.detail.contains("online agent"));
+        assert!(result.detail.contains("signed authentication"));
     }
 }

@@ -18,6 +18,7 @@ const IDENTITY_VERSION: u8 = 2;
 pub struct DeviceIdentity {
     pub device_id: String,
     pub device_name: String,
+    storage: SecretStorage,
     signing_key: SigningKey,
 }
 
@@ -84,6 +85,13 @@ struct EnrollResponse {
 }
 
 impl DeviceIdentity {
+    pub fn storage_label(&self) -> &'static str {
+        match self.storage {
+            SecretStorage::NativeKeyring => "native_keyring",
+            SecretStorage::FileFallback => "file_fallback",
+        }
+    }
+
     #[cfg(test)]
     pub fn public_key_bytes(&self) -> [u8; 32] {
         self.signing_key.verifying_key().to_bytes()
@@ -123,6 +131,7 @@ pub fn load(path: &Path) -> anyhow::Result<Option<DeviceIdentity>> {
     Ok(Some(DeviceIdentity {
         device_id: stored.device_id,
         device_name: stored.device_name,
+        storage: stored.storage,
         signing_key: SigningKey::from_bytes(&secret),
     }))
 }
@@ -190,6 +199,7 @@ pub async fn load_or_enroll(
     Ok(Some(DeviceIdentity {
         device_id: enrolled.device_id,
         device_name: enrolled.device_name,
+        storage: stored.storage,
         signing_key,
     }))
 }

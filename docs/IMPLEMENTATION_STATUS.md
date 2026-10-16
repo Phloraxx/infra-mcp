@@ -28,13 +28,13 @@ This file records what exists in code. Product intent remains in the other desig
 - Structured service operations: list/status/start/stop/restart using systemd-user on Linux, current-user launchd domain on macOS, and Windows SCM as the current OS user. These do not bypass OS privilege checks; broader elevated service control remains a privileged-helper task.
 - Structured Docker operations: list, inspect, bounded logs, start, stop and restart through direct argv calls. Inspect output redacts sensitive environment/key fields by default.
 - Structured Git operations: status, diff, log, branches, remotes, fetch, fast-forward-only pull, and push through direct argv calls with interactive credential prompts disabled. HTTP remote userinfo is redacted from returned URLs/output.
-- Local `config.json` and `runtime.json` state shared by agent and CLI. Runtime status records PID, connection state, stable device identity, generation, last successful connection, and sanitized last error.
+- Local `config.json` and `runtime.json` state shared by agent and CLI. Runtime status records PID, connection state, stable device identity, generation, last successful connection, sanitized last error, and a non-secret credential-storage verification timestamp written only after successful signed gateway authentication.
 - `infra` CLI: `status`, `doctor`, `install`, `repair`, `reconnect`, and `uninstall`, including JSON status/doctor output.
 - Startup adapters implemented for Linux systemd user services, macOS LaunchAgents, and Windows logon Scheduled Tasks. Linux startup reconstructs the standard user-bus environment for non-login/remote shells, and idempotent reinstall/repair reloads and restarts the controller so a replaced binary actually becomes active. Linux uses `KillMode=process` so durable PTY/job workers outlive controller-only restarts; `infra uninstall` explicitly terminates persisted Infra worker trees to avoid leaking them.
 - Native bootstrap installers: `scripts/install.sh` and `scripts/install.ps1`. Development/source mode is testable without releases; release mode verifies SHA-256 sidecars before installing binaries.
 - GitHub tag-release workflow defined for Linux x64/ARM64, macOS Intel/ARM64, and Windows x64/ARM64 assets plus SHA-256 sidecars.
-- Embedded minimal dashboard served by the gateway with Overview, Devices, Sessions, Activity and Settings, Add Device enrollment flow, generated OS install commands, responsive layout, SSE refresh, and polling fallback.
-- Dashboard APIs expose persisted devices, reconciled active work and bounded audit metadata. Audit records action/outcome/request IDs only, not stdout, file contents, enrollment secrets, or private keys.
+- Embedded minimal dashboard served by the gateway with Overview, Devices, Sessions, Activity and Settings, Add Device enrollment flow, generated OS install commands, responsive layout, SSE refresh, polling fallback, and private-mode browser authentication.
+- Dashboard APIs expose persisted devices, reconciled active work and bounded audit metadata. In private mode, MCP requires the admin bearer credential while the browser exchanges that credential once for a short-lived HMAC-signed `HttpOnly; SameSite=Strict` session cookie; cookie-authenticated state-changing API calls also require the `X-Infra-CSRF` header. The admin credential is not stored in Web Storage. Audit records action/outcome/request IDs only, not stdout, file contents, enrollment secrets, or private keys.
 - Static dashboard/bootstrap responses use no-store, nosniff and a restrictive Content Security Policy.
 - Structured JSON tracing and Linux/macOS/Windows Rust CI definition.
 - Isolated `scripts/smoke-v1.sh` verifies enrollment, signed authentication, MCP `exec`, identity persistence, and reconnect.
@@ -48,7 +48,7 @@ On the Linux ARM64 development host:
 
 - `cargo fmt --all -- --check`
 - `cargo clippy --workspace --all-targets -- -D warnings`
-- `cargo test --workspace` — 54 Rust tests, including real PTY/job workers, inherited-nonblocking control-socket normalization, protected-identity metadata/file-fallback coverage, search/edit/hash, resumable transfer, structured system/network parsers, Git, container redaction and local lifecycle tests.
+- `cargo test --workspace` — 56 Rust tests, including real PTY/job workers, inherited-nonblocking control-socket normalization, protected-identity metadata/file-fallback coverage, search/edit/hash, resumable transfer, structured system/network parsers, Git, container redaction and local lifecycle tests.
 - `./scripts/smoke-v1.sh`
 - `./scripts/smoke-install-dashboard.sh`
 
@@ -56,8 +56,8 @@ The current code head is green on Ubuntu x64, Ubuntu ARM64, macOS ARM64, and Win
 
 ### Intentionally incomplete
 
-- Production MCP/dashboard OAuth and a proper browser login/session. The gateway still refuses non-loopback binding by default unless an explicit development override is supplied.
-- Device signing keys now use native OS credential storage when available (macOS Keychain Services, Windows Credential Manager, Linux Secret Service) with automatic v1→v2 identity migration and doctor visibility. Headless Linux without Secret Service intentionally falls back to a `0600` private identity file; eliminating or encrypting that fallback and broader Windows state-directory ACL hardening remain pending.
+- Standards-compatible OAuth/token validation for an Internet-facing/public MCP endpoint is still pending. Private-mode access control is implemented: non-loopback binding requires a >=32-byte admin credential, MCP accepts that credential as a bearer token, protected dashboard APIs accept bearer or a signed HttpOnly browser session, and rotating the admin credential invalidates existing browser sessions.
+- Device signing keys now use native OS credential storage when available (macOS Keychain Services, Windows Credential Manager, Linux Secret Service) with automatic v1→v2 identity migration. Real macOS ARM64 validation migrated the side-by-side v1 identity into `native_keyring`, removed the private key from `identity.json`, and reconnected successfully with signed authentication. `infra doctor` no longer reads secret bytes from the native store; it consumes a non-secret runtime proof written by the agent after a successful signed connection. Headless Linux without Secret Service intentionally falls back to a `0600` private identity file; eliminating or encrypting that fallback and broader Windows state-directory ACL hardening remain pending.
 - Cryptographically signed release/update metadata. Bootstrap release installs currently verify SHA-256 assets; the steady-state updater and rollback chain remain to be built.
 - `infra update`, staged binary replacement, health-check rollback, sanitized log export, and permission-specific doctor checks.
 - Real-device reboot/sleep-wake testing across macOS and Windows remains. Linux user-service install/reinstall/controller-restart behavior is exercised on Oracle ARM64, and macOS ARM64 has a side-by-side native install with signed reconnect plus controller/gateway persistence burn-in; full machine reboot/reconnect tests are still required.

@@ -3,6 +3,7 @@ set -euo pipefail
 
 GW_URL="${INFRA_BURNIN_GATEWAY_HTTP:?set INFRA_BURNIN_GATEWAY_HTTP, e.g. http://100.x.y.z:18790}"
 DEVICE="${INFRA_BURNIN_DEVICE_ID:?set INFRA_BURNIN_DEVICE_ID}"
+ADMIN_TOKEN="${INFRA_BURNIN_ADMIN_TOKEN:?set INFRA_BURNIN_ADMIN_TOKEN}"
 REMOTE_RECONNECT_COMMAND="${INFRA_BURNIN_REMOTE_RECONNECT_COMMAND:?set INFRA_BURNIN_REMOTE_RECONNECT_COMMAND}"
 MCP_HOST_HEADER="${INFRA_BURNIN_MCP_HOST_HEADER:-localhost}"
 GATEWAY_RESTART_COMMAND="${INFRA_BURNIN_GATEWAY_RESTART_COMMAND:-}"
@@ -11,9 +12,17 @@ need() { command -v "$1" >/dev/null || { echo "missing required command: $1" >&2
 need curl
 need python3
 
+auth_config() {
+  printf 'header = "Authorization: Bearer %s"\n' "$ADMIN_TOKEN"
+}
+
+auth_curl() {
+  curl --config <(auth_config) "$@"
+}
+
 mcp_call() {
   local name="$1" args_json="$2" max_time="${3:-12}"
-  python3 - "$name" "$args_json" <<'PY' | curl --max-time "$max_time" -fsS -X POST \
+  python3 - "$name" "$args_json" <<'PY' | auth_curl --max-time "$max_time" -fsS -X POST \
     -H "Host: $MCP_HOST_HEADER" \
     -H 'Content-Type: application/json' \
     -H 'Accept: application/json, text/event-stream' \
@@ -26,7 +35,7 @@ PY
 
 device_field() {
   local field="$1"
-  curl -fsS "$GW_URL/api/devices" | python3 -c 'import json,sys; device,field=sys.argv[1:3]; rows=json.load(sys.stdin); row=next((x for x in rows if x.get("device_id")==device), None); print("" if row is None else ("1" if field == "online" and row.get("online") else "0" if field == "online" else "" if row.get(field) is None else row.get(field)))' "$DEVICE" "$field"
+  auth_curl -fsS "$GW_URL/api/devices" | python3 -c 'import json,sys; device,field=sys.argv[1:3]; rows=json.load(sys.stdin); row=next((x for x in rows if x.get("device_id")==device), None); print("" if row is None else ("1" if field == "online" and row.get("online") else "0" if field == "online" else "" if row.get(field) is None else row.get(field)))' "$DEVICE" "$field"
 }
 
 

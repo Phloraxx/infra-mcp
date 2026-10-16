@@ -49,7 +49,8 @@ Gateway:
 - bind/listen address
 - public MCP URL
 - database path
-- OAuth settings
+- private-mode admin credential
+- OAuth settings for the future public edge
 - agent listener URL
 - logging level
 
@@ -148,7 +149,7 @@ Run:
 ./scripts/smoke-install-dashboard.sh
 ```
 
-This builds the v1 gateway, agent and `infra` CLI, starts an isolated loopback gateway, verifies embedded dashboard/bootstrap assets, creates an enrollment, runs `scripts/install.sh` in `--source-dir` development mode with startup intentionally disabled, verifies config and identity persistence, starts the installed agent without the enrollment code, then verifies status/doctor plus sessions/activity APIs. It removes all temporary state and does not register a real service or touch v0.3.
+This builds the v1 gateway, agent and `infra` CLI, starts an isolated loopback gateway with a random admin credential, verifies unauthenticated protected APIs fail, signs the browser into an HttpOnly session, verifies embedded dashboard/bootstrap assets, creates an enrollment, runs `scripts/install.sh` in `--source-dir` development mode with startup intentionally disabled, verifies config and identity persistence, starts the installed agent without the enrollment code, then verifies status/doctor plus authenticated sessions/activity APIs. It also checks logout returns protected APIs to 401. Everything is removed on exit and it does not register a real service or touch v0.3.
 
 `./scripts/install.sh --source-dir target/debug ...` and the analogous PowerShell `-SourceDir` are development-only paths. Normal release installs download versioned native assets plus `.sha256` sidecars. `.github/workflows/release.yml` defines the expected release asset names for Linux x64/ARM64, macOS Intel/ARM64 and Windows x64/ARM64. A real release must be published and validated before treating the remote bootstrap path as production-ready.
 

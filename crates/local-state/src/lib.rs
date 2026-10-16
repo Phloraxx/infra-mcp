@@ -54,6 +54,10 @@ pub struct RuntimeStatus {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_connected_unix_ms: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub credential_storage: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub credential_verified_unix_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_error: Option<String>,
     pub updated_unix_ms: u64,
 }
@@ -68,6 +72,8 @@ impl RuntimeStatus {
             device_name: None,
             connection_generation: None,
             last_connected_unix_ms: None,
+            credential_storage: None,
+            credential_verified_unix_ms: None,
             last_error: None,
             updated_unix_ms: now_ms(),
         }
