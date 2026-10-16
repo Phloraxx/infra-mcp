@@ -40,6 +40,7 @@ This file records what exists in code. Product intent remains in the other desig
 - Isolated `scripts/smoke-v1.sh` verifies enrollment, signed authentication, MCP `exec`, identity persistence, and reconnect.
 - Isolated `scripts/smoke-install-dashboard.sh` verifies dashboard assets, enrollment, the native installer flow, persisted config/identity, online reconnect, status, doctor, sessions API and activity API.
 - `scripts/burnin-linux-user.sh` provides a real Linux user-service burn-in beside v0.3. On the Oracle ARM64 host it has verified non-login install/doctor, live MCP exec, fresh PTY I/O across a gateway restart, plus fresh PTY I/O and continued output from the same durable background job ID across an `infra-agent.service` controller restart.
+- `scripts/burnin-remote-posix.sh` drives an already-enrolled remote macOS/Linux device through the gateway, requiring a newer connection generation after controller restart, fresh I/O on the same PTY, continued output from the same job ID, and optional same-PTY validation after a gateway restart.
 
 ### Current verification
 
@@ -47,11 +48,11 @@ On the Linux ARM64 development host:
 
 - `cargo fmt --all -- --check`
 - `cargo clippy --workspace --all-targets -- -D warnings`
-- `cargo test --workspace` — 48 Rust tests, including real PTY/job workers, search/edit/hash, resumable transfer, structured system/network parsers, Git, container redaction and local lifecycle tests.
+- `cargo test --workspace` — 49 Rust tests, including real PTY/job workers, inherited-nonblocking control-socket normalization, search/edit/hash, resumable transfer, structured system/network parsers, Git, container redaction and local lifecycle tests.
 - `./scripts/smoke-v1.sh`
 - `./scripts/smoke-install-dashboard.sh`
 
-The latest pushed matrix confirmed Ubuntu x64, Ubuntu ARM64, and macOS. Windows passes formatting and strict clippy, but the real ConPTY test showed a startup `ESC[6n` cursor-position query and waited for a terminal response. The current tree answers ConPTY DSR/DA1 startup queries and filters them from the transcript; Windows CI confirmation remains a release gate.
+The current head is green on Ubuntu x64, Ubuntu ARM64, and macOS through formatting, strict clippy, and the full Rust test suite; Ubuntu x64 also passes both product smokes. macOS accepted control sockets are explicitly normalized back to bounded blocking I/O, closing the CI-observed BSD `EAGAIN` race. Windows passes formatting and strict clippy; the full Windows test result remains the current platform gate.
 
 ### Intentionally incomplete
 
@@ -59,12 +60,12 @@ The latest pushed matrix confirmed Ubuntu x64, Ubuntu ARM64, and macOS. Windows 
 - OS-native Keychain/DPAPI/Secret Service storage and Windows ACL hardening. The current state directory/file permission hardening is strongest on Unix.
 - Cryptographically signed release/update metadata. Bootstrap release installs currently verify SHA-256 assets; the steady-state updater and rollback chain remain to be built.
 - `infra update`, staged binary replacement, health-check rollback, sanitized log export, and permission-specific doctor checks.
-- Real-device installer/startup testing across macOS and Windows remains. Linux user-service install/reinstall/controller-restart behavior is now exercised on Oracle ARM64; a full Linux reboot/reconnect test is still required.
+- Real-device reboot/sleep-wake testing across macOS and Windows remains. Linux user-service install/reinstall/controller-restart behavior is exercised on Oracle ARM64, and macOS ARM64 has a side-by-side native install with signed reconnect plus controller/gateway persistence burn-in; full machine reboot/reconnect tests are still required.
 - Unified patch, line-range read, tail/watch and recoverable platform trash.
 - Higher-level device-to-device transfer orchestration and throughput reporting. Binary device upload/download/resume exists at the MCP layer.
 - Privileged helper and semantic desktop automation.
 - Full dashboard device-detail/terminal/files/permission/diagnostic controls. The current dashboard is a functional control/status foundation, not the finished product.
-- Linux PTY survival through a user-service controller restart is verified on Oracle by requiring fresh post-restart I/O. A real Mac burn-in exposed launchd descendant teardown and PID-based boot identity; independent launchd workers + stable boot identity are now implemented and awaiting the next native artifact validation. Windows real-device validation remains pending.
+- Linux PTY/job survival through a user-service controller restart is verified on Oracle by requiring fresh post-restart activity. The real Mac burn-in now passes with independent launchd workers + stable boot identity: the same PTY accepts fresh I/O and the same durable job emits later output after controller restart, and the same PTY remains usable after gateway restart. Windows real-device validation remains pending.
 - PTYs/jobs never claim to survive a full machine reboot; stale-boot entries are marked interrupted.
 - Windows atomic replacement semantics need a platform-specific upgrade; overwrite may require destination removal before rename.
 

@@ -172,3 +172,8 @@ This is intentionally stronger than re-reading a pre-restart transcript: persist
 The Rust PR matrix builds release-mode `infra` and `infra-agent` binaries after the macOS ARM64 and Windows x64 jobs pass, then uploads them as short-lived GitHub Actions artifacts. These artifacts are for side-by-side real-device acceptance testing before a tagged release; they are not a public release channel and expire automatically.
 
 Use these binaries for Mac/Windows burn-in rather than installing a Rust toolchain on the target machine. Enrollment/state/startup must remain separate from any live v0.3 installation until the acceptance matrix and benchmark are complete.
+## Remote POSIX controller/gateway burn-in
+
+After a macOS/Linux device is enrolled against a private acceptance gateway, `scripts/burnin-remote-posix.sh` can drive persistence from the gateway host without relying on another remote-control product. Supply the gateway HTTP URL, device ID, and the target's Infra reconnect command through environment variables; no device-specific addresses or credentials belong in the repository.
+
+The harness opens a PTY, starts a durable background job, restarts only the remote Infra controller, requires a newer connection generation, then requires **fresh** output from the same PTY and same job ID. If `INFRA_BURNIN_GATEWAY_RESTART_COMMAND` is supplied, it also restarts the gateway and requires fresh I/O from the same PTY afterward. This is the acceptance path used for the real macOS ARM64 side-by-side burn-in.

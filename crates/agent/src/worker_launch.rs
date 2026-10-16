@@ -48,11 +48,28 @@ pub fn spawn(kind: WorkerKind, id: Uuid, dir: &Path) -> Result<Option<u32>, Stri
             .stdout(Stdio::null())
             .stderr(Stdio::null())
             .status();
+        // `launchctl submit` keeps a submitted program alive after failure. A PTY worker can
+        // legitimately observe a non-zero child exit when the user closes the terminal; launching
+        // the agent directly would therefore resurrect a finished session. Run it under a tiny
+        // positional-argument wrapper that always removes its own launchd registration after the
+        // worker returns. Paths are passed as argv, never interpolated into shell source.
+        const WRAPPER: &str =
+            r#""$1" "$2" "$3"; /bin/launchctl remove "$4" >/dev/null 2>&1 || true; exit 0"#;
         let output = Command::new("launchctl")
-            .args(["submit", "-l", &label, "--"])
+            .args([
+                "submit",
+                "-l",
+                &label,
+                "--",
+                "/bin/sh",
+                "-c",
+                WRAPPER,
+                "infra-worker",
+            ])
             .arg(&exe)
             .arg(kind.flag())
             .arg(dir)
+            .arg(&label)
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::piped())

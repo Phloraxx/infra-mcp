@@ -12,7 +12,7 @@ use std::{
     net::{TcpListener, TcpStream},
     path::{Path, PathBuf},
     sync::{
-        Arc, Mutex,
+        Arc, Mutex, Weak,
         atomic::{AtomicBool, Ordering},
     },
     time::{Duration, SystemTime, UNIX_EPOCH},
@@ -361,12 +361,19 @@ pub fn run_worker(dir: &Path) -> anyhow::Result<()> {
 
     let output_path = dir.join("output.log");
     let meta_path = dir.to_path_buf();
-    let spool_writer = writer.clone();
+    // The spooler only needs temporary access to terminal input when ConPTY emits a startup
+    // query. It must not own the writer permanently, otherwise that input handle can keep the
+    // pseudo-console alive after the child exits.
+    let spool_writer = Arc::downgrade(&writer);
     let spool_thread =
         std::thread::spawn(move || spool_pty(reader, &output_path, &meta_path, spool_writer));
     let status = child.wait()?;
     alive.store(false, Ordering::Relaxed);
     let _ = control_thread.join();
+    // Close controller-owned PTY handles before waiting for output EOF. This is required by
+    // ConPTY; keeping the master/input side alive can leave the reader blocked indefinitely.
+    drop(master);
+    drop(writer);
     let _ = spool_thread.join();
     let mut latest = read_meta(dir)?;
     latest.status = if close_requested.load(Ordering::Relaxed) {
@@ -510,7 +517,7 @@ fn spool_pty(
     mut reader: Box<dyn Read + Send>,
     output_path: &Path,
     session_dir: &Path,
-    writer: Arc<Mutex<Box<dyn Write + Send>>>,
+    writer: Weak<Mutex<Box<dyn Write + Send>>>,
 ) {
     let mut buffer = [0_u8; 8192];
     #[cfg(windows)]
@@ -525,6 +532,9 @@ fn spool_pty(
         {
             let (visible, replies) = filter_terminal_queries(&mut pending, &buffer[..count]);
             for reply in replies {
+                let Some(writer) = writer.upgrade() else {
+                    return;
+                };
                 let Ok(mut input) = writer.lock() else {
                     return;
                 };
@@ -721,7 +731,10 @@ mod tests {
         };
         write_meta(&session_dir, &meta).unwrap();
         let worker_dir = session_dir.clone();
-        let worker = std::thread::spawn(move || run_worker(&worker_dir));
+        let (worker_done_tx, worker_done_rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = worker_done_tx.send(run_worker(&worker_dir));
+        });
 
         let deadline = std::time::Instant::now() + Duration::from_secs(5);
         loop {
@@ -774,7 +787,10 @@ mod tests {
         terminals
             .control(id, |token| ControlRequest::Close { token })
             .unwrap();
-        worker.join().unwrap().unwrap();
+        worker_done_rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("PTY worker did not stop within 5 seconds after close")
+            .unwrap();
         let final_meta = read_meta(&session_dir).unwrap();
         assert_eq!(final_meta.status, "closed");
     }

@@ -53,6 +53,7 @@ A full reboot remains required before declaring Linux startup validation complet
 - [x] boot/agent instance identity
 - [x] job/PTY/transfer reconciliation after reconnect
 - [x] macOS LaunchAgent startup implementation
+- [x] macOS ARM64 real-device controller/gateway persistence burn-in
 - [x] Windows logon Scheduled Task startup implementation
 - [ ] real-device sleep/wake/reboot validation on macOS ARM64
 - [ ] real-device reboot/reconnect validation on Windows x64
