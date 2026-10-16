@@ -368,11 +368,8 @@ async fn run_connection(
         Ok::<_, anyhow::Error>(())
     });
 
-    let mut items = context.jobs.reconcile_items();
-    items.extend(context.terminals.reconcile_items());
-    items.extend(context.transfers.reconcile_items());
     out_tx
-        .send(AgentToGateway::Reconcile(ReconcileSnapshot { items }))
+        .send(AgentToGateway::Reconcile(reconcile_snapshot(&context)))
         .await?;
 
     let permits = Arc::new(Semaphore::new(MAX_CONCURRENT_REQUESTS));
@@ -385,13 +382,21 @@ async fn run_connection(
                     let out = out_tx.clone();
                     let context = context.clone();
                     tokio::spawn(async move {
-                        let response = dispatch(request, context).await;
+                        let response = dispatch(request, context.clone()).await;
                         drop(permit);
                         let _ = out.send(AgentToGateway::Response(response)).await;
+                        // Refresh durable-work state after every operation. A later heartbeat
+                        // refresh covers short worker-finalization races after close/cancel.
+                        let _ = out
+                            .send(AgentToGateway::Reconcile(reconcile_snapshot(&context)))
+                            .await;
                     });
                 }
                 Ok(GatewayToAgent::Ping) => {
                     out_tx.send(AgentToGateway::Pong).await?;
+                    out_tx
+                        .send(AgentToGateway::Reconcile(reconcile_snapshot(&context)))
+                        .await?;
                 }
                 Ok(GatewayToAgent::HelloAck(_)) | Ok(GatewayToAgent::AuthChallenge(_)) => {
                     warn!("unexpected handshake frame ignored")
@@ -406,6 +411,13 @@ async fn run_connection(
     drop(out_tx);
     writer.abort();
     Ok(())
+}
+
+fn reconcile_snapshot(context: &AgentContext) -> ReconcileSnapshot {
+    let mut items = context.jobs.reconcile_items();
+    items.extend(context.terminals.reconcile_items());
+    items.extend(context.transfers.reconcile_items());
+    ReconcileSnapshot { items }
 }
 
 async fn send_agent<S>(sink: &mut S, message: &AgentToGateway) -> anyhow::Result<()>

@@ -135,6 +135,17 @@ pty_write_expect() {
   return 1
 }
 
+wait_no_active_work() {
+  local device="$1" summary=''
+  for _ in $(seq 1 150); do
+    summary="$(curl -fsS "$GW_URL/api/devices" | python3 -c 'import json,sys; d=json.load(sys.stdin); target=sys.argv[1]; x=next((v for v in d if v.get("device_id")==target), None); print("missing" if x is None else "{}:{}:{}".format(x.get("active_jobs",0),x.get("active_terminals",0),x.get("active_transfers",0)))' "$device")"
+    [ "$summary" = "0:0:0" ] && return 0
+    sleep .1
+  done
+  echo "active work did not reconcile to zero for $device (last=$summary)" >&2
+  return 1
+}
+
 job_read_expect() {
   local device="$1" job="$2" marker="$3" result=''
   for _ in $(seq 1 120); do
@@ -191,6 +202,7 @@ run_test() {
 
   mcp_call jobs "$(python3 -c 'import json,sys; print(json.dumps({"device":sys.argv[1],"action":"cancel","job_id":sys.argv[2]}))' "$device" "$job")" >/dev/null || true
   mcp_call terminal "$(python3 -c 'import json,sys; print(json.dumps({"device":sys.argv[1],"action":"close","session_id":sys.argv[2]}))' "$device" "$session")" >/dev/null || true
+  wait_no_active_work "$device"
   "$BIN/infra" --state-dir "$AGENT_STATE" doctor
   echo "Infra v1 real-service burn-in passed: exec, PTY, durable job, gateway restart and agent-service restart."
 }

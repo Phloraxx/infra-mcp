@@ -24,6 +24,7 @@ use uuid::Uuid;
 use std::process::{Command, Stdio};
 
 const MAX_PTY_SPOOL: usize = 8 * 1024 * 1024;
+const WORKER_STARTUP_GRACE_MS: u64 = 10_000;
 const RETAIN_PTY_SPOOL: usize = 4 * 1024 * 1024;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -178,9 +179,12 @@ impl Terminals {
             let Ok(mut meta) = read_meta(&entry.path()) else {
                 continue;
             };
+            let startup_expired = meta.status == "starting"
+                && meta.worker_pid.is_none()
+                && now_ms().saturating_sub(meta.started_at_unix_ms) > WORKER_STARTUP_GRACE_MS;
+            let worker_missing = meta.worker_pid.is_some_and(|pid| !process_alive(pid));
             if matches!(meta.status.as_str(), "starting" | "running")
-                && (meta.boot_id != self.boot_id
-                    || meta.worker_pid.is_some_and(|pid| !process_alive(pid)))
+                && (meta.boot_id != self.boot_id || startup_expired || worker_missing)
             {
                 meta.status = "interrupted".into();
                 meta.finished_at_unix_ms = Some(now_ms());
@@ -816,6 +820,37 @@ mod tests {
         assert_eq!(visible, b"world");
         assert_eq!(replies, vec![b"\x1b[1;1R".to_vec()]);
         assert!(pending.is_empty());
+    }
+
+    #[test]
+    fn abandoned_starting_terminal_is_interrupted_after_grace() {
+        let dir = tempdir().unwrap();
+        let terminals = Terminals::new(dir.path(), "boot".into()).unwrap();
+        let id = Uuid::new_v4();
+        let session_dir = terminals.root.join(id.to_string());
+        fs::create_dir_all(&session_dir).unwrap();
+        let meta = SessionMeta {
+            id,
+            command: "cat".into(),
+            cwd: None,
+            rows: 24,
+            cols: 80,
+            boot_id: "boot".into(),
+            status: "starting".into(),
+            started_at_unix_ms: now_ms().saturating_sub(WORKER_STARTUP_GRACE_MS + 1),
+            finished_at_unix_ms: None,
+            worker_pid: None,
+            child_pid: None,
+            control_port: None,
+            control_token: "unused-test-token".into(),
+            base_offset: 0,
+            output_truncated: false,
+            exit_code: None,
+        };
+        write_meta(&session_dir, &meta).unwrap();
+        let listed = terminals.list().unwrap();
+        assert_eq!(listed[0]["status"], "interrupted");
+        assert!(terminals.reconcile_items().is_empty());
     }
 
     #[test]

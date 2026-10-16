@@ -19,6 +19,7 @@ use sysinfo::{Pid, System};
 use uuid::Uuid;
 
 const MAX_JOB_OUTPUT: usize = 16 * 1024 * 1024;
+const WORKER_STARTUP_GRACE_MS: u64 = 10_000;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct JobMeta {
@@ -118,9 +119,12 @@ impl Jobs {
                 continue;
             };
             let mut changed = false;
-            if matches!(meta.status.as_str(), "starting" | "running")
-                && (meta.boot_id != self.boot_id
-                    || meta.runner_pid.is_some_and(|pid| !process_alive(pid)))
+            let startup_expired = meta.status == "starting"
+                && meta.runner_pid.is_none()
+                && now_ms().saturating_sub(meta.started_at_unix_ms) > WORKER_STARTUP_GRACE_MS;
+            let worker_missing = meta.runner_pid.is_some_and(|pid| !process_alive(pid));
+            if matches!(meta.status.as_str(), "starting" | "running" | "canceling")
+                && (meta.boot_id != self.boot_id || startup_expired || worker_missing)
             {
                 meta.status = "interrupted".into();
                 meta.finished_at_unix_ms = Some(now_ms());
@@ -437,6 +441,33 @@ mod tests {
         let final_meta = read_meta(&job_dir).unwrap();
         assert_eq!(final_meta.status, "completed");
         assert_eq!(final_meta.exit_code, Some(0));
+    }
+
+    #[test]
+    fn abandoned_starting_job_is_interrupted_after_grace() {
+        let dir = tempdir().unwrap();
+        let jobs = Jobs::new(dir.path(), "boot".into()).unwrap();
+        let id = Uuid::new_v4();
+        let job_dir = jobs.root.join(id.to_string());
+        fs::create_dir_all(&job_dir).unwrap();
+        let meta = JobMeta {
+            id,
+            command: "echo never-started".into(),
+            cwd: None,
+            timeout_ms: None,
+            boot_id: "boot".into(),
+            status: "starting".into(),
+            started_at_unix_ms: now_ms().saturating_sub(WORKER_STARTUP_GRACE_MS + 1),
+            finished_at_unix_ms: None,
+            runner_pid: None,
+            command_pid: None,
+            exit_code: None,
+            output_truncated: false,
+        };
+        write_meta(&job_dir, &meta).unwrap();
+        let listed = jobs.list().unwrap();
+        assert_eq!(listed[0]["status"], "interrupted");
+        assert!(jobs.reconcile_items().is_empty());
     }
 
     #[test]

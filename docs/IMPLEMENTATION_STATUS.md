@@ -48,7 +48,7 @@ On the Linux ARM64 development host:
 
 - `cargo fmt --all -- --check`
 - `cargo clippy --workspace --all-targets -- -D warnings`
-- `cargo test --workspace` — 51 Rust tests, including real PTY/job workers, inherited-nonblocking control-socket normalization, protected-identity metadata/file-fallback coverage, search/edit/hash, resumable transfer, structured system/network parsers, Git, container redaction and local lifecycle tests.
+- `cargo test --workspace` — 54 Rust tests, including real PTY/job workers, inherited-nonblocking control-socket normalization, protected-identity metadata/file-fallback coverage, search/edit/hash, resumable transfer, structured system/network parsers, Git, container redaction and local lifecycle tests.
 - `./scripts/smoke-v1.sh`
 - `./scripts/smoke-install-dashboard.sh`
 
@@ -65,6 +65,7 @@ The current code head is green on Ubuntu x64, Ubuntu ARM64, macOS ARM64, and Win
 - Higher-level device-to-device transfer orchestration and throughput reporting. Binary device upload/download/resume exists at the MCP layer.
 - Privileged helper and semantic desktop automation.
 - Full dashboard device-detail/terminal/files/permission/diagnostic controls. The current dashboard is a functional control/status foundation, not the finished product.
+- Gateway control-path liveness now uses 10-second protocol heartbeats with a 30-second stale timeout; any bounded RPC timeout immediately retires that connection so a dead socket cannot remain “online”. Agents refresh durable-work reconciliation after operations and heartbeats, and the real Linux burn-in requires active PTY/job/transfer counts to return to zero after cleanup.
 - Linux PTY/job survival through a user-service controller restart is verified on Oracle by requiring fresh post-restart activity. The real Mac burn-in now passes with independent launchd workers + stable boot identity: the same PTY accepts fresh I/O and the same durable job emits later output after controller restart, and the same PTY remains usable after gateway restart. Submitted macOS worker wrappers self-remove after completion; post-burn-in validation shows zero worker launchd registrations/processes while both v0.3 and v1 controllers remain healthy. Windows CI is green and the x64 acceptance artifact is staged; Windows real-device validation remains pending.
 - PTYs/jobs never claim to survive a full machine reboot; stale-boot entries are marked interrupted.
 - Windows atomic replacement semantics need a platform-specific upgrade; overwrite may require destination removal before rename.

@@ -44,12 +44,15 @@ use std::{
         Arc,
         atomic::{AtomicU64, Ordering},
     },
-    time::Duration,
+    time::{Duration, Instant},
 };
 use store::{DeviceRecord, Store, StoreError, now_ms};
 use tokio::sync::{Mutex, RwLock, broadcast, mpsc, oneshot};
 use tracing::{info, warn};
 use uuid::Uuid;
+
+const AGENT_HEARTBEAT_INTERVAL: Duration = Duration::from_secs(10);
+const AGENT_HEARTBEAT_TIMEOUT: Duration = Duration::from_secs(30);
 
 #[derive(Clone)]
 struct AppState {
@@ -99,6 +102,7 @@ struct DeviceConnection {
     hello: DeviceHello,
     generation: u64,
     tx: mpsc::Sender<GatewayToAgent>,
+    retire: mpsc::Sender<()>,
     reconcile: ReconcileSnapshot,
 }
 
@@ -1340,11 +1344,11 @@ async fn dispatch_to_device(
     operation: AgentOperation,
     timeout_ms: u64,
 ) -> Result<AgentResponse, DispatchError> {
-    let tx = {
+    let (tx, retire) = {
         let devices = state.devices.read().await;
         devices
             .get(&device_id)
-            .map(|d| d.tx.clone())
+            .map(|d| (d.tx.clone(), d.retire.clone()))
             .ok_or(DispatchError::Offline)?
     };
     let id = Uuid::new_v4();
@@ -1353,13 +1357,21 @@ async fn dispatch_to_device(
     state.pending.lock().await.insert(id, reply_tx);
     if tx.send(request).await.is_err() {
         state.pending.lock().await.remove(&id);
+        let _ = retire.try_send(());
         return Err(DispatchError::ConnectionClosed);
     }
     match tokio::time::timeout(Duration::from_millis(timeout_ms), reply_rx).await {
         Ok(Ok(r)) => Ok(r),
-        Ok(Err(_)) => Err(DispatchError::ResponseClosed),
+        Ok(Err(_)) => {
+            let _ = retire.try_send(());
+            Err(DispatchError::ResponseClosed)
+        }
         Err(_) => {
             state.pending.lock().await.remove(&id);
+            // A connection that accepted a request but failed to answer within its bounded
+            // deadline is no longer trustworthy as an "online" control path. Retire it so
+            // the agent reconnects with a fresh generation; never replay the operation.
+            let _ = retire.try_send(());
             Ok(AgentResponse {
                 id,
                 result: OperationResult::OutcomeUnknown {
@@ -1389,6 +1401,7 @@ async fn handle_agent(mut socket: WebSocket, state: AppState) {
     let hello = auth.hello;
     let generation = state.next_generation.fetch_add(1, Ordering::Relaxed);
     let (out_tx, mut out_rx) = mpsc::channel::<GatewayToAgent>(64);
+    let (retire_tx, mut retire_rx) = mpsc::channel::<()>(1);
     let ack = GatewayToAgent::HelloAck(HelloAck {
         protocol: PROTOCOL_VERSION,
         connection_generation: generation,
@@ -1412,7 +1425,8 @@ async fn handle_agent(mut socket: WebSocket, state: AppState) {
             DeviceConnection {
                 hello: hello.clone(),
                 generation,
-                tx: out_tx,
+                tx: out_tx.clone(),
+                retire: retire_tx,
                 reconcile: ReconcileSnapshot::default(),
             },
         );
@@ -1422,23 +1436,54 @@ async fn handle_agent(mut socket: WebSocket, state: AppState) {
         .record_activity(Some(&hello.device_id), "device.connect", "ok", None);
     state.emit("device_online", Some(hello.device_id.clone()));
     info!(device_id=%hello.device_id,generation,platform=%hello.platform,arch=%hello.arch,"agent online");
+    let mut heartbeat = tokio::time::interval(AGENT_HEARTBEAT_INTERVAL);
+    heartbeat.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    // `interval` ticks immediately once. Consume that first tick so a newly authenticated
+    // connection gets a full interval before its first protocol heartbeat.
+    heartbeat.tick().await;
+    let mut last_inbound = Instant::now();
     loop {
         tokio::select! {
-            maybe_out=out_rx.recv()=>match maybe_out{Some(message)=>if let Err(e)=send_json(&mut socket,&message).await{warn!(device_id=%hello.device_id,error=%e,"failed to send to agent");break},None=>break},
+            _ = heartbeat.tick() => {
+                if last_inbound.elapsed() >= AGENT_HEARTBEAT_TIMEOUT {
+                    warn!(device_id=%hello.device_id,generation,"agent heartbeat timed out; retiring stale connection");
+                    break;
+                }
+                if out_tx.try_send(GatewayToAgent::Ping).is_err() {
+                    warn!(device_id=%hello.device_id,generation,"agent heartbeat queue unavailable");
+                    break;
+                }
+            },
+            _ = retire_rx.recv() => {
+                warn!(device_id=%hello.device_id,generation,"agent connection retired after failed control-path health check");
+                break;
+            },
+            maybe_out=out_rx.recv()=>match maybe_out{Some(message)=>{
+                match tokio::time::timeout(Duration::from_secs(5),send_json(&mut socket,&message)).await {
+                    Ok(Ok(()))=>{},
+                    Ok(Err(e))=>{warn!(device_id=%hello.device_id,error=%e,"failed to send to agent");break},
+                    Err(_)=>{warn!(device_id=%hello.device_id,generation,"timed out sending to agent");break},
+                }
+            },None=>break},
             incoming=socket.recv()=>match incoming{
-                Some(Ok(Message::Text(text)))=>match serde_json::from_str::<AgentToGateway>(text.as_str()){
-                    Ok(AgentToGateway::Response(response))=>if let Some(waiter)=state.pending.lock().await.remove(&response.id){let _=waiter.send(response);},
-                    Ok(AgentToGateway::Reconcile(snapshot)) => {
-                        if let Some(device) = state.devices.write().await.get_mut(&hello.device_id)
-                            && device.generation == generation
-                        {
-                            device.reconcile = snapshot.clone();
-                        }
-                        let _ = state.store.record_reconcile(&hello.device_id, &snapshot);
-                        state.emit("sessions_changed", Some(hello.device_id.clone()));
-                    },
-                    Ok(AgentToGateway::Pong)=>{}, Ok(_)=>warn!(device_id=%hello.device_id,"unexpected post-auth agent frame"), Err(e)=>warn!(device_id=%hello.device_id,error=%e,"invalid agent frame")},
-                Some(Ok(Message::Ping(payload)))=>if socket.send(Message::Pong(payload)).await.is_err(){break},
+                Some(Ok(Message::Text(text)))=>{
+                    last_inbound=Instant::now();
+                    match serde_json::from_str::<AgentToGateway>(text.as_str()){
+                        Ok(AgentToGateway::Response(response))=>if let Some(waiter)=state.pending.lock().await.remove(&response.id){let _=waiter.send(response);},
+                        Ok(AgentToGateway::Reconcile(snapshot)) => {
+                            if let Some(device) = state.devices.write().await.get_mut(&hello.device_id)
+                                && device.generation == generation
+                            {
+                                device.reconcile = snapshot.clone();
+                            }
+                            let _ = state.store.record_reconcile(&hello.device_id, &snapshot);
+                            state.emit("sessions_changed", Some(hello.device_id.clone()));
+                        },
+                        Ok(AgentToGateway::Pong)=>{}, Ok(_)=>warn!(device_id=%hello.device_id,"unexpected post-auth agent frame"), Err(e)=>warn!(device_id=%hello.device_id,error=%e,"invalid agent frame")
+                    }
+                },
+                Some(Ok(Message::Ping(payload)))=>{last_inbound=Instant::now();if socket.send(Message::Pong(payload)).await.is_err(){break}},
+                Some(Ok(Message::Pong(_)))=>{last_inbound=Instant::now();},
                 Some(Ok(Message::Close(_)))|None=>break,Some(Ok(_))=>{},Some(Err(e))=>{warn!(device_id=%hello.device_id,error=%e,"agent websocket error");break}
             }
         }
@@ -1695,6 +1740,32 @@ mod tests {
         responder.abort();
         server.abort();
     }
+    #[tokio::test]
+    async fn timed_out_request_retires_connection() {
+        let (_dir, state, addr, server) = spawn_test_gateway().await;
+        let (_socket, _) = connect_legacy(addr, "silent-device").await;
+        wait_registered(&state, "silent-device").await;
+        let response =
+            dispatch_to_device(&state, "silent-device".into(), AgentOperation::Status, 50)
+                .await
+                .unwrap();
+        assert!(matches!(
+            response.result,
+            OperationResult::OutcomeUnknown { .. }
+        ));
+        tokio::time::timeout(Duration::from_secs(1), async {
+            loop {
+                if !state.devices.read().await.contains_key("silent-device") {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("timed-out device connection was not retired");
+        server.abort();
+    }
+
     #[tokio::test]
     async fn signed_auth_and_revocation() {
         let (_dir, state, addr, server) = spawn_test_gateway().await;
