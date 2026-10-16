@@ -393,12 +393,27 @@ fn handle_control(
     close_requested: &Arc<AtomicBool>,
 ) {
     let mut line = String::new();
-    let read_result = {
+    // The listening socket is nonblocking so the worker can observe shutdown. On BSD/macOS,
+    // an accepted socket may inherit O_NONBLOCK, which can surface as EAGAIN before the local
+    // client request bytes arrive. Normalize each accepted connection back to bounded blocking
+    // I/O; the timeouts prevent a local process from pinning the single control thread forever.
+    let read_result = (|| -> Result<usize, String> {
+        stream
+            .set_nonblocking(false)
+            .map_err(|error| format!("configure control socket blocking mode: {error}"))?;
+        stream
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .map_err(|error| format!("configure control read timeout: {error}"))?;
+        stream
+            .set_write_timeout(Some(Duration::from_secs(2)))
+            .map_err(|error| format!("configure control write timeout: {error}"))?;
         let mut reader = BufReader::new(&mut stream);
-        reader.read_line(&mut line)
-    };
+        reader
+            .read_line(&mut line)
+            .map_err(|error| format!("read control request: {error}"))
+    })();
     let response = match read_result {
-        Err(error) => Err(format!("read control request: {error}")),
+        Err(error) => Err(error),
         Ok(0) => Err("empty terminal control request".into()),
         Ok(_) => match serde_json::from_str::<ControlRequest>(&line) {
             Ok(ControlRequest::Write {
