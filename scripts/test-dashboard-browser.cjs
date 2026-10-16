@@ -8,6 +8,7 @@ const { chromium } = require('playwright');
 const root = path.resolve(__dirname, '../apps/dashboard');
 const terminalId = '00000000-0000-4000-8000-000000000001';
 const jobId = '00000000-0000-4000-8000-000000000002';
+const transferId = '00000000-0000-4000-8000-000000000003';
 const badName = '<img src=x onerror="window.xss=1">';
 const devices = [
   {device_id:'online',device_name:badName,platform:'linux',arch:'aarch64',agent_version:'test',online:true,capabilities:['exec','files','terminal','jobs','transfer'],active_terminals:1,last_seen_unix_ms:Date.now()},
@@ -15,7 +16,8 @@ const devices = [
 ];
 let sessions = [
   {id:terminalId,kind:'terminal',status:'running',device_id:'online',device_name:badName,device_online:true,started_at_unix_ms:Date.now()},
-  {id:jobId,kind:'job',status:'running',device_id:'online',device_name:badName,device_online:true,started_at_unix_ms:Date.now()}
+  {id:jobId,kind:'job',status:'running',device_id:'online',device_name:badName,device_online:true,started_at_unix_ms:Date.now()},
+  {id:transferId,kind:'transfer',status:'ready',device_id:'online',device_name:badName,device_online:true,started_at_unix_ms:Date.now()}
 ];
 let authenticated=true, output='fixture PTY ready\r\n', failWrite=false, failRead=false, delayedRead=false, readDelay=0;
 const operations=[], errors=[], streams=new Set();
@@ -55,6 +57,10 @@ const server=http.createServer(async(req,res)=>{
         if(a.action==='cancel'){sessions=sessions.filter(s=>s.id!==a.job_id);return ok({job:{id:a.job_id,status:'canceling'}});}
         return ok({job:{id:a.job_id,status:'running'},offset:0,next_offset:17,output:'fixture job output',has_more:false});
       }
+      if(op.op==='transfer'){
+        if(a.action==='cancel')sessions=sessions.filter(s=>s.id!==a.transfer_id);
+        return ok({transfer:{id:a.transfer_id,status:a.action==='cancel'?'canceled':'ready',path:'build.zip',offset:20,size:100}});
+      }
       if(op.op==='files'){
         if(a.action==='list')return ok({path:a.path,entries:[{name:badName,path:'./'+badName,kind:'file',size:9}],truncated:false});
         return ok({path:a.path,content:'<script>window.xss=2</script>',offset:0,next_offset:29,size:29,has_more:false});
@@ -77,6 +83,7 @@ const server=http.createServer(async(req,res)=>{
     page.on('pageerror',e=>errors.push(e.message));
     page.on('console',msg=>{if(msg.type()==='error'&&msg.text().includes('Content Security Policy'))errors.push(msg.text());});
     await page.goto(base);await page.locator('#overview-devices [data-device="online"]').waitFor();
+    assert.equal(await page.locator('#summary .summary-card').nth(2).locator('strong').textContent(),'3');
     await page.locator('#overview-devices [data-device="online"]').click();
     await page.waitForFunction(()=>document.querySelector('#device-detail').classList.contains('active'));
     assert.equal(await page.locator('#view-title').textContent(),badName);
@@ -88,6 +95,12 @@ const server=http.createServer(async(req,res)=>{
     assert.equal(await page.locator('#file-content').textContent(),'<script>window.xss=2</script>');assert.equal(await page.evaluate(()=>window.xss),undefined);
     await page.locator('[data-view="sessions"]').click();await page.locator('#session-kind').selectOption('job');
     assert.equal(await page.locator('#all-sessions .session-row').count(),1);
+    await page.locator('#session-kind').selectOption('transfer');await page.locator('#all-sessions [data-session]').click();
+    await page.waitForFunction(()=>document.querySelector('#session-output').textContent.includes('build.zip'));
+    assert.equal(await page.locator('#session-stop').isDisabled(),false);
+    page.once('dialog',dialog=>dialog.accept());await page.locator('#session-stop').click();await page.waitForTimeout(100);
+    assert(operations.some(o=>o.op==='transfer'&&o.action.action==='cancel'&&o.action.transfer_id===transferId));
+    await page.locator('[data-view="sessions"]').click();
     await page.locator('#session-kind').selectOption('terminal');await page.locator('#all-sessions [data-session]').click();
     await page.locator('.xterm-helper-textarea').waitFor();await page.waitForFunction(()=>document.querySelector('#session-read-state').textContent.includes('bytes read'));
     await page.locator('.xterm-helper-textarea').focus();await page.keyboard.type('abc');
@@ -121,6 +134,6 @@ const server=http.createServer(async(req,res)=>{
     await page.waitForFunction(()=>document.querySelector('#all-devices').textContent.includes('No devices'));
     assert.equal(await page.locator('#file-content').textContent(),'');assert.equal(await page.locator('#session-output').textContent(),'');
     assert.deepEqual(errors,[]);
-    console.log('Dashboard browser gate PASS: device views, literal rendering/XSS, file preview, filters, shared-ID terminal attach/input/resize/refresh/detach, no write replay, job cancel, mobile layout, sign-out clearing and CSP.');
+    console.log('Dashboard browser gate PASS: device views, literal rendering/XSS, file preview, filters, shared-ID terminal attach/input/resize/refresh/detach, no write replay, job/transfer cancel and active counts, mobile layout, sign-out clearing and CSP.');
   }finally{await browser.close();for(const stream of streams)stream.end();await new Promise(resolve=>server.close(resolve));}
 })().catch(error=>{console.error(error);server.close();process.exitCode=1;});
