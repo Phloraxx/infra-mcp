@@ -392,67 +392,43 @@ fn handle_control(
     child_pid: Option<u32>,
     close_requested: &Arc<AtomicBool>,
 ) {
-    let mut line = String::new();
-    // The listening socket is nonblocking so the worker can observe shutdown. On BSD/macOS,
-    // an accepted socket may inherit O_NONBLOCK, which can surface as EAGAIN before the local
-    // client request bytes arrive. Normalize each accepted connection back to bounded blocking
-    // I/O; the timeouts prevent a local process from pinning the single control thread forever.
-    let read_result = (|| -> Result<usize, String> {
-        stream
-            .set_nonblocking(false)
-            .map_err(|error| format!("configure control socket blocking mode: {error}"))?;
-        stream
-            .set_read_timeout(Some(Duration::from_secs(2)))
-            .map_err(|error| format!("configure control read timeout: {error}"))?;
-        stream
-            .set_write_timeout(Some(Duration::from_secs(2)))
-            .map_err(|error| format!("configure control write timeout: {error}"))?;
-        let mut reader = BufReader::new(&mut stream);
-        reader
-            .read_line(&mut line)
-            .map_err(|error| format!("read control request: {error}"))
-    })();
-    let response = match read_result {
+    let response = match read_control_request(&mut stream) {
         Err(error) => Err(error),
-        Ok(0) => Err("empty terminal control request".into()),
-        Ok(_) => match serde_json::from_str::<ControlRequest>(&line) {
-            Ok(ControlRequest::Write {
-                token: supplied,
-                data,
-            }) if supplied == token => writer
-                .lock()
-                .map_err(|_| "writer lock poisoned".to_string())
-                .and_then(|mut writer| {
-                    writer
-                        .write_all(data.as_bytes())
-                        .map_err(|e| e.to_string())?;
-                    writer.flush().map_err(|e| e.to_string())
-                }),
-            Ok(ControlRequest::Resize {
-                token: supplied,
-                rows,
-                cols,
-            }) if supplied == token => master
-                .lock()
-                .map_err(|_| "PTY lock poisoned".to_string())
-                .and_then(|master| {
-                    master
-                        .resize(PtySize {
-                            rows: rows.clamp(1, 500),
-                            cols: cols.clamp(1, 1000),
-                            pixel_width: 0,
-                            pixel_height: 0,
-                        })
-                        .map_err(|e| e.to_string())
-                }),
-            Ok(ControlRequest::Close { token: supplied }) if supplied == token => {
-                close_requested.store(true, Ordering::Relaxed);
-                close_terminal_child(killer, child_pid)
-            }
-            Ok(ControlRequest::Status { token: supplied }) if supplied == token => Ok(()),
-            Ok(_) => Err("invalid terminal capability token".into()),
-            Err(error) => Err(format!("invalid control request: {error}")),
-        },
+        Ok(ControlRequest::Write {
+            token: supplied,
+            data,
+        }) if supplied == token => writer
+            .lock()
+            .map_err(|_| "writer lock poisoned".to_string())
+            .and_then(|mut writer| {
+                writer
+                    .write_all(data.as_bytes())
+                    .map_err(|e| e.to_string())?;
+                writer.flush().map_err(|e| e.to_string())
+            }),
+        Ok(ControlRequest::Resize {
+            token: supplied,
+            rows,
+            cols,
+        }) if supplied == token => master
+            .lock()
+            .map_err(|_| "PTY lock poisoned".to_string())
+            .and_then(|master| {
+                master
+                    .resize(PtySize {
+                        rows: rows.clamp(1, 500),
+                        cols: cols.clamp(1, 1000),
+                        pixel_width: 0,
+                        pixel_height: 0,
+                    })
+                    .map_err(|e| e.to_string())
+            }),
+        Ok(ControlRequest::Close { token: supplied }) if supplied == token => {
+            close_requested.store(true, Ordering::Relaxed);
+            close_terminal_child(killer, child_pid)
+        }
+        Ok(ControlRequest::Status { token: supplied }) if supplied == token => Ok(()),
+        Ok(_) => Err("invalid terminal capability token".into()),
     };
     let reply = match response {
         Ok(()) => ControlResponse {
@@ -467,6 +443,31 @@ fn handle_control(
     let _ = serde_json::to_writer(&mut stream, &reply);
     let _ = stream.write_all(b"\n");
     let _ = stream.flush();
+}
+
+fn read_control_request(stream: &mut TcpStream) -> Result<ControlRequest, String> {
+    // The listening socket is nonblocking so the worker can observe shutdown. On BSD/macOS,
+    // an accepted socket may inherit O_NONBLOCK, which can surface as EAGAIN before the local
+    // client request bytes arrive. Normalize each accepted connection back to bounded blocking
+    // I/O; the timeouts prevent a local process from pinning the single control thread forever.
+    stream
+        .set_nonblocking(false)
+        .map_err(|error| format!("configure control socket blocking mode: {error}"))?;
+    stream
+        .set_read_timeout(Some(Duration::from_secs(2)))
+        .map_err(|error| format!("configure control read timeout: {error}"))?;
+    stream
+        .set_write_timeout(Some(Duration::from_secs(2)))
+        .map_err(|error| format!("configure control write timeout: {error}"))?;
+
+    let mut line = String::new();
+    let count = BufReader::new(stream)
+        .read_line(&mut line)
+        .map_err(|error| format!("read control request: {error}"))?;
+    if count == 0 {
+        return Err("empty terminal control request".into());
+    }
+    serde_json::from_str(&line).map_err(|error| format!("invalid control request: {error}"))
 }
 
 fn close_terminal_child(
@@ -659,6 +660,33 @@ fn now_ms() -> u64 {
 mod tests {
     use super::*;
     use tempfile::tempdir;
+
+    #[test]
+    fn control_request_normalizes_inherited_nonblocking_socket() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let client = std::thread::spawn(move || {
+            let mut stream = TcpStream::connect(address).unwrap();
+            std::thread::sleep(Duration::from_millis(40));
+            serde_json::to_writer(
+                &mut stream,
+                &ControlRequest::Status {
+                    token: "delayed-token".into(),
+                },
+            )
+            .unwrap();
+            stream.write_all(b"\n").unwrap();
+            stream.flush().unwrap();
+        });
+        let (mut server, _) = listener.accept().unwrap();
+        server.set_nonblocking(true).unwrap();
+        let request = read_control_request(&mut server).unwrap();
+        match request {
+            ControlRequest::Status { token } => assert_eq!(token, "delayed-token"),
+            other => panic!("unexpected control request: {other:?}"),
+        }
+        client.join().unwrap();
+    }
 
     #[test]
     fn pty_worker_can_write_read_resize_and_close() {
