@@ -21,6 +21,7 @@ const redact=e=>String(e.stack||e).split(credentials.password).join('[redacted]'
   await page.locator('#login-submit').click();
   await page.locator('#app-shell:not(.hidden)').waitFor();
   await page.locator('#overview-devices .device-row').first().waitFor();
+  await page.waitForFunction(minimum=>document.querySelectorAll('#overview-devices .status.online').length>=minimum,minimum,{timeout:30000});
   const response=await context.request.get(base+'/api/devices');assert.equal(response.status(),200);
   const devices=await response.json();assert(devices.length>=minimum);
   assert(devices.filter(d=>d.online).length>=minimum);

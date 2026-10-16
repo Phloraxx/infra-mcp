@@ -300,7 +300,9 @@ mod tests {
         let dir = tempdir().unwrap();
         let mut init = Command::new("git");
         init.args(["init", "-q"]).current_dir(dir.path());
-        require_success(run(&mut init, Duration::from_secs(5), 4096).unwrap()).unwrap();
+        // Fixture setup is not a latency assertion; allow slow CI process startup.
+        // Production Git deadlines remain unchanged.
+        require_success(run(&mut init, Duration::from_secs(30), 4096).unwrap()).unwrap();
         let value = status(dir.path().to_str().unwrap()).unwrap();
         assert_eq!(value["clean"], true);
     }
