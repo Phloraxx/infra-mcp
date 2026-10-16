@@ -115,6 +115,7 @@ async fn run() -> anyhow::Result<ExitCode> {
             let stopped_workers = cleanup_persistent_workers(&state_dir);
             startup::uninstall()?;
             if remove_state && state_dir.exists() {
+                remove_native_identity_credentials(&state_dir)?;
                 fs::remove_dir_all(&state_dir)
                     .with_context(|| format!("remove {}", state_dir.display()))?;
             }
@@ -248,6 +249,10 @@ async fn doctor(state_dir: &Path) -> DoctorReport {
         false,
     ));
 
+    if enrolled {
+        checks.push(identity_storage_check(state_dir));
+    }
+
     let runtime = read_runtime(state_dir).ok().flatten();
     let alive = runtime
         .as_ref()
@@ -337,6 +342,130 @@ fn repair(state_dir: &Path) -> anyhow::Result<()> {
         return Err(anyhow!("agent binary not found at {}", agent.display()));
     }
     startup::install(&agent, state_dir)
+}
+
+fn remove_native_identity_credentials(state_dir: &Path) -> anyhow::Result<()> {
+    for file_name in ["identity.json", "pending-enrollment.json"] {
+        let path = state_dir.join(file_name);
+        let bytes = match fs::read(&path) {
+            Ok(bytes) => bytes,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error) => return Err(error).with_context(|| format!("read {}", path.display())),
+        };
+        let value: serde_json::Value = serde_json::from_slice(&bytes)
+            .with_context(|| format!("decode {} before credential cleanup", path.display()))?;
+        if value["version"].as_u64() != Some(2)
+            || value["storage"].as_str() != Some("native_keyring")
+        {
+            continue;
+        }
+        let key_id = value["key_id"]
+            .as_str()
+            .ok_or_else(|| anyhow!("{} is missing native credential key_id", path.display()))?;
+        infra_platform::secret_store::delete_device_identity(key_id).with_context(|| {
+            format!(
+                "delete native device credential for {}; local state was preserved so cleanup can be retried",
+                path.display()
+            )
+        })?;
+    }
+    Ok(())
+}
+
+fn identity_storage_check(state_dir: &Path) -> DoctorCheck {
+    let path = identity_path(state_dir);
+    let bytes = match fs::read(&path) {
+        Ok(bytes) => bytes,
+        Err(error) => {
+            return check(
+                "credential_storage",
+                false,
+                format!("cannot read identity metadata: {error}"),
+                false,
+            );
+        }
+    };
+    let value: serde_json::Value = match serde_json::from_slice(&bytes) {
+        Ok(value) => value,
+        Err(error) => {
+            return check(
+                "credential_storage",
+                false,
+                format!("identity metadata is invalid: {error}"),
+                false,
+            );
+        }
+    };
+    match value["version"].as_u64() {
+        Some(1) => check(
+            "credential_storage",
+            false,
+            "legacy identity stores the signing key in identity.json; restart/repair with the current agent to migrate".into(),
+            true,
+        ),
+        Some(2) => match value["storage"].as_str() {
+            Some("native_keyring") => {
+                let Some(key_id) = value["key_id"].as_str() else {
+                    return check(
+                        "credential_storage",
+                        false,
+                        "native credential metadata is missing key_id".into(),
+                        false,
+                    );
+                };
+                match infra_platform::secret_store::get_device_identity(key_id) {
+                    Ok(secret) if secret.len() == 32 => check(
+                        "credential_storage",
+                        true,
+                        "device signing key is available from the native OS credential store".into(),
+                        false,
+                    ),
+                    Ok(_) => check(
+                        "credential_storage",
+                        false,
+                        "native credential contains an invalid signing-key length".into(),
+                        false,
+                    ),
+                    Err(error) => check(
+                        "credential_storage",
+                        false,
+                        format!("native credential is unavailable: {error}"),
+                        false,
+                    ),
+                }
+            }
+            Some("file_fallback") => check(
+                "credential_storage",
+                true,
+                "native credential store unavailable; using the private state-file fallback".into(),
+                false,
+            ),
+            Some(other) => check(
+                "credential_storage",
+                false,
+                format!("unknown identity storage mode {other:?}"),
+                false,
+            ),
+            None => check(
+                "credential_storage",
+                false,
+                "identity metadata has no storage mode".into(),
+                false,
+            ),
+        },
+        Some(version) => check(
+            "credential_storage",
+            false,
+            format!("unsupported identity metadata version {version}"),
+            false,
+        ),
+        None => check(
+            "credential_storage",
+            false,
+            "identity metadata has no version".into(),
+            false,
+        ),
+    }
 }
 
 fn check(name: &'static str, ok: bool, detail: String, fixable: bool) -> DoctorCheck {

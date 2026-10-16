@@ -1,14 +1,18 @@
 use anyhow::{Context, anyhow};
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use ed25519_dalek::{Signer, SigningKey};
+use infra_platform::secret_store;
 use infra_protocol::{DeviceHello, signed_auth_message};
 use serde::{Deserialize, Serialize};
 use std::{
     fs,
     path::{Path, PathBuf},
 };
+use tracing::warn;
 use url::Url;
 use uuid::Uuid;
+
+const IDENTITY_VERSION: u8 = 2;
 
 #[derive(Debug, Clone)]
 pub struct DeviceIdentity {
@@ -17,8 +21,37 @@ pub struct DeviceIdentity {
     signing_key: SigningKey,
 }
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+enum SecretStorage {
+    NativeKeyring,
+    FileFallback,
+}
+
 #[derive(Debug, Serialize, Deserialize)]
-struct IdentityFile {
+struct IdentityFileV2 {
+    version: u8,
+    device_id: String,
+    device_name: String,
+    key_id: String,
+    storage: SecretStorage,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    secret_key: Option<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct PendingIdentityV2 {
+    version: u8,
+    request_id: String,
+    device_name: String,
+    key_id: String,
+    storage: SecretStorage,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    secret_key: Option<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct LegacyIdentityFile {
     version: u8,
     device_id: String,
     device_name: String,
@@ -26,7 +59,7 @@ struct IdentityFile {
 }
 
 #[derive(Debug, Serialize, Deserialize)]
-struct PendingIdentity {
+struct LegacyPendingIdentity {
     version: u8,
     request_id: String,
     device_name: String,
@@ -77,14 +110,16 @@ pub fn load(path: &Path) -> anyhow::Result<Option<DeviceIdentity>> {
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(None),
         Err(err) => return Err(err.into()),
     };
-    let stored: IdentityFile = serde_json::from_slice(&bytes).context("decode identity.json")?;
-    if stored.version != 1 {
-        return Err(anyhow!(
-            "unsupported identity file version {}",
-            stored.version
-        ));
-    }
-    let secret = decode_secret(&stored.secret_key)?;
+    let version = json_version(&bytes, "identity.json")?;
+    let stored = match version {
+        1 => migrate_legacy_identity(&file, serde_json::from_slice(&bytes)?)?,
+        IDENTITY_VERSION => {
+            serde_json::from_slice::<IdentityFileV2>(&bytes).context("decode identity.json")?
+        }
+        other => return Err(anyhow!("unsupported identity file version {other}")),
+    };
+    let secret =
+        load_protected_secret(stored.storage, &stored.key_id, stored.secret_key.as_deref())?;
     Ok(Some(DeviceIdentity {
         device_id: stored.device_id,
         device_name: stored.device_name,
@@ -110,30 +145,12 @@ pub async fn load_or_enroll(
     };
 
     let pending_path = state_dir.join("pending-enrollment.json");
-    let pending = match fs::read(&pending_path) {
-        Ok(bytes) => serde_json::from_slice::<PendingIdentity>(&bytes)
-            .context("decode pending enrollment identity")?,
-        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
-            let mut secret = [0_u8; 32];
-            getrandom::fill(&mut secret).map_err(|_| anyhow!("OS random source unavailable"))?;
-            let pending = PendingIdentity {
-                version: 1,
-                request_id: Uuid::new_v4().to_string(),
-                device_name: requested_name.to_string(),
-                secret_key: URL_SAFE_NO_PAD.encode(secret),
-            };
-            write_secret_json(&pending_path, &pending)?;
-            pending
-        }
-        Err(err) => return Err(err.into()),
-    };
-    if pending.version != 1 {
-        return Err(anyhow!(
-            "unsupported pending identity version {}",
-            pending.version
-        ));
-    }
-    let secret = decode_secret(&pending.secret_key)?;
+    let pending = load_or_create_pending(&pending_path, requested_name)?;
+    let secret = load_protected_secret(
+        pending.storage,
+        &pending.key_id,
+        pending.secret_key.as_deref(),
+    )?;
     let signing_key = SigningKey::from_bytes(&secret);
     let public_key = URL_SAFE_NO_PAD.encode(signing_key.verifying_key().to_bytes());
     let enroll_url = enrollment_url(gateway_ws_url)?;
@@ -160,10 +177,12 @@ pub async fn load_or_enroll(
         .json()
         .await
         .context("decode enrollment response")?;
-    let stored = IdentityFile {
-        version: 1,
+    let stored = IdentityFileV2 {
+        version: IDENTITY_VERSION,
         device_id: enrolled.device_id.clone(),
         device_name: enrolled.device_name.clone(),
+        key_id: pending.key_id,
+        storage: pending.storage,
         secret_key: pending.secret_key,
     };
     write_secret_json(&state_dir.join("identity.json"), &stored)?;
@@ -173,6 +192,147 @@ pub async fn load_or_enroll(
         device_name: enrolled.device_name,
         signing_key,
     }))
+}
+
+fn load_or_create_pending(path: &Path, requested_name: &str) -> anyhow::Result<PendingIdentityV2> {
+    match fs::read(path) {
+        Ok(bytes) => match json_version(&bytes, "pending-enrollment.json")? {
+            1 => {
+                let legacy: LegacyPendingIdentity = serde_json::from_slice(&bytes)
+                    .context("decode legacy pending enrollment identity")?;
+                let secret = decode_secret(&legacy.secret_key)?;
+                let protected = protect_secret(&secret);
+                let pending = PendingIdentityV2 {
+                    version: IDENTITY_VERSION,
+                    request_id: legacy.request_id,
+                    device_name: legacy.device_name,
+                    key_id: protected.key_id,
+                    storage: protected.storage,
+                    secret_key: protected.secret_key,
+                };
+                if let Err(error) = write_secret_json(path, &pending) {
+                    cleanup_native_secret(pending.storage, &pending.key_id);
+                    return Err(error);
+                }
+                Ok(pending)
+            }
+            IDENTITY_VERSION => {
+                serde_json::from_slice(&bytes).context("decode pending enrollment identity")
+            }
+            other => Err(anyhow!("unsupported pending identity version {other}")),
+        },
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+            let mut secret = [0_u8; 32];
+            getrandom::fill(&mut secret).map_err(|_| anyhow!("OS random source unavailable"))?;
+            let protected = protect_secret(&secret);
+            let pending = PendingIdentityV2 {
+                version: IDENTITY_VERSION,
+                request_id: Uuid::new_v4().to_string(),
+                device_name: requested_name.to_string(),
+                key_id: protected.key_id,
+                storage: protected.storage,
+                secret_key: protected.secret_key,
+            };
+            write_secret_json(path, &pending)?;
+            Ok(pending)
+        }
+        Err(err) => Err(err.into()),
+    }
+}
+
+struct ProtectedSecret {
+    key_id: String,
+    storage: SecretStorage,
+    secret_key: Option<String>,
+}
+
+fn protect_secret(secret: &[u8; 32]) -> ProtectedSecret {
+    let key_id = Uuid::new_v4().to_string();
+    match secret_store::put_device_identity(&key_id, secret).and_then(|_| {
+        let read_back = secret_store::get_device_identity(&key_id)?;
+        if read_back.as_slice() != secret {
+            return Err(anyhow!("native credential store read-back mismatch"));
+        }
+        Ok(())
+    }) {
+        Ok(()) => ProtectedSecret {
+            key_id,
+            storage: SecretStorage::NativeKeyring,
+            secret_key: None,
+        },
+        Err(error) => {
+            // `key_id` is freshly generated, so a failed verification can only leave behind
+            // the credential written by this attempt. Remove it before falling back to disk.
+            let _ = secret_store::delete_device_identity(&key_id);
+            warn!(%error, "native credential store unavailable; using private file fallback");
+            ProtectedSecret {
+                key_id,
+                storage: SecretStorage::FileFallback,
+                secret_key: Some(URL_SAFE_NO_PAD.encode(secret)),
+            }
+        }
+    }
+}
+
+fn load_protected_secret(
+    storage: SecretStorage,
+    key_id: &str,
+    file_secret: Option<&str>,
+) -> anyhow::Result<[u8; 32]> {
+    match storage {
+        SecretStorage::NativeKeyring => {
+            let bytes = secret_store::get_device_identity(key_id)
+                .context("load device signing key from native credential store")?;
+            bytes
+                .try_into()
+                .map_err(|_| anyhow!("native device signing key has invalid length"))
+        }
+        SecretStorage::FileFallback => decode_secret(
+            file_secret.ok_or_else(|| anyhow!("file-backed identity secret is missing"))?,
+        ),
+    }
+}
+
+fn migrate_legacy_identity(
+    path: &Path,
+    legacy: LegacyIdentityFile,
+) -> anyhow::Result<IdentityFileV2> {
+    if legacy.version != 1 {
+        return Err(anyhow!(
+            "unsupported legacy identity version {}",
+            legacy.version
+        ));
+    }
+    let secret = decode_secret(&legacy.secret_key)?;
+    let protected = protect_secret(&secret);
+    let migrated = IdentityFileV2 {
+        version: IDENTITY_VERSION,
+        device_id: legacy.device_id,
+        device_name: legacy.device_name,
+        key_id: protected.key_id,
+        storage: protected.storage,
+        secret_key: protected.secret_key,
+    };
+    if let Err(error) = write_secret_json(path, &migrated) {
+        cleanup_native_secret(migrated.storage, &migrated.key_id);
+        return Err(error);
+    }
+    Ok(migrated)
+}
+
+fn cleanup_native_secret(storage: SecretStorage, key_id: &str) {
+    if storage == SecretStorage::NativeKeyring {
+        let _ = secret_store::delete_device_identity(key_id);
+    }
+}
+
+fn json_version(bytes: &[u8], label: &str) -> anyhow::Result<u8> {
+    let value: serde_json::Value =
+        serde_json::from_slice(bytes).with_context(|| format!("decode {label}"))?;
+    value["version"]
+        .as_u64()
+        .and_then(|value| u8::try_from(value).ok())
+        .ok_or_else(|| anyhow!("{label} has no valid version"))
 }
 
 fn enrollment_url(gateway_ws_url: &str) -> anyhow::Result<Url> {
@@ -226,6 +386,10 @@ fn write_secret_json(path: &Path, value: &impl Serialize) -> anyhow::Result<()> 
     }
     #[cfg(not(unix))]
     fs::write(&temp, &bytes)?;
+    #[cfg(windows)]
+    if path.exists() {
+        fs::remove_file(path)?;
+    }
     fs::rename(&temp, path)?;
     Ok(())
 }
@@ -236,16 +400,18 @@ mod tests {
     use tempfile::tempdir;
 
     #[test]
-    fn secret_file_round_trip() {
+    fn file_fallback_identity_round_trip() {
         let dir = tempdir().unwrap();
         ensure_state_dir(dir.path()).unwrap();
         let mut secret = [0_u8; 32];
         getrandom::fill(&mut secret).unwrap();
-        let file = IdentityFile {
-            version: 1,
+        let file = IdentityFileV2 {
+            version: IDENTITY_VERSION,
             device_id: "device".into(),
             device_name: "Laptop".into(),
-            secret_key: URL_SAFE_NO_PAD.encode(secret),
+            key_id: "test-key".into(),
+            storage: SecretStorage::FileFallback,
+            secret_key: Some(URL_SAFE_NO_PAD.encode(secret)),
         };
         write_secret_json(&dir.path().join("identity.json"), &file).unwrap();
         let loaded = load(dir.path()).unwrap().unwrap();
@@ -254,5 +420,20 @@ mod tests {
             loaded.public_key_bytes(),
             SigningKey::from_bytes(&secret).verifying_key().to_bytes()
         );
+    }
+
+    #[test]
+    fn v2_native_metadata_never_serializes_secret_field() {
+        let file = IdentityFileV2 {
+            version: IDENTITY_VERSION,
+            device_id: "device".into(),
+            device_name: "Laptop".into(),
+            key_id: "key-id".into(),
+            storage: SecretStorage::NativeKeyring,
+            secret_key: None,
+        };
+        let json = serde_json::to_string(&file).unwrap();
+        assert!(!json.contains("secret_key"));
+        assert!(json.contains("native_keyring"));
     }
 }

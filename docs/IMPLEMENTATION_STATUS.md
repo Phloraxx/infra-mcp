@@ -48,7 +48,7 @@ On the Linux ARM64 development host:
 
 - `cargo fmt --all -- --check`
 - `cargo clippy --workspace --all-targets -- -D warnings`
-- `cargo test --workspace` — 49 Rust tests, including real PTY/job workers, inherited-nonblocking control-socket normalization, search/edit/hash, resumable transfer, structured system/network parsers, Git, container redaction and local lifecycle tests.
+- `cargo test --workspace` — 51 Rust tests, including real PTY/job workers, inherited-nonblocking control-socket normalization, protected-identity metadata/file-fallback coverage, search/edit/hash, resumable transfer, structured system/network parsers, Git, container redaction and local lifecycle tests.
 - `./scripts/smoke-v1.sh`
 - `./scripts/smoke-install-dashboard.sh`
 
@@ -57,7 +57,7 @@ The current code head is green on Ubuntu x64, Ubuntu ARM64, macOS ARM64, and Win
 ### Intentionally incomplete
 
 - Production MCP/dashboard OAuth and a proper browser login/session. The gateway still refuses non-loopback binding by default unless an explicit development override is supplied.
-- OS-native Keychain/DPAPI/Secret Service storage and Windows ACL hardening. The current state directory/file permission hardening is strongest on Unix.
+- Device signing keys now use native OS credential storage when available (macOS Keychain Services, Windows Credential Manager, Linux Secret Service) with automatic v1→v2 identity migration and doctor visibility. Headless Linux without Secret Service intentionally falls back to a `0600` private identity file; eliminating or encrypting that fallback and broader Windows state-directory ACL hardening remain pending.
 - Cryptographically signed release/update metadata. Bootstrap release installs currently verify SHA-256 assets; the steady-state updater and rollback chain remain to be built.
 - `infra update`, staged binary replacement, health-check rollback, sanitized log export, and permission-specific doctor checks.
 - Real-device reboot/sleep-wake testing across macOS and Windows remains. Linux user-service install/reinstall/controller-restart behavior is exercised on Oracle ARM64, and macOS ARM64 has a side-by-side native install with signed reconnect plus controller/gateway persistence burn-in; full machine reboot/reconnect tests are still required.

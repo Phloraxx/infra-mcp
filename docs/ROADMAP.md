@@ -58,7 +58,8 @@ A full reboot remains required before declaring Linux startup validation complet
 - [x] Windows x64 CI ConPTY lifecycle and native acceptance build
 - [ ] real-device sleep/wake/reboot validation on macOS ARM64
 - [ ] real-device reboot/reconnect validation on Windows x64
-- [ ] device-protected credential storage
+- [x] native device signing-key storage through macOS Keychain Services, Windows Credential Manager, and Linux Secret Service when available, with automatic legacy migration
+- [ ] eliminate/encrypt the explicit headless-Linux private-file credential fallback and finish Windows state-directory ACL hardening
 - [x] `infra status`
 - [x] `infra reconnect`
 - [x] `infra doctor`

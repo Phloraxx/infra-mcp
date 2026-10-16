@@ -61,7 +61,7 @@ Unix PTY with correct zsh/bash environment behavior. Avoid assuming interactive 
 
 ### Credentials
 
-Store long-lived device identity in Keychain when feasible.
+Long-lived device signing keys are now stored through Keychain Services when available. `identity.json` retains only versioned metadata/key ID in native-store mode; legacy file identities migrate automatically after credential read-back verification.
 
 ### Desktop
 
@@ -90,7 +90,7 @@ Use ConPTY for interactive terminal sessions. Process-tree cancellation must acc
 
 ### Credentials
 
-Use DPAPI/Credential Manager or another platform-protected facility appropriate for the identity material.
+Long-lived device signing keys are now stored through Windows Credential Manager. `identity.json` retains only versioned metadata/key ID in native-store mode. Broader Windows state-directory ACL hardening remains pending.
 
 ### Files
 

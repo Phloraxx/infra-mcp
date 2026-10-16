@@ -1,5 +1,7 @@
 //! Small cross-platform primitives used by the headless agent.
 
+pub mod secret_store;
+
 use anyhow::Context;
 use serde::Serialize;
 use std::{fs, path::Path};
