@@ -5,13 +5,30 @@
   <meta name="viewport" content="width=device-width,initial-scale=1">
   <meta name="color-scheme" content="light dark">
   <title>Infra</title>
+  <meta name="theme-color" content="#18181b">
+  <link rel="icon" href="/favicon.ico" sizes="any">
+  <link rel="icon" href="/favicon.png" type="image/png">
+  <link rel="apple-touch-icon" href="/apple-touch-icon.png">
   <link rel="stylesheet" href="/styles.css">
   <link rel="stylesheet" href="/vendor/xterm.css">
 </head>
 <body>
-  <div class="shell">
+  <section id="signin" class="signin" aria-label="Sign in">
+    <div class="signin-card">
+      <img src="/assets/logo.png" class="login-logo" alt="Infra logo" width="64" height="64">
+      <h1>Infra</h1><p class="signin-subtitle">Your computers, connected.</p>
+      <form id="login-form">
+        <label id="username-label">Username<input id="login-username" autocomplete="username" maxlength="128" required></label>
+        <label><span id="password-label">Password</span><input id="login-password" type="password" autocomplete="current-password" maxlength="1024" required></label>
+        <p id="login-error" class="error" role="alert"></p>
+        <button id="login-submit" class="primary wide" disabled>Checking session…</button>
+      </form>
+      <p class="signin-foot">Secure access to your devices.</p>
+    </div>
+  </section>
+  <div id="app-shell" class="shell hidden">
     <aside class="sidebar">
-      <div class="brand"><span class="brand-mark">I</span><span>Infra</span></div>
+      <div class="brand"><img src="/assets/logo.png" class="brand-logo" alt="" width="30" height="30"><span>Infra</span></div>
       <nav>
         <button class="nav active" data-view="overview">Overview</button>
         <button class="nav" data-view="devices">Devices</button>
@@ -100,9 +117,15 @@
 
       <section id="settings" class="view">
         <div class="panel settings-grid">
-          <div><h2>Gateway</h2><p class="muted">The dashboard uses an HttpOnly browser session. Your admin credential is exchanged once and is never stored in Web Storage.</p><p id="auth-state" class="muted small">Checking authentication…</p></div>
-          <label>Admin credential <input id="admin-token" type="password" autocomplete="current-password" placeholder="Required on protected gateways"></label>
-          <div><button id="save-token" class="secondary" type="button">Sign in</button> <button id="logout-session" class="text-button" type="button">Sign out</button></div>
+          <div><h2>Your account</h2><p class="muted">Manage your password and signed-in session.</p><p id="auth-state" class="muted small">Checking authentication…</p></div>
+          <form id="password-change" class="settings-grid">
+            <label>Current password<input id="current-password" type="password" autocomplete="current-password" required maxlength="1024"></label>
+            <label>New password<input id="new-password" type="password" autocomplete="new-password" required minlength="12" maxlength="1024"></label>
+            <label>Confirm new password<input id="confirm-password" type="password" autocomplete="new-password" required minlength="12" maxlength="1024"></label>
+            <p class="muted small">Use at least 12 characters. Changing your password signs out other browser sessions.</p>
+            <p id="password-result" class="small" role="status"></p><button class="secondary" type="submit">Change password</button>
+          </form>
+          <div><button id="logout-session" class="secondary" type="button">Sign out</button></div>
         </div>
       </section>
     </main>

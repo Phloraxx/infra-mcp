@@ -194,3 +194,25 @@ SQLite audit events store only bounded metadata (time, device association, actio
 The current structured service/container/Git/listener implementations invoke platform-native commands or established CLIs with direct argv arrays; user-controlled identifiers are never concatenated into a shell command. OS permissions remain authoritative. Linux service mutation is currently restricted to `systemctl --user`; Windows SCM actions may fail when the current user lacks rights; there is no hidden elevation path.
 
 Structured inspection also reduces accidental secret exposure. Docker inspect recursively redacts common password/token/secret/key fields and sensitive environment variables. Git remote HTTP(S) userinfo is removed before returning URLs and common command output URL tokens are sanitized. macOS launchd status returns only selected non-secret status keys instead of raw `launchctl print` output. Explicit logs/diffs can still contain application/user-authored sensitive content and should be requested deliberately.
+
+
+## Dashboard owner password mode
+
+`INFRA_DASHBOARD_AUTH_FILE` enables a single owner account separate from the MCP
+admin credential. Provision it with `infra-gateway init-auth FILE USERNAME
+HTTPS_ORIGIN`, feeding the password through stdin rather than process argv. The
+file contains the Argon2id PHC hash, username, public origin and random session
+signing secret; Unix permissions are 0600. It never contains the cleartext password.
+
+Owner-mode browser sign-in accepts username/password only. Legacy token exchange
+continues solely when owner mode is not configured, for isolated development
+smokes. Verification runs off the async executor, with two concurrent verification
+slots and a global maximum of 12 login/change attempts per minute. Password-change
+requests require the current password plus the existing authenticated/CSRF boundary;
+success rotates the session signing secret and keeps the current browser signed in
+with a new cookie. All earlier browser cookies become invalid. Configuration is
+written atomically. Bearer MCP clients are independent of browser password changes.
+
+The configured public HTTPS host blocks `/mcp` in both gateway routing and the
+Cloudflare ingress. The origin remains on its private interface; password mode is
+not a replacement for public MCP OAuth. Static and API responses use no-store.

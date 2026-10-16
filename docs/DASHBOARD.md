@@ -200,3 +200,28 @@ Remaining dashboard work: file upload/download and mutation UX, full doctor/repa
 and sanitized export, permission onboarding, updater/rollback views, richer session
 metadata/history, automatic terminal fitting, and broader real-device/mobile
 acceptance. The current checks do not claim those features are implemented.
+
+
+## Password sign-in and branding — 2026-10-16
+
+A dedicated sign-in screen now owns the unauthenticated/loading state. The app
+shell stays hidden until authentication succeeds; a signed-out browser no longer
+shows a misleading zero-device dashboard. Initial data loading starts after the
+session check, and logout/session expiry closes SSE and clears private views.
+
+Owner mode is configured with `INFRA_DASHBOARD_AUTH_FILE`. The login uses username
+and password, an Argon2id hash, a separate random browser signing secret, bounded
+verification concurrency and a global 12-attempt/minute limit. Settings supports
+password changes after verifying the current password. Changes atomically update
+the private auth file and rotate the signing secret, invalidating older browser
+sessions. Browser credentials are never saved in Web Storage or returned by APIs.
+
+The gateway serves locally bundled image assets for the logo, PNG/ICO favicons and
+touch icon. The monochrome mark appears on sign-in and in the sidebar, with a
+dark-mode treatment. See `apps/dashboard/assets/README.md` for its generation brief.
+
+The HTTPS dashboard hostname is routed through Cloudflare Tunnel to the private
+origin. The public hostname redirects HTTP reads to HTTPS, rejects cross-origin
+requests, and does not expose `/mcp`; that endpoint remains private pending OAuth.
+Agent challenge authentication and one-time enrollment keep their separate trust
+boundaries. No public inbound host port is added.

@@ -118,3 +118,35 @@ All v1 development remains side-by-side. The deployed Node v0.3 remote-control s
 - Current-head GitHub CI remains to be observed after pushing this milestone. No
   Windows-device, machine reboot, sleep/wake or full replacement benchmark claim
   is implied by these results.
+
+## 2026-10-16 — owner login, shared registry and HTTPS identity
+
+- Fixed the signed-out UX: a dedicated login/loading screen keeps the app shell
+  hidden until authentication succeeds. A missing session no longer appears as an
+  empty device registry.
+- The prior real deployments had two isolated v1 gateways/databases. The existing
+  Oracle public-key registration was imported into the shared gateway without
+  changing device identity or private key; its v1 config now targets that gateway.
+  The shared registry reports both Oracle and the Mac online. The old isolated
+  gateway/database is retained as an acceptance/rollback reference; do not rerun a
+  harness that repoints the live Oracle agent without deliberately isolating it.
+- Owner authentication is now a username/password account backed by a private
+  Argon2id hash, an independent browser signing secret, bounded verification
+  concurrency and rate limiting. Settings supports current-password-verified
+  password changes with atomic persistence and previous-session invalidation.
+- The built-in generated monochrome logo is bundled as the sign-in/sidebar image,
+  PNG/ICO favicon and touch icon, including a dark-mode treatment.
+- The authenticated dashboard is served over HTTPS through a dedicated hostname
+  and existing Cloudflare Tunnel, with no new public inbound machine port. Both
+  ingress and the gateway deny public MCP access. Password mode is distinct from
+  future public MCP OAuth.
+- Strict clippy, all workspace Rust tests, the password/auth HTTP smoke and the
+  expanded installer/dashboard smoke pass on the Linux ARM64 host. Browser
+  fixtures pass dedicated sign-in, wrong-password isolation and all existing
+  device/session/file/terminal/mobile checks.
+
+- A clean Chromium browser reached the actual public HTTPS deployment, signed in,
+  observed both devices online, verified Secure/HttpOnly/SameSite cookies and image
+  assets, opened a real Oracle PTY, sent input, refreshed/re-attached to the same
+  session, closed it and signed out. The live gate reports
+  `LIVE_PUBLIC_BROWSER_PASS`. Temporary QA resources are removed after acceptance.

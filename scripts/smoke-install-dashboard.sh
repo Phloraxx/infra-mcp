@@ -41,7 +41,8 @@ curl -fsS "http://127.0.0.1:$PORT/healthz" >/dev/null
 
 # Dashboard and bootstrap scripts are served by the same gateway binary.
 curl -fsS "http://127.0.0.1:$PORT/" | grep -q '<title>Infra</title>'
-curl -fsS "http://127.0.0.1:$PORT/app.js" | grep -q 'create-enrollment'
+curl -fsS "http://127.0.0.1:$PORT/app.js" -o "$TMP/dashboard.js"
+grep -q 'create-enrollment' "$TMP/dashboard.js"
 curl -fsS "http://127.0.0.1:$PORT/downloads/install.sh" | grep -q 'Infra installer'
 ! grep -q 'sessionStorage' apps/dashboard/app.js
 

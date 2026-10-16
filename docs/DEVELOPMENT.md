@@ -197,3 +197,21 @@ input/resize/detach, no write replay after ambiguous failure, job cancellation,
 mobile overflow, sign-out clearing and CSP errors. Run the real
 `scripts/smoke-install-dashboard.sh` as well: it verifies the API and actual agent
 PTY worker shared with MCP.
+
+
+## Password and live-domain gates
+
+Run `scripts/smoke-dashboard-password.sh` for real gateway coverage of Argon2id
+owner login, bad credentials, rate limiting, session cookies, password rotation,
+old-session revocation, origin rejection, HTTPS routing and public MCP isolation.
+This is also an Ubuntu CI step. The browser fixture gate additionally tests the
+signed-out screen and ensures the app stays hidden after a failed login.
+
+An explicit live gate is available at `scripts/test-live-dashboard-browser.cjs`.
+It requires `INFRA_QA_URL` (HTTPS), `INFRA_QA_CREDENTIALS_FILE` (a private JSON file
+containing username/password), and optional `INFRA_QA_MIN_DEVICES`/screenshot path.
+It reads credentials from the file instead of argv and redacts the password from
+errors. It verifies real browser login, live online-device counts, secure cookie
+attributes, logo/favicon, PTY input/refresh/close, cleanup and sign-out. Run only
+against a deliberately selected authorized deployment; it opens a short-lived
+`cat` terminal on an online device.

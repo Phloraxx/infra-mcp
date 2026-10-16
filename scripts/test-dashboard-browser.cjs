@@ -19,14 +19,14 @@ let sessions = [
   {id:jobId,kind:'job',status:'running',device_id:'online',device_name:badName,device_online:true,started_at_unix_ms:Date.now()},
   {id:transferId,kind:'transfer',status:'ready',device_id:'online',device_name:badName,device_online:true,started_at_unix_ms:Date.now()}
 ];
-let authenticated=true, output='fixture PTY ready\r\n', failWrite=false, failRead=false, delayedRead=false, readDelay=0;
+let authenticated=false, output='fixture PTY ready\r\n', failWrite=false, failRead=false, delayedRead=false, readDelay=0;
 const operations=[], errors=[], streams=new Set();
 const server=http.createServer(async(req,res)=>{
   const send=(value,status=200)=>{res.writeHead(status,{'Content-Type':'application/json','Cache-Control':'no-store'});res.end(JSON.stringify(value));};
   if(req.url==='/api/auth/session'){
     if(req.method==='DELETE')authenticated=false;
-    if(req.method==='POST')authenticated=true;
-    return send({authenticated,mode:'browser_session'});
+    if(req.method==='POST'){let body='';for await(const chunk of req)body+=chunk;const input=JSON.parse(body);if(input.username!=='owner'||input.password!=='fixture-password-123')return send({error:'Incorrect username or password.'},401);authenticated=true;}
+    return send({authenticated,mode:authenticated?'browser_session':'none',login_method:'password'});
   }
   if(req.url.startsWith('/api/')){
     if(!authenticated)return send({error:'Authentication required'},401);
@@ -69,9 +69,9 @@ const server=http.createServer(async(req,res)=>{
     }
     return send({error:'not found'},404);
   }
-  const routes={'/':'index.html','/app.js':'app.js','/styles.css':'styles.css','/vendor/xterm.js':'vendor/xterm.js','/vendor/xterm.css':'vendor/xterm.css'};
+  const routes={'/assets/logo.png':'assets/logo.png','/favicon.ico':'assets/favicon.ico','/favicon.png':'assets/favicon.png','/apple-touch-icon.png':'assets/apple-touch-icon.png','/':'index.html','/app.js':'app.js','/styles.css':'styles.css','/vendor/xterm.js':'vendor/xterm.js','/vendor/xterm.css':'vendor/xterm.css'};
   const name=routes[req.url];if(!name){res.writeHead(404);res.end();return;}
-  const type=name.endsWith('.js')?'text/javascript':name.endsWith('.css')?'text/css':'text/html';
+  const type=name.endsWith('.js')?'text/javascript':name.endsWith('.css')?'text/css':name.endsWith('.png')?'image/png':name.endsWith('.ico')?'image/x-icon':'text/html';
   res.writeHead(200,{'Content-Type':type,'Content-Security-Policy':"default-src 'self'; connect-src 'self'; img-src 'self' data:; style-src 'self' 'unsafe-inline'; script-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'"});res.end(fs.readFileSync(path.join(root,name)));
 });
 (async()=>{
@@ -82,7 +82,13 @@ const server=http.createServer(async(req,res)=>{
     const page=await browser.newPage({viewport:{width:1280,height:900}});
     page.on('pageerror',e=>errors.push(e.message));
     page.on('console',msg=>{if(msg.type()==='error'&&msg.text().includes('Content Security Policy'))errors.push(msg.text());});
-    await page.goto(base);await page.locator('#overview-devices [data-device="online"]').waitFor();
+    await page.goto(base);await page.locator('#login-submit:not([disabled])').waitFor();
+    if(process.env.INFRA_QA_LOGIN_SCREENSHOT)await page.screenshot({path:process.env.INFRA_QA_LOGIN_SCREENSHOT,fullPage:true});
+    assert.equal(await page.locator('#app-shell').isVisible(),false);
+    await page.locator('#login-username').fill('owner');await page.locator('#login-password').fill('wrong');await page.locator('#login-submit').click();
+    await page.waitForFunction(()=>document.querySelector('#login-error').textContent.includes('Incorrect'));assert.equal(await page.locator('#app-shell').isVisible(),false);
+    await page.locator('#login-password').fill('fixture-password-123');await page.locator('#login-submit').click();
+    await page.locator('#overview-devices [data-device="online"]').waitFor();
     assert.equal(await page.locator('#summary .summary-card').nth(2).locator('strong').textContent(),'3');
     await page.locator('#overview-devices [data-device="online"]').click();
     await page.waitForFunction(()=>document.querySelector('#device-detail').classList.contains('active'));
@@ -102,7 +108,7 @@ const server=http.createServer(async(req,res)=>{
     assert(operations.some(o=>o.op==='transfer'&&o.action.action==='cancel'&&o.action.transfer_id===transferId));
     await page.locator('[data-view="sessions"]').click();
     await page.locator('#session-kind').selectOption('terminal');await page.locator('#all-sessions [data-session]').click();
-    await page.locator('.xterm-helper-textarea').waitFor();await page.waitForFunction(()=>document.querySelector('#session-read-state').textContent.includes('bytes read'));
+    await page.locator('.xterm-screen').waitFor();await page.waitForFunction(()=>document.querySelector('#session-read-state').textContent.includes('bytes read'));
     await page.locator('.xterm-helper-textarea').focus();await page.keyboard.type('abc');
     await page.waitForFunction(()=>document.querySelector('.xterm-screen').textContent.includes('abc'));
     assert.equal(operations.filter(o=>o.op==='terminal'&&o.action.action==='open').length,0);
@@ -110,7 +116,7 @@ const server=http.createServer(async(req,res)=>{
     await page.locator('#terminal-cols').fill('90');await page.locator('#terminal-resize').click();
     await page.waitForTimeout(100);assert(operations.some(o=>o.action?.action==='resize'&&o.action.session_id===terminalId&&o.action.cols===90));
     // Refresh attaches to the same ID, then navigation detaches without closing it.
-    await page.reload();await page.locator('.xterm-helper-textarea').waitFor();
+    await page.reload();await page.locator('.xterm-screen').waitFor();
     await page.waitForFunction(()=>document.querySelector('#session-read-state').textContent.includes('bytes read'));
     assert(operations.filter(o=>o.op==='terminal'&&o.action.action==='read').every(o=>o.action.session_id===terminalId));
     failWrite=true;await page.locator('.xterm-helper-textarea').focus();await page.keyboard.type('!');
@@ -132,8 +138,9 @@ const server=http.createServer(async(req,res)=>{
     if(process.env.INFRA_QA_SCREENSHOT)await page.screenshot({path:process.env.INFRA_QA_SCREENSHOT,fullPage:true});
     await page.locator('[data-view="settings"]').click();await page.locator('#logout-session').click();
     await page.waitForFunction(()=>document.querySelector('#all-devices').textContent.includes('No devices'));
+    assert.equal(await page.locator('#app-shell').isVisible(),false);assert.equal(await page.locator('#signin').isVisible(),true);
     assert.equal(await page.locator('#file-content').textContent(),'');assert.equal(await page.locator('#session-output').textContent(),'');
     assert.deepEqual(errors,[]);
-    console.log('Dashboard browser gate PASS: device views, literal rendering/XSS, file preview, filters, shared-ID terminal attach/input/resize/refresh/detach, no write replay, job/transfer cancel and active counts, mobile layout, sign-out clearing and CSP.');
+    console.log('Dashboard browser gate PASS: dedicated password sign-in gate, device views, literal rendering/XSS, file preview, filters, shared-ID terminal attach/input/resize/refresh/detach, no write replay, job/transfer cancel and active counts, mobile layout, sign-out clearing and CSP.');
   }finally{await browser.close();for(const stream of streams)stream.end();await new Promise(resolve=>server.close(resolve));}
 })().catch(error=>{console.error(error);server.close();process.exitCode=1;});

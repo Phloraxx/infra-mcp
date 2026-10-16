@@ -111,6 +111,8 @@ A full reboot remains required before declaring Linux startup validation complet
 - [x] dashboard enrollment and generated install command
 - [x] SSE device/session/activity refresh
 - [x] private-mode MCP bearer authentication + signed HttpOnly dashboard session/CSRF boundary
+- [x] dedicated owner password sign-in, Argon2id, rate limits and session-rotating password changes
+- [x] branded HTTPS dashboard hostname, local logo/favicon assets and public MCP isolation
 - [ ] standards-compatible public OAuth/token validation and production TLS edge
 - [x] device detail tabs, shared browser/MCP terminal and session controls
 - [x] file directory browsing and bounded UTF-8 preview

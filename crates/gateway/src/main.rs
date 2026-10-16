@@ -1,3 +1,4 @@
+mod auth;
 mod store;
 
 use anyhow::Context;
@@ -64,6 +65,7 @@ const BROWSER_SESSION_TTL_MS: u64 = 12 * 60 * 60 * 1000;
 struct AppState {
     legacy_agent_token: Option<Arc<str>>,
     admin_token: Option<Arc<str>>,
+    owner_auth: Option<Arc<auth::OwnerAuth>>,
     gateway_epoch: Uuid,
     next_generation: Arc<AtomicU64>,
     devices: Arc<RwLock<HashMap<String, DeviceConnection>>>,
@@ -78,6 +80,7 @@ impl AppState {
         Self {
             legacy_agent_token: legacy_agent_token.map(Arc::from),
             admin_token: admin_token.map(Arc::from),
+            owner_auth: None,
             gateway_epoch: Uuid::new_v4(),
             next_generation: Arc::new(AtomicU64::new(1)),
             devices: Arc::new(RwLock::new(HashMap::new())),
@@ -176,9 +179,20 @@ struct EnrollOutput {
     device_name: String,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Deserialize)]
 struct BrowserLoginInput {
-    token: String,
+    #[serde(default)]
+    token: Option<String>,
+    #[serde(default)]
+    username: Option<String>,
+    #[serde(default)]
+    password: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct ChangePasswordInput {
+    current_password: String,
+    new_password: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -863,6 +877,9 @@ impl InfraMcp {
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    if auth::provision_from_cli()? {
+        return Ok(());
+    }
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::from_default_env()
@@ -892,7 +909,10 @@ async fn main() -> anyhow::Result<()> {
     let legacy = std::env::var("INFRA_LEGACY_AGENT_TOKEN")
         .ok()
         .or_else(|| std::env::var("INFRA_AGENT_TOKEN").ok());
-    let state = AppState::new(store, legacy, admin);
+    let mut state = AppState::new(store, legacy, admin);
+    if let Ok(path) = std::env::var("INFRA_DASHBOARD_AUTH_FILE") {
+        state.owner_auth = Some(Arc::new(auth::OwnerAuth::load(PathBuf::from(path))?));
+    }
     let app = build_app(state.clone());
     let listener = tokio::net::TcpListener::bind(bind).await?;
     info!(%bind, gateway_epoch=%state.gateway_epoch, "Infra v1 gateway listening");
@@ -919,6 +939,7 @@ fn build_app(state: AppState) -> Router {
         .route("/api/activity", get(list_activity_http))
         .route("/api/events", get(dashboard_events))
         .route("/api/enrollments", post(create_enrollment))
+        .route("/api/auth/password", post(change_browser_password))
         .route("/api/devices/{device_id}/revoke", post(revoke_device))
         .route(
             "/api/devices/{device_id}/operations",
@@ -936,6 +957,10 @@ fn build_app(state: AppState) -> Router {
         .route("/styles.css", get(dashboard_css))
         .route("/vendor/xterm.js", get(dashboard_terminal_js))
         .route("/vendor/xterm.css", get(dashboard_terminal_css))
+        .route("/assets/logo.png", get(dashboard_logo))
+        .route("/favicon.png", get(dashboard_favicon))
+        .route("/favicon.ico", get(dashboard_favicon_ico))
+        .route("/apple-touch-icon.png", get(dashboard_touch_icon))
         .route("/downloads/install.sh", get(download_install_sh))
         .route("/downloads/install.ps1", get(download_install_ps1))
         .route("/healthz", get(health))
@@ -947,6 +972,10 @@ fn build_app(state: AppState) -> Router {
         )
         .route("/enroll", post(enroll))
         .route("/agent", get(agent_upgrade))
+        .layer(middleware::from_fn_with_state(
+            state.clone(),
+            dashboard_edge,
+        ))
         .with_state(state)
 }
 
@@ -964,6 +993,86 @@ async fn dashboard_js() -> Response {
 }
 async fn dashboard_css() -> Response {
     static_response(DASHBOARD_CSS, "text/css; charset=utf-8")
+}
+async fn dashboard_logo() -> Response {
+    image_response(
+        include_bytes!("../../../apps/dashboard/assets/logo.png"),
+        "image/png",
+    )
+}
+async fn dashboard_favicon() -> Response {
+    image_response(
+        include_bytes!("../../../apps/dashboard/assets/favicon.png"),
+        "image/png",
+    )
+}
+async fn dashboard_favicon_ico() -> Response {
+    image_response(
+        include_bytes!("../../../apps/dashboard/assets/favicon.ico"),
+        "image/x-icon",
+    )
+}
+async fn dashboard_touch_icon() -> Response {
+    image_response(
+        include_bytes!("../../../apps/dashboard/assets/apple-touch-icon.png"),
+        "image/png",
+    )
+}
+fn image_response(data: &'static [u8], content_type: &'static str) -> Response {
+    (
+        [
+            (header::CONTENT_TYPE, content_type),
+            (header::CACHE_CONTROL, "no-store"),
+            (header::X_CONTENT_TYPE_OPTIONS, "nosniff"),
+        ],
+        data,
+    )
+        .into_response()
+}
+
+async fn dashboard_edge(State(state): State<AppState>, request: Request, next: Next) -> Response {
+    if let Some(owner) = &state.owner_auth {
+        let origin = owner.public_origin();
+        let host = request
+            .headers()
+            .get(header::HOST)
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("");
+        let public_host = origin.strip_prefix("https://").unwrap_or("");
+        if host.eq_ignore_ascii_case(public_host) {
+            if request.uri().path().starts_with("/mcp") {
+                return StatusCode::NOT_FOUND.into_response();
+            }
+            if !secure_cookie_requested(request.headers()) {
+                if request.method() == axum::http::Method::GET
+                    || request.method() == axum::http::Method::HEAD
+                {
+                    let target = format!("{}{}", origin, request.uri());
+                    return (StatusCode::PERMANENT_REDIRECT, [(header::LOCATION, target)])
+                        .into_response();
+                }
+                return (StatusCode::FORBIDDEN, "HTTPS required").into_response();
+            }
+        }
+        if let Some(request_origin) = request
+            .headers()
+            .get(header::ORIGIN)
+            .and_then(|v| v.to_str().ok())
+        {
+            let direct = format!("http://{host}");
+            if request_origin != origin
+                && (host.eq_ignore_ascii_case(public_host) || request_origin != direct)
+            {
+                return (StatusCode::FORBIDDEN, "cross-origin request rejected").into_response();
+            }
+        }
+    }
+    let mut response = next.run(request).await;
+    response.headers_mut().insert(
+        header::CACHE_CONTROL,
+        axum::http::HeaderValue::from_static("no-store"),
+    );
+    response
 }
 async fn dashboard_terminal_js() -> Response {
     static_response(
@@ -1243,7 +1352,7 @@ fn constant_time_eq(left: &[u8], right: &[u8]) -> bool {
 
 fn bearer_authorized(state: &AppState, headers: &HeaderMap) -> bool {
     let Some(expected) = &state.admin_token else {
-        return true;
+        return state.owner_auth.is_none();
     };
     headers
         .get(header::AUTHORIZATION)
@@ -1282,7 +1391,7 @@ fn create_browser_session_cookie(secret: &[u8]) -> Result<(String, u64), &'stati
 }
 
 fn browser_session_expiry(state: &AppState, headers: &HeaderMap) -> Option<u64> {
-    let secret = state.admin_token.as_deref()?;
+    let secret = browser_session_secret(state)?;
     let cookie = browser_cookie(headers)?;
     let mut fields = cookie.split('.');
     if fields.next()? != "v1" {
@@ -1310,7 +1419,7 @@ async fn require_mcp_auth(State(state): State<AppState>, request: Request, next:
 }
 
 async fn require_api_auth(State(state): State<AppState>, request: Request, next: Next) -> Response {
-    if state.admin_token.is_none() || bearer_authorized(&state, request.headers()) {
+    if bearer_authorized(&state, request.headers()) {
         return next.run(request).await;
     }
     if browser_session_expiry(&state, request.headers()).is_none() {
@@ -1349,31 +1458,24 @@ fn session_cookie(value: &str, max_age_seconds: u64, secure: bool) -> String {
 async fn browser_session_status(
     State(state): State<AppState>,
     headers: HeaderMap,
-) -> Json<BrowserSessionView> {
-    if state.admin_token.is_none() {
-        return Json(BrowserSessionView {
-            authenticated: true,
-            mode: "open_loopback",
-            expires_at_unix_ms: None,
-        });
-    }
-    if bearer_authorized(&state, &headers) {
-        return Json(BrowserSessionView {
-            authenticated: true,
-            mode: "bearer",
-            expires_at_unix_ms: None,
-        });
-    }
+) -> Json<serde_json::Value> {
+    let open = state.admin_token.is_none() && state.owner_auth.is_none();
+    let bearer = bearer_authorized(&state, &headers);
     let expires = browser_session_expiry(&state, &headers);
-    Json(BrowserSessionView {
-        authenticated: expires.is_some(),
-        mode: if expires.is_some() {
-            "browser_session"
-        } else {
-            "none"
-        },
-        expires_at_unix_ms: expires,
-    })
+    Json(serde_json::json!({
+        "authenticated":open || bearer || expires.is_some(),
+        "mode":if open { "open_loopback" } else if expires.is_some() { "browser_session" } else if bearer { "bearer" } else { "none" },
+        "expires_at_unix_ms":expires,
+        "login_method":if state.owner_auth.is_some() { "password" } else { "token" }
+    }))
+}
+
+fn browser_session_secret(state: &AppState) -> Option<String> {
+    state
+        .owner_auth
+        .as_ref()
+        .map(|owner| owner.session_secret())
+        .or_else(|| state.admin_token.as_deref().map(str::to_owned))
 }
 
 async fn browser_login(
@@ -1381,18 +1483,64 @@ async fn browser_login(
     headers: HeaderMap,
     Json(input): Json<BrowserLoginInput>,
 ) -> Response {
-    let Some(expected) = &state.admin_token else {
+    if let Some(owner) = &state.owner_auth {
+        if headers
+            .get(BROWSER_CSRF_HEADER)
+            .and_then(|v| v.to_str().ok())
+            != Some("1")
+        {
+            return (StatusCode::FORBIDDEN, "CSRF header required").into_response();
+        }
+        if !owner.admit_attempt() {
+            return (
+                StatusCode::TOO_MANY_REQUESTS,
+                [(header::RETRY_AFTER, "60")],
+                "Too many sign-in attempts. Try again shortly.",
+            )
+                .into_response();
+        }
+        let Ok(permit) = owner.verification_slots.clone().try_acquire_owned() else {
+            return (
+                StatusCode::TOO_MANY_REQUESTS,
+                "Sign-in is busy. Try again shortly.",
+            )
+                .into_response();
+        };
+        let owner = owner.clone();
+        let username = input.username.unwrap_or_default();
+        let password = input.password.unwrap_or_default();
+        let valid = tokio::task::spawn_blocking(move || {
+            let _permit = permit;
+            owner.verify(&username, &password)
+        })
+        .await
+        .unwrap_or(false);
+        if !valid {
+            return (StatusCode::UNAUTHORIZED, "Incorrect username or password.").into_response();
+        }
+    } else if let Some(expected) = &state.admin_token {
+        if !constant_time_eq(
+            input.token.unwrap_or_default().as_bytes(),
+            expected.as_bytes(),
+        ) {
+            return (StatusCode::UNAUTHORIZED, "invalid admin credential").into_response();
+        }
+    } else {
         return Json(BrowserSessionView {
             authenticated: true,
             mode: "open_loopback",
             expires_at_unix_ms: None,
         })
         .into_response();
-    };
-    if !constant_time_eq(input.token.as_bytes(), expected.as_bytes()) {
-        return (StatusCode::UNAUTHORIZED, "invalid admin credential").into_response();
     }
-    let (session, expires) = match create_browser_session_cookie(expected.as_bytes()) {
+    issue_browser_session(&state, &headers)
+}
+
+fn issue_browser_session(state: &AppState, headers: &HeaderMap) -> Response {
+    let Some(secret) = browser_session_secret(state) else {
+        return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+    };
+    let (session, expires) = match create_browser_session_cookie(secret.as_bytes()) {
         Ok(value) => value,
         Err(error) => return (StatusCode::INTERNAL_SERVER_ERROR, error).into_response(),
     };
@@ -1405,12 +1553,49 @@ async fn browser_login(
     let cookie = session_cookie(
         &session,
         BROWSER_SESSION_TTL_MS / 1000,
-        secure_cookie_requested(&headers),
+        secure_cookie_requested(headers),
     );
     if let Ok(value) = axum::http::HeaderValue::from_str(&cookie) {
         response.headers_mut().insert(header::SET_COOKIE, value);
     }
     response
+}
+
+async fn change_browser_password(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(input): Json<ChangePasswordInput>,
+) -> Response {
+    let Some(owner) = &state.owner_auth else {
+        return (StatusCode::BAD_REQUEST, "Password login is not configured.").into_response();
+    };
+    if input.current_password.len() > 1024 || input.new_password.len() > 1024 {
+        return StatusCode::PAYLOAD_TOO_LARGE.into_response();
+    }
+    if !owner.admit_attempt() {
+        return (
+            StatusCode::TOO_MANY_REQUESTS,
+            "Too many attempts. Try again shortly.",
+        )
+            .into_response();
+    }
+    let Ok(permit) = owner.verification_slots.clone().try_acquire_owned() else {
+        return StatusCode::TOO_MANY_REQUESTS.into_response();
+    };
+    let owner = owner.clone();
+    match tokio::task::spawn_blocking(move || {
+        let _permit = permit;
+        owner.change_password(&input.current_password, &input.new_password)
+    })
+    .await
+    {
+        Ok(Ok(())) => {
+            state.emit("password_changed", None);
+            issue_browser_session(&state, &headers)
+        }
+        Ok(Err(error)) => (StatusCode::BAD_REQUEST, error.to_string()).into_response(),
+        Err(_) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+    }
 }
 
 async fn browser_logout(headers: HeaderMap) -> Response {
