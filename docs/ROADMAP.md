@@ -55,6 +55,7 @@ A full reboot remains required before declaring Linux startup validation complet
 - [x] macOS LaunchAgent startup implementation
 - [x] macOS ARM64 real-device controller/gateway persistence burn-in
 - [x] Windows logon Scheduled Task startup implementation
+- [x] Windows x64 CI ConPTY lifecycle and native acceptance build
 - [ ] real-device sleep/wake/reboot validation on macOS ARM64
 - [ ] real-device reboot/reconnect validation on Windows x64
 - [ ] device-protected credential storage

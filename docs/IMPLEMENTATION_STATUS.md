@@ -52,7 +52,7 @@ On the Linux ARM64 development host:
 - `./scripts/smoke-v1.sh`
 - `./scripts/smoke-install-dashboard.sh`
 
-The current head is green on Ubuntu x64, Ubuntu ARM64, and macOS through formatting, strict clippy, and the full Rust test suite; Ubuntu x64 also passes both product smokes. macOS accepted control sockets are explicitly normalized back to bounded blocking I/O, closing the CI-observed BSD `EAGAIN` race. Windows passes formatting and strict clippy; the full Windows test result remains the current platform gate.
+The current code head is green on Ubuntu x64, Ubuntu ARM64, macOS ARM64, and Windows x64 through formatting, strict clippy, and the full Rust test suite; Ubuntu x64 also passes both product smokes. macOS accepted control sockets are explicitly normalized back to bounded blocking I/O, closing the CI-observed BSD `EAGAIN` race. Windows ConPTY startup/query/close/shutdown lifecycle now passes the full CI suite and produces a native x64 acceptance artifact; real Windows-device validation remains the platform gate.
 
 ### Intentionally incomplete
 
@@ -65,7 +65,7 @@ The current head is green on Ubuntu x64, Ubuntu ARM64, and macOS through formatt
 - Higher-level device-to-device transfer orchestration and throughput reporting. Binary device upload/download/resume exists at the MCP layer.
 - Privileged helper and semantic desktop automation.
 - Full dashboard device-detail/terminal/files/permission/diagnostic controls. The current dashboard is a functional control/status foundation, not the finished product.
-- Linux PTY/job survival through a user-service controller restart is verified on Oracle by requiring fresh post-restart activity. The real Mac burn-in now passes with independent launchd workers + stable boot identity: the same PTY accepts fresh I/O and the same durable job emits later output after controller restart, and the same PTY remains usable after gateway restart. Windows real-device validation remains pending.
+- Linux PTY/job survival through a user-service controller restart is verified on Oracle by requiring fresh post-restart activity. The real Mac burn-in now passes with independent launchd workers + stable boot identity: the same PTY accepts fresh I/O and the same durable job emits later output after controller restart, and the same PTY remains usable after gateway restart. Submitted macOS worker wrappers self-remove after completion; post-burn-in validation shows zero worker launchd registrations/processes while both v0.3 and v1 controllers remain healthy. Windows CI is green and the x64 acceptance artifact is staged; Windows real-device validation remains pending.
 - PTYs/jobs never claim to survive a full machine reboot; stale-boot entries are marked interrupted.
 - Windows atomic replacement semantics need a platform-specific upgrade; overwrite may require destination removal before rename.
 
