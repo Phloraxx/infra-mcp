@@ -28,7 +28,7 @@ The roadmap is ordered to produce useful capability early while keeping the work
 - [x] one-time Ed25519 enrollment/revocation
 - [x] Linux systemd-user startup implementation
 - [x] Linux ARM64 real-device non-login install/repair plus gateway/controller restart burn-in
-- [ ] Linux real-device reboot/reconnect validation
+- [ ] Linux real-device reboot/reconnect validation (canonical Oracle install is otherwise accepted)
 
 A full reboot remains required before declaring Linux startup validation complete.
 
@@ -56,7 +56,7 @@ A full reboot remains required before declaring Linux startup validation complet
 - [x] macOS ARM64 real-device controller/gateway persistence burn-in
 - [x] Windows logon Scheduled Task startup implementation
 - [x] Windows x64 CI ConPTY lifecycle and native acceptance build
-- [ ] real-device sleep/wake/reboot validation on macOS ARM64
+- [ ] real-device sleep/wake/reboot validation on macOS ARM64 (canonical install/update/rollback/gateway-reconnect accepted)
 - [ ] real-device reboot/reconnect validation on Windows x64
 - [x] native device signing-key storage through macOS Keychain Services, Windows Credential Manager, and Linux Secret Service when available, with automatic legacy migration
 - [ ] eliminate/encrypt the explicit headless-Linux private-file credential fallback and finish Windows state-directory ACL hardening
