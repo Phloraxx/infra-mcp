@@ -192,3 +192,9 @@ All v1 development remains side-by-side. The deployed Node v0.3 remote-control s
 - Re-ran the safe canonical acceptance matrix: Oracle passes all ten Linux-relevant categories; Mac passes exec, files/edit/hash, search, processes, system/network, PTY, durable jobs, resumable transfer, desktop permission probing/discovery and clipboard.
 - macOS Screen Recording is now granted for the Infra desktop path. A real MCP screenshot returned a valid 702,248-byte JPEG end-to-end through the authenticated gateway. Accessibility remains the only Mac desktop permission gate for click/type/key and richer window metadata.
 - Rose/Windows remains offline, so real Windows acceptance is still pending. Full machine sleep/wake/reboot tests remain intentionally deferred to the final reliability pass.
+
+### macOS TCC behavior after agent replacement
+
+- Real canonical Mac acceptance showed that replacing the unsigned `infra-agent` binary can clear macOS Accessibility and Screen Recording grants even when the path is unchanged. This is an OS privacy/code-identity boundary, not an Infra reconnect failure.
+- The updater now warns explicitly after successful macOS replacement to re-check those two permissions before relying on GUI control. No Keychain trust or self-signed signing identity is installed automatically; that would add unnecessary security/setup complexity before cutover.
+- Re-enabling the permissions remains a one-time manual action after such an unsigned agent replacement. A future properly signed release can make the permission identity stable across updates.
