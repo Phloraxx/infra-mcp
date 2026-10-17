@@ -168,11 +168,6 @@ pub fn restart() -> anyhow::Result<()> {
     command_ok(Command::new("schtasks").args(["/Run", "/TN", WINDOWS_TASK]))
 }
 
-#[cfg(windows)]
-pub fn recover_after_failed_start() -> anyhow::Result<()> {
-    restart()
-}
-
 #[cfg(target_os = "linux")]
 pub fn status() -> StartupStatus {
     let installed = linux_unit_path().is_ok_and(|path| path.exists());
