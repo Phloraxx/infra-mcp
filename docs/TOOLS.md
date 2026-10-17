@@ -195,6 +195,7 @@ Return progress, bytes transferred, total bytes, throughput, and verified hash.
 
 Implemented replacement-critical actions:
 
+- `permissions` (non-destructive readiness probe)
 - `displays`
 - `windows`
 - `screenshot` (full display or bounded region)

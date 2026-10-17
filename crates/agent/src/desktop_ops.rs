@@ -35,6 +35,7 @@ pub fn handle(request: DesktopRequest) -> OperationResult {
 #[cfg(target_os = "macos")]
 fn handle_inner(action: DesktopAction) -> anyhow::Result<Value> {
     match action {
+        DesktopAction::Permissions => macos_permissions(),
         DesktopAction::Displays => macos_displays(),
         DesktopAction::Windows => macos_windows(),
         DesktopAction::Screenshot {
@@ -56,6 +57,7 @@ fn handle_inner(action: DesktopAction) -> anyhow::Result<Value> {
 #[cfg(windows)]
 fn handle_inner(action: DesktopAction) -> anyhow::Result<Value> {
     match action {
+        DesktopAction::Permissions => windows_permissions(),
         DesktopAction::Displays => windows_displays(),
         DesktopAction::Windows => windows_windows(),
         DesktopAction::Screenshot {
@@ -147,6 +149,45 @@ fn validate_region(
         }
         _ => anyhow::bail!("screenshot region requires x, y, width and height together"),
     }
+}
+
+#[cfg(target_os = "macos")]
+fn macos_permissions() -> anyhow::Result<Value> {
+    let accessibility = Command::new("osascript")
+        .args([
+            "-e",
+            "tell application \"System Events\" to get UI elements enabled",
+        ])
+        .output()?;
+    let accessibility_granted = accessibility.status.success()
+        && String::from_utf8_lossy(&accessibility.stdout)
+            .trim()
+            .eq_ignore_ascii_case("true");
+
+    let path = screenshot_path();
+    let screen_recording = Command::new("screencapture")
+        .args(["-x", "-t", "jpg", "-R", "0,0,1,1"])
+        .arg(&path)
+        .output()?;
+    let screen_recording_granted = screen_recording.status.success()
+        && fs::metadata(&path).is_ok_and(|metadata| metadata.len() > 0);
+    let _ = fs::remove_file(&path);
+
+    Ok(json!({
+        "platform": "macos",
+        "accessibility": {
+            "granted": accessibility_granted,
+            "required_for": ["windows_metadata", "click", "type_text", "key"],
+            "settings": "System Settings > Privacy & Security > Accessibility"
+        },
+        "screen_recording": {
+            "granted": screen_recording_granted,
+            "required_for": ["screenshot"],
+            "settings": "System Settings > Privacy & Security > Screen & System Audio Recording"
+        },
+        "clipboard": {"granted": true},
+        "ready": accessibility_granted && screen_recording_granted
+    }))
 }
 
 #[cfg(target_os = "macos")]
@@ -385,6 +426,19 @@ fn powershell(script: &str, label: &str) -> anyhow::Result<Output> {
         script,
     ]);
     checked_output(command, label)
+}
+
+#[cfg(windows)]
+fn windows_permissions() -> anyhow::Result<Value> {
+    Ok(json!({
+        "platform": "windows",
+        "interactive_session": true,
+        "screenshot": {"granted": true},
+        "input": {"granted": true},
+        "clipboard": {"granted": true},
+        "ready": true,
+        "note": "Desktop actions still require the agent to run in the user's interactive desktop session; real-device acceptance verifies that scheduled-task configuration."
+    }))
 }
 
 #[cfg(windows)]

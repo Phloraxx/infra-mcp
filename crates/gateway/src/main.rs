@@ -736,13 +736,14 @@ impl InfraMcp {
 
     #[tool(
         name = "desktop",
-        description = "Desktop control on an Infra device. Actions: displays, windows, screenshot, focus, click, type_text, key, clipboard_get, clipboard_set."
+        description = "Desktop control on an Infra device. Actions: permissions, displays, windows, screenshot, focus, click, type_text, key, clipboard_get, clipboard_set."
     )]
     async fn desktop(
         &self,
         Parameters(input): Parameters<McpDesktopInput>,
     ) -> Result<McpJson<serde_json::Value>, String> {
         let action = match input.action.as_str() {
+            "permissions" => DesktopAction::Permissions,
             "displays" => DesktopAction::Displays,
             "windows" => DesktopAction::Windows,
             "screenshot" => DesktopAction::Screenshot {
