@@ -99,3 +99,116 @@ dialog{border:0;background:transparent;padding:0;width:min(620px,calc(100% - 28p
   :root{color:#e9ebef;background:#101216;--bg:#101216;--surface:#17191e;--surface-2:#1b1e24;--surface-3:#22252c;--ink:#eceef2;--ink-2:#d5d8df;--muted:#9096a1;--muted-2:#686f7b;--border:#272b32;--border-strong:#333842;--accent:#8b82ff;--accent-soft:#27253f;--good:#49c88a;--good-soft:#172c24;--warn:#d69a42;--warn-soft:#2b2419;--bad:#ef7379;--bad-soft:#321d20;--shadow-sm:0 1px 2px rgba(0,0,0,.16);--shadow-md:0 18px 48px rgba(0,0,0,.28)}
   .primary{background:#f0f1f4;color:#15171b;border-color:#f0f1f4}.primary:hover{background:#dfe1e6;border-color:#dfe1e6}.secondary{background:#1b1e23;color:#d8dbe1;border-color:#353a43}.secondary:hover{background:#22262c;border-color:#434954}.signin-panel{background:#15171b}.signin-mobile-brand img,.brand-logo{filter:none}.brand-symbol{background:#f1f2f4}.summary-card.online{--metric-soft:#172c24}.summary-card.offline{--metric-soft:#23262c}.summary-card.work{--metric-soft:#27253f}.summary-card.enrolled{--metric-soft:#302619}.attention-panel{border-color:#49371f}.device-avatar.online,.device-hero-avatar.online{border-color:#214737}.capability-card.available .cap-icon{border-color:#244435}.status.online:before{box-shadow:0 0 0 3px rgba(73,200,138,.08)}.session-kind-icon.terminal{background:#24233b;color:#8e85ff;border-color:#302e4a}.session-kind-icon.job{background:#182b23;color:#55c690;border-color:#234137}.session-kind-icon.transfer{background:#2b251a;color:#d8a154;border-color:#463922}.danger{background:#201719;border-color:#553036}.danger:hover{background:#321d20;border-color:#704047}.security-dot{box-shadow:0 0 0 3px rgba(73,200,138,.1)}
 }
+
+/* Motion polish — purposeful, fast, and compositor-friendly */
+:root{
+  --motion-fast:140ms;
+  --motion-base:210ms;
+  --motion-slow:320ms;
+  --ease-out:cubic-bezier(.22,.8,.28,1);
+  --ease-spring:cubic-bezier(.2,.9,.25,1.12);
+}
+
+@keyframes view-enter{
+  from{opacity:0;transform:translateY(8px) scale(.997)}
+  to{opacity:1;transform:none}
+}
+@keyframes pane-enter{
+  from{opacity:0;transform:translateY(5px)}
+  to{opacity:1;transform:none}
+}
+@keyframes dialog-enter{
+  from{opacity:0;transform:translateY(14px) scale(.97)}
+  to{opacity:1;transform:none}
+}
+@keyframes backdrop-enter{
+  from{background:rgba(9,11,15,0);backdrop-filter:blur(0)}
+  to{background:rgba(9,11,15,.66);backdrop-filter:blur(5px)}
+}
+@keyframes signin-enter{
+  from{opacity:0;transform:translateY(10px)}
+  to{opacity:1;transform:none}
+}
+@keyframes soft-pulse{
+  0%,100%{box-shadow:0 0 0 0 rgba(39,161,99,0)}
+  50%{box-shadow:0 0 0 5px rgba(39,161,99,.08)}
+}
+@keyframes error-nudge{
+  0%,100%{transform:translateX(0)}
+  25%{transform:translateX(-3px)}
+  75%{transform:translateX(3px)}
+}
+
+.view.active{animation:view-enter var(--motion-slow) var(--ease-out) both}
+.device-pane:not(.hidden){animation:pane-enter var(--motion-base) var(--ease-out) both}
+.signin-card{animation:signin-enter 420ms var(--ease-out) both}
+.signin-visual>*{animation:signin-enter 520ms var(--ease-out) both}
+#login-error:not(:empty){animation:error-nudge 230ms ease-out}
+
+dialog[open] .dialog-card{animation:dialog-enter 260ms var(--ease-spring) both}
+dialog[open]::backdrop{animation:backdrop-enter 220ms ease-out both}
+
+button,.nav,.tab,.device-row,.session-row,.file-row,.summary-card,.capability-card,.attention-panel,.device-avatar,.device-hero-avatar,input,select{
+  transition:
+    transform var(--motion-fast) var(--ease-out),
+    box-shadow var(--motion-base) var(--ease-out),
+    border-color var(--motion-base) ease,
+    background-color var(--motion-base) ease,
+    color var(--motion-base) ease,
+    opacity var(--motion-base) ease;
+}
+button:active:not(:disabled),.nav:active,.tab:active{transform:scale(.965)}
+.primary:hover:not(:disabled){transform:translateY(-1px);box-shadow:0 5px 14px rgba(15,20,32,.12)}
+.secondary:hover:not(:disabled){transform:translateY(-1px);box-shadow:var(--shadow-sm)}
+.text-button:hover{transform:translateX(2px)}
+.icon-button:hover{transform:rotate(4deg) scale(1.05)}
+
+.nav{position:relative;overflow:hidden}
+.nav:before{content:"";position:absolute;left:3px;top:50%;width:2px;height:0;border-radius:2px;background:var(--accent);transform:translateY(-50%);transition:height var(--motion-base) var(--ease-spring),opacity var(--motion-base) ease;opacity:0}
+.nav.active:before{height:18px;opacity:1}
+.nav-icon{transition:transform var(--motion-base) var(--ease-spring),color var(--motion-base) ease}
+.nav:hover .nav-icon{transform:translateX(1px) scale(1.04)}
+.nav.active .nav-icon{transform:scale(1.06)}
+
+.tab{position:relative}
+.tab.active{animation:pane-enter 180ms var(--ease-out) both}
+.device-tabs .tab:hover{transform:translateY(-1px)}
+
+.summary-card:hover{transform:translateY(-2px);box-shadow:var(--shadow-md);border-color:var(--border-strong)}
+.summary-card:hover .metric-icon{transform:scale(1.06) rotate(-2deg)}
+.metric-icon{transition:transform var(--motion-base) var(--ease-spring)}
+
+.device-row:hover{transform:translateX(3px);background:var(--surface-2)}
+.device-row:hover .device-avatar{transform:scale(1.045);box-shadow:0 5px 14px rgba(15,20,32,.08)}
+.device-link{transition:color var(--motion-fast) ease}
+.device-row:hover .device-link{color:var(--accent)}
+
+.session-row:hover{transform:translateX(3px);background:var(--surface-2)}
+.session-row:hover .session-kind-icon{transform:scale(1.06)}
+.session-kind-icon{transition:transform var(--motion-base) var(--ease-spring),background-color var(--motion-base) ease}
+
+.file-row:hover{transform:translateX(2px)}
+.capability-card:hover{transform:translateY(-2px);border-color:var(--border-strong);box-shadow:var(--shadow-sm)}
+.capability-card:hover .cap-icon{transform:scale(1.07)}
+.cap-icon{transition:transform var(--motion-base) var(--ease-spring)}
+.attention-panel:hover{transform:translateY(-1px);box-shadow:var(--shadow-sm)}
+
+input:focus,select:focus{transform:translateY(-1px)}
+.status.online:before,.dot.online{animation:soft-pulse 3.1s ease-in-out infinite}
+
+.file-preview:not(.hidden),#device-status-output:not(.hidden),#session-resume:not(.hidden){animation:pane-enter var(--motion-base) var(--ease-out) both}
+#terminal-screen:not(.hidden),#session-output:not(.hidden){animation:pane-enter 180ms ease-out both}
+
+/* Keep terminal interaction visually stable; only controls move. */
+.xterm,.xterm-screen,.xterm-viewport{animation:none!important;transition:none!important}
+
+@media(max-width:850px){
+  .nav:before{left:50%;top:auto;bottom:0;width:0;height:2px;transform:translateX(-50%);transition:width var(--motion-base) var(--ease-spring),opacity var(--motion-base) ease}
+  .nav.active:before{width:18px;height:2px}
+  .device-row:hover,.session-row:hover,.file-row:hover{transform:none}
+}
+
+@media(prefers-reduced-motion:reduce){
+  *,*::before,*::after{scroll-behavior:auto!important;animation-duration:.001ms!important;animation-iteration-count:1!important;transition-duration:.001ms!important;transition-delay:0s!important}
+  .view.active,.device-pane:not(.hidden),.signin-card,.signin-visual>*,dialog[open] .dialog-card,#login-error:not(:empty){animation:none!important}
+}
