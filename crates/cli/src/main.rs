@@ -100,8 +100,21 @@ async fn run() -> anyhow::Result<ExitCode> {
         }
         "reconnect" => {
             ensure_no_args(&args)?;
+            let previous_runtime = read_runtime(&state_dir).ok().flatten();
             startup::restart()?;
-            println!("Infra agent restart requested.");
+            let runtime = wait_for_online_reconnect(
+                &state_dir,
+                previous_runtime.as_ref(),
+                Duration::from_secs(15),
+            )
+            .await?;
+            println!(
+                "Infra agent reconnected{}.",
+                runtime
+                    .connection_generation
+                    .map(|generation| format!(" (generation {generation})"))
+                    .unwrap_or_default()
+            );
             Ok(ExitCode::SUCCESS)
         }
         "uninstall" => {
@@ -180,6 +193,54 @@ async fn install_command(state_dir: &Path, mut args: Vec<String>) -> anyhow::Res
         "Infra installed. The agent will reconnect automatically after login/reboot where supported."
     );
     Ok(ExitCode::SUCCESS)
+}
+
+async fn wait_for_online_reconnect(
+    state_dir: &Path,
+    previous: Option<&RuntimeStatus>,
+    timeout: Duration,
+) -> anyhow::Result<RuntimeStatus> {
+    let deadline = tokio::time::Instant::now() + timeout;
+    loop {
+        if let Ok(Some(runtime)) = read_runtime(state_dir)
+            && runtime.state == "online"
+            && process_alive(runtime.pid)
+            && runtime_is_newer(previous, &runtime)
+        {
+            return Ok(runtime);
+        }
+
+        if tokio::time::Instant::now() >= deadline {
+            return Err(anyhow!(
+                "agent restart was requested but it did not return online; run `infra status` or `infra doctor`"
+            ));
+        }
+        tokio::time::sleep(Duration::from_millis(250)).await;
+    }
+}
+
+fn runtime_is_newer(previous: Option<&RuntimeStatus>, current: &RuntimeStatus) -> bool {
+    let Some(previous) = previous else {
+        return true;
+    };
+    current.pid != previous.pid
+        || current.updated_unix_ms > previous.updated_unix_ms
+        || match (
+            current.connection_generation,
+            previous.connection_generation,
+        ) {
+            (Some(current), Some(previous)) => current > previous,
+            (Some(_), None) => true,
+            _ => false,
+        }
+        || match (
+            current.last_connected_unix_ms,
+            previous.last_connected_unix_ms,
+        ) {
+            (Some(current), Some(previous)) => current > previous,
+            (Some(_), None) => true,
+            _ => false,
+        }
 }
 
 fn collect_status(state_dir: &Path) -> anyhow::Result<LocalStatus> {
@@ -736,6 +797,26 @@ mod tests {
         );
         assert!(take_flag(&mut args, "--json"));
         assert!(args.is_empty());
+    }
+
+    #[test]
+    fn reconnect_wait_requires_fresh_runtime_state() {
+        let mut previous = RuntimeStatus::new("online");
+        previous.pid = 42;
+        previous.updated_unix_ms = 100;
+        previous.connection_generation = Some(7);
+        previous.last_connected_unix_ms = Some(90);
+
+        let unchanged = previous.clone();
+        assert!(!runtime_is_newer(Some(&previous), &unchanged));
+
+        let mut refreshed = previous.clone();
+        refreshed.updated_unix_ms = 101;
+        assert!(runtime_is_newer(Some(&previous), &refreshed));
+
+        let mut regenerated = previous.clone();
+        regenerated.connection_generation = Some(8);
+        assert!(runtime_is_newer(Some(&previous), &regenerated));
     }
 
     #[test]
