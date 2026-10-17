@@ -185,3 +185,10 @@ All v1 development remains side-by-side. The deployed Node v0.3 remote-control s
 - A live acceptance-gateway restart preserved the same Mac PTY and durable-job transcript across gateway epoch replacement and automatic device reconnect.
 - Oracle Linux ARM64 was likewise promoted to canonical `~/.local/bin/{infra,infra-agent}` + `~/.infra-mcp-v1` paths with the same signed device ID and a healthy systemd user service. Desktop Commander remains active only as fallback. The automated safe cutover matrix passes all ten Linux-relevant categories; Linux correctly does not advertise the desktop capability.
 - Real Windows/Rose acceptance remains blocked by the device being offline. Full Mac sleep/wake and reboot/login acceptance remain intentionally untriggered remotely because those tests can strand access at an OS login/power boundary.
+
+## 2026-10-17 — stale-connection + macOS desktop acceptance
+
+- Added a 40-second agent-side gateway idle watchdog so a half-open/stale WebSocket cannot leave local runtime state falsely `online` forever. Oracle acceptance stopped the shared v1 gateway for 42 seconds: the updated canonical agent moved to `reconnecting`, then automatically returned online after the gateway came back.
+- Re-ran the safe canonical acceptance matrix: Oracle passes all ten Linux-relevant categories; Mac passes exec, files/edit/hash, search, processes, system/network, PTY, durable jobs, resumable transfer, desktop permission probing/discovery and clipboard.
+- macOS Screen Recording is now granted for the Infra desktop path. A real MCP screenshot returned a valid 702,248-byte JPEG end-to-end through the authenticated gateway. Accessibility remains the only Mac desktop permission gate for click/type/key and richer window metadata.
+- Rose/Windows remains offline, so real Windows acceptance is still pending. Full machine sleep/wake/reboot tests remain intentionally deferred to the final reliability pass.
