@@ -387,26 +387,47 @@ async fn apply_unix_update(
     }
     .await;
     if let Err(error) = reconnect {
-        let _ = fs::remove_file(agent_path);
-        let rollback_result = fs::rename(&rollback_agent, agent_path);
-        if rollback_result.is_ok() {
-            let _ = startup::restart();
-            let _ = wait_for_online_reconnect(state_dir, None, Duration::from_secs(20)).await;
+        let rollback = async {
+            let _ = fs::remove_file(agent_path);
+            fs::rename(&rollback_agent, agent_path)
+                .context("restore previous infra-agent binary")?;
+            startup::recover_after_failed_start()?;
+            wait_for_online_reconnect(state_dir, None, Duration::from_secs(20)).await?;
+            anyhow::Ok(())
         }
+        .await;
         let _ = fs::remove_file(staged_cli);
-        return Err(anyhow!(
-            "new infra-agent failed its reconnect health check and rollback was attempted: {error:#}"
-        ));
+        return match rollback {
+            Ok(()) => Err(anyhow!(
+                "new infra-agent failed its reconnect health check; previous agent was restored and is online: {error:#}"
+            )),
+            Err(rollback_error) => Err(anyhow!(
+                "new infra-agent failed its reconnect health check and automatic rollback did not recover the agent: update error: {error:#}; rollback error: {rollback_error:#}"
+            )),
+        };
     }
 
     fs::rename(cli_path, &rollback_cli)
         .with_context(|| format!("stage rollback copy of {}", cli_path.display()))?;
     if let Err(error) = fs::rename(staged_cli, cli_path) {
         let _ = fs::rename(&rollback_cli, cli_path);
-        let _ = fs::remove_file(agent_path);
-        let _ = fs::rename(&rollback_agent, agent_path);
-        let _ = startup::restart();
-        return Err(error).context("activate downloaded infra CLI");
+        let agent_rollback = async {
+            let _ = fs::remove_file(agent_path);
+            fs::rename(&rollback_agent, agent_path)
+                .context("restore previous infra-agent after CLI activation failure")?;
+            startup::recover_after_failed_start()?;
+            wait_for_online_reconnect(state_dir, None, Duration::from_secs(20)).await?;
+            anyhow::Ok(())
+        }
+        .await;
+        return match agent_rollback {
+            Ok(()) => Err(error).context(
+                "activate downloaded infra CLI; previous agent was restored and is online",
+            ),
+            Err(rollback_error) => Err(anyhow!(
+                "activate downloaded infra CLI failed and agent rollback did not recover connectivity: CLI error: {error}; rollback error: {rollback_error:#}"
+            )),
+        };
     }
 
     println!(

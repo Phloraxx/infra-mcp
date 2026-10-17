@@ -141,10 +141,23 @@ pub fn restart() -> anyhow::Result<()> {
     command_ok(user_systemctl().args(["restart", "infra-agent.service"]))
 }
 
+#[cfg(target_os = "linux")]
+pub fn recover_after_failed_start() -> anyhow::Result<()> {
+    let _ = user_systemctl()
+        .args(["reset-failed", "infra-agent.service"])
+        .status();
+    restart()
+}
+
 #[cfg(target_os = "macos")]
 pub fn restart() -> anyhow::Result<()> {
     let target = format!("gui/{}/{LABEL}", current_uid()?);
     command_ok(Command::new("launchctl").args(["kickstart", "-k", &target]))
+}
+
+#[cfg(target_os = "macos")]
+pub fn recover_after_failed_start() -> anyhow::Result<()> {
+    restart()
 }
 
 #[cfg(windows)]
@@ -153,6 +166,11 @@ pub fn restart() -> anyhow::Result<()> {
         .args(["/End", "/TN", WINDOWS_TASK])
         .status();
     command_ok(Command::new("schtasks").args(["/Run", "/TN", WINDOWS_TASK]))
+}
+
+#[cfg(windows)]
+pub fn recover_after_failed_start() -> anyhow::Result<()> {
+    restart()
 }
 
 #[cfg(target_os = "linux")]
