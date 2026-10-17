@@ -1292,6 +1292,7 @@ fn oauth_authorize_page(
     query: &OAuthAuthorizeQuery,
     scope: &str,
     resource: &str,
+    origin: &str,
     signed_in: bool,
 ) -> Response {
     let hidden = |name: &str, value: &str| {
@@ -1325,17 +1326,25 @@ fn oauth_authorize_page(
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Authorize ChatGPT · Infra</title>
 <style>body{{margin:0;background:#090a0c;color:#f5f6f7;font:15px/1.45 system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;display:grid;place-items:center;min-height:100vh}}main{{width:min(430px,calc(100vw - 40px));background:#111318;border:1px solid #272a31;border-radius:20px;padding:28px;box-shadow:0 24px 80px #0008}}.mark{{width:44px;height:44px;border-radius:12px;background:#f4f4f4 url('/assets/logo.png') center/34px 34px no-repeat;margin-bottom:18px}}h1{{font-size:24px;margin:0 0 8px}}p{{color:#a9adb7;margin:0 0 20px}}.scope{{padding:13px 14px;background:#0c0e12;border:1px solid #24272d;border-radius:12px;margin:18px 0;color:#dfe2e7}}label{{display:block;color:#b8bcc5;margin:14px 0 6px}}input{{display:block;box-sizing:border-box;width:100%;margin-top:7px;background:#0b0d10;color:white;border:1px solid #30343b;border-radius:10px;padding:12px 13px;font:inherit;outline:none}}input:focus{{border-color:#747b89}}button{{width:100%;margin-top:18px;padding:13px 16px;border:0;border-radius:11px;background:white;color:#090a0c;font-weight:700;font:inherit;cursor:pointer}}small{{display:block;margin-top:16px;color:#777d89}}.signed{{padding:12px 13px;border-radius:10px;background:#101a14;color:#bfe5c9;border:1px solid #24452d}}</style></head>
-<body><main><div class="mark"></div><h1>Authorize ChatGPT</h1><p>ChatGPT wants permission to control your Infra-connected devices through MCP.</p><div class="scope"><strong>Requested access</strong><br>{scope}</div><form method="post" action="/oauth/authorize">{fields}{credentials}<button type="submit">Authorize ChatGPT</button></form><small>Only authorize this connection if you initiated it from ChatGPT.</small></main></body></html>"#,
+<body><main><div class="mark"></div><h1>Authorize ChatGPT</h1><p>ChatGPT wants permission to control your Infra-connected devices through MCP.</p><div class="scope"><strong>Requested access</strong><br>{scope}</div><form method="post" action="{origin}/oauth/authorize">{fields}{credentials}<button type="submit">Authorize ChatGPT</button></form><small>Only authorize this connection if you initiated it from ChatGPT.</small></main></body></html>"#,
         scope = html_escape(scope),
         fields = fields,
-        credentials = credentials
+        credentials = credentials,
+        origin = html_escape(origin)
     );
     let mut response = body.into_response();
     response.headers_mut().insert(
         header::CONTENT_TYPE,
         axum::http::HeaderValue::from_static("text/html; charset=utf-8"),
     );
-    response.headers_mut().insert(header::CONTENT_SECURITY_POLICY, axum::http::HeaderValue::from_static("default-src 'none'; img-src 'self'; style-src 'unsafe-inline'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'"));
+    let csp = format!(
+        "default-src 'none'; img-src 'self'; style-src 'unsafe-inline'; script-src https://static.cloudflareinsights.com; connect-src https://cloudflareinsights.com; form-action {origin}; base-uri 'none'; frame-ancestors 'none'"
+    );
+    if let Ok(value) = axum::http::HeaderValue::from_str(&csp) {
+        response
+            .headers_mut()
+            .insert(header::CONTENT_SECURITY_POLICY, value);
+    }
     response
 }
 
@@ -1349,7 +1358,10 @@ async fn oauth_authorize_get(
         Err(error) => return (StatusCode::BAD_REQUEST, error).into_response(),
     };
     let signed_in = browser_session_expiry(&state, &headers).is_some();
-    oauth_authorize_page(&query, &scope, &resource, signed_in)
+    let Some(origin) = oauth_origin(&state) else {
+        return (StatusCode::SERVICE_UNAVAILABLE, "OAuth is not configured").into_response();
+    };
+    oauth_authorize_page(&query, &scope, &resource, &origin, signed_in)
 }
 
 async fn oauth_authorize_post(
