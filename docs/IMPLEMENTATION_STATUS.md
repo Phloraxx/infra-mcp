@@ -170,7 +170,7 @@ All v1 development remains side-by-side. The deployed Node v0.3 remote-control s
 
 ## 2026-10-17 — replacement-critical desktop + updater batch
 
-- Added a compact `desktop` MCP tool and agent capability with macOS/Windows implementations for displays, windows, JPEG screenshots/regions, focus, coordinate click, text typing, key/modifier chords, and clipboard get/set. Screenshot payloads are bounded and permission failures are surfaced explicitly.
+- Added a compact `desktop` MCP tool and agent capability with macOS/Windows implementations for displays, windows, JPEG screenshots/regions, focus, coordinate click, text typing, key/modifier chords, and clipboard get/set. Screenshot payloads are bounded to 5 MiB before base64 encoding inside an authenticated 8 MiB control-frame ceiling, and permission failures are surfaced explicitly.
 - Added `infra update` with release SHA-256 verification, staged replacement, new-agent reconnect health checking and rollback retention. macOS/Linux apply both binaries synchronously; Windows updates/restarts the agent first and launches a bounded post-exit helper for CLI replacement.
 - Development was batched to avoid runner latency. The final local sweep passed formatting, strict clippy, all 59 Rust tests, `smoke-v1.sh`, `smoke-install-dashboard.sh`, and `smoke-dashboard-password.sh` before the batch was pushed for cross-platform CI.
 - Remaining validation for this batch is intentionally platform-focused: native macOS desktop permissions/actions, Windows compile/runtime acceptance, and updater acceptance on real devices.

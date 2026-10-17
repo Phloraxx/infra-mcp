@@ -18,7 +18,7 @@ use uuid::Uuid;
 #[cfg(any(target_os = "macos", windows))]
 const MAX_TEXT_OUTPUT: usize = 4 * 1024 * 1024;
 #[cfg(any(target_os = "macos", windows))]
-const MAX_SCREENSHOT_BYTES: usize = 16 * 1024 * 1024;
+const MAX_SCREENSHOT_BYTES: usize = 5 * 1024 * 1024;
 #[cfg(any(target_os = "macos", windows))]
 const MAX_INPUT_TEXT: usize = 1024 * 1024;
 

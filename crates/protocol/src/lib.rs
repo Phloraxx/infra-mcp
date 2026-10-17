@@ -5,7 +5,7 @@ use std::collections::BTreeMap;
 use uuid::Uuid;
 
 pub const PROTOCOL_VERSION: u16 = 1;
-pub const DEFAULT_CONTROL_FRAME_LIMIT: usize = 1024 * 1024;
+pub const DEFAULT_CONTROL_FRAME_LIMIT: usize = 8 * 1024 * 1024;
 pub const DEFAULT_READ_LIMIT: usize = 64 * 1024;
 pub const MAX_READ_LIMIT: usize = 1024 * 1024;
 

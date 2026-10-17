@@ -204,7 +204,7 @@ Implemented replacement-critical actions:
 - `key` / modifier chord
 - `clipboard_get` / `clipboard_set`
 
-The first implementation targets macOS and Windows using OS-provided desktop facilities. Screenshot payloads are JPEG/base64 and bounded; macOS reports clear Screen Recording / Accessibility permission failures instead of silently succeeding. Raw coordinate input is intentionally available as the minimum viable Remote Desktop Commander replacement path.
+The first implementation targets macOS and Windows using OS-provided desktop facilities. Screenshot payloads are JPEG/base64 and bounded to fit the authenticated 8 MiB control-frame limit; macOS reports clear Screen Recording / Accessibility permission failures instead of silently succeeding. Raw coordinate input is intentionally available as the minimum viable Remote Desktop Commander replacement path.
 
 Still targeted after cutover-critical parity:
 
