@@ -39,6 +39,7 @@ use uuid::Uuid;
 
 const MAX_CAPTURE_BYTES: usize = 1024 * 1024;
 const MAX_CONCURRENT_REQUESTS: usize = 8;
+const GATEWAY_IDLE_TIMEOUT: Duration = Duration::from_secs(40);
 
 #[derive(Clone)]
 struct Config {
@@ -402,7 +403,13 @@ async fn run_connection(
         .await?;
 
     let permits = Arc::new(Semaphore::new(MAX_CONCURRENT_REQUESTS));
-    while let Some(frame) = ws_rx.next().await {
+    loop {
+        let frame = tokio::time::timeout(GATEWAY_IDLE_TIMEOUT, ws_rx.next())
+            .await
+            .context("gateway idle timeout; reconnecting stale connection")?;
+        let Some(frame) = frame else {
+            break;
+        };
         let frame = frame?;
         match frame {
             Message::Text(text) => match serde_json::from_str::<GatewayToAgent>(text.as_str()) {
