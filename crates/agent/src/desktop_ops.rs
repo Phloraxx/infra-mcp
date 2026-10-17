@@ -8,10 +8,11 @@ use serde_json::json;
 #[cfg(any(target_os = "macos", windows))]
 use std::{
     fs,
-    io::Write,
     path::{Path, PathBuf},
-    process::{Command, Output, Stdio},
+    process::{Command, Output},
 };
+#[cfg(target_os = "macos")]
+use std::{io::Write, process::Stdio};
 #[cfg(any(target_os = "macos", windows))]
 use uuid::Uuid;
 
@@ -99,7 +100,7 @@ fn checked_output(mut command: Command, label: &str) -> anyhow::Result<Output> {
     Ok(output)
 }
 
-#[cfg(any(target_os = "macos", windows))]
+#[cfg(target_os = "macos")]
 fn parsed_json_output(command: Command, label: &str) -> anyhow::Result<Value> {
     let output = checked_output(command, label)?;
     serde_json::from_slice(&output.stdout)
