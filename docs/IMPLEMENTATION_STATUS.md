@@ -150,3 +150,20 @@ All v1 development remains side-by-side. The deployed Node v0.3 remote-control s
   assets, opened a real Oracle PTY, sent input, refreshed/re-attached to the same
   session, closed it and signed out. The live gate reports
   `LIVE_PUBLIC_BROWSER_PASS`. Temporary QA resources are removed after acceptance.
+
+## 2026-10-17 — macOS reconnect UX acceptance
+
+- Re-ran the real macOS ARM64 remote POSIX burn-in against the shared v1 acceptance
+  gateway. The same PTY accepted fresh input and the same durable job produced later
+  output after a LaunchAgent controller restart; cleanup left no worker registrations
+  or worker processes behind.
+- `infra reconnect` now waits for a fresh runtime generation/PID/timestamp and a live
+  `online` agent before reporting success, instead of returning while launchd is still
+  bringing the controller back. The fresh CI-built macOS ARM64 CLI was SHA-256 checked,
+  installed only into the side-by-side v1 burn-in, and verified on the real Mac:
+  reconnect advanced generation 4 -> 5 and an immediate `infra doctor --json` was
+  fully healthy with Keychain-backed signed-authentication proof.
+- `infra repair` now uses the same online-after-restart acceptance rule, so repair no
+  longer claims success while the replacement controller is still starting.
+- Full machine sleep/wake and reboot validation on macOS remains an explicit cutover
+  gate; this milestone does not claim either one.

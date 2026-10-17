@@ -94,8 +94,21 @@ async fn run() -> anyhow::Result<ExitCode> {
         "install" => install_command(&state_dir, args).await,
         "repair" => {
             ensure_no_args(&args)?;
+            let previous_runtime = read_runtime(&state_dir).ok().flatten();
             repair(&state_dir)?;
-            println!("Infra startup registration repaired and agent restarted.");
+            let runtime = wait_for_online_reconnect(
+                &state_dir,
+                previous_runtime.as_ref(),
+                Duration::from_secs(15),
+            )
+            .await?;
+            println!(
+                "Infra startup registration repaired and agent is online{}.",
+                runtime
+                    .connection_generation
+                    .map(|generation| format!(" (generation {generation})"))
+                    .unwrap_or_default()
+            );
             Ok(ExitCode::SUCCESS)
         }
         "reconnect" => {
