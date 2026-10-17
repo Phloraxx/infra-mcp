@@ -198,3 +198,9 @@ All v1 development remains side-by-side. The deployed Node v0.3 remote-control s
 - Real canonical Mac acceptance showed that replacing the unsigned `infra-agent` binary can clear macOS Accessibility and Screen Recording grants even when the path is unchanged. This is an OS privacy/code-identity boundary, not an Infra reconnect failure.
 - The updater now warns explicitly after successful macOS replacement to re-check those two permissions before relying on GUI control. No Keychain trust or self-signed signing identity is installed automatically; that would add unnecessary security/setup complexity before cutover.
 - Re-enabling the permissions remains a one-time manual action after such an unsigned agent replacement. A future properly signed release can make the permission identity stable across updates.
+
+## 2026-10-17 — narrowed RDC cutover scope
+
+- Owner explicitly removed macOS Accessibility, click/type/key interaction, Screen Recording/audio capture and screenshots from the required RDC-replacement scope. These desktop features remain optional and do not block cutover.
+- Re-ran the canonical safe acceptance matrix with desktop excluded: Oracle passes all 10 required categories and Mac passes all 10 required categories (exec, files/edit/hash, search, processes, system/network, PTY, durable jobs and resumable binary transfer).
+- Remaining cutover gates are real-device reliability only: Rose/Windows acceptance while the device is online, Mac sleep/wake and reboot/login reconnect, Windows reboot/reconnect, and Linux/Oracle reboot/reconnect if RDC is to be removed there as well. No additional product feature development is required for the narrowed scope.

@@ -119,6 +119,10 @@ A full reboot remains required before declaring Linux startup validation complet
 - [ ] file upload/download/mutation, full doctor/repair, permission and update UI
 - [ ] optional tray application
 
+## Current cutover scope
+
+For the owner-defined RDC replacement scope, GUI automation is not a release gate. macOS Accessibility, Screen Recording/audio capture, screenshots, click/type/key input, and richer desktop interaction are optional capabilities. Required cutover acceptance is limited to remote shell/exec, files/search, processes, PTY, durable jobs, binary transfer, structured system/network/service operations, canonical startup/reconnect, updater rollback recovery, and real-device reboot/reconnect reliability.
+
 ## Phase 9 — benchmark and cutover
 
 - [ ] run `BENCHMARK.md` matrix on the same devices
