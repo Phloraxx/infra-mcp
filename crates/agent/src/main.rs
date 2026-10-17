@@ -286,23 +286,33 @@ async fn run_connection(
         .as_ref()
         .map(|identity| (identity.device_id.clone(), identity.device_name.clone()))
         .unwrap_or_else(|| (config.legacy_device_id.clone(), config.device_name.clone()));
-    let mut capabilities = vec![
-        "status".into(),
-        "exec".into(),
-        "files".into(),
-        "search".into(),
-        "processes".into(),
-        "jobs".into(),
-        "terminal".into(),
-        "transfer".into(),
-        "system".into(),
-        "network".into(),
-        "services".into(),
-        "containers".into(),
-        "git".into(),
-    ];
-    #[cfg(any(target_os = "macos", windows))]
-    capabilities.push("desktop".into());
+    let capabilities = {
+        let capabilities = vec![
+            "status".into(),
+            "exec".into(),
+            "files".into(),
+            "search".into(),
+            "processes".into(),
+            "jobs".into(),
+            "terminal".into(),
+            "transfer".into(),
+            "system".into(),
+            "network".into(),
+            "services".into(),
+            "containers".into(),
+            "git".into(),
+        ];
+        #[cfg(any(target_os = "macos", windows))]
+        {
+            let mut capabilities = capabilities;
+            capabilities.push("desktop".into());
+            capabilities
+        }
+        #[cfg(not(any(target_os = "macos", windows)))]
+        {
+            capabilities
+        }
+    };
     let hello = DeviceHello {
         protocol: PROTOCOL_VERSION,
         device_id: device_id.clone(),
