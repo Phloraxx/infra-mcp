@@ -160,3 +160,68 @@ Mobile dashboard should support monitoring, approving enrollment, reconnect/repa
 ## Destructive actions
 
 Removing/revoking a device, killing a session, uninstalling remotely, or performing privileged destructive actions must clearly identify the target device and consequence before execution.
+## Implemented foundation — 2026-10-15
+
+The gateway now embeds a dependency-free dashboard under `/` with Overview, Devices, Sessions, Activity and Settings, responsive/dark-mode styling, Add Device enrollment and OS-specific bootstrap commands. Private-mode browser authentication exchanges the admin credential once for a 12-hour HMAC-signed `HttpOnly; SameSite=Strict` session cookie; the credential input is cleared and no admin secret is retained in `sessionStorage`/`localStorage`. `/api/events` uses the same authenticated browser cookie and server-sent events to refresh state immediately, with periodic polling as fallback.
+
+The dashboard is backed by persisted `/api/devices`, reconciled `/api/sessions`, and bounded `/api/activity` metadata. The activity store records action family, outcome, request ID, timestamp and device association; it intentionally does not persist command output, arbitrary file contents or enrollment/private-key material.
+
+This is the control/status foundation, not the finished dashboard. Device-detail actions, human terminal attachment, file browser/transfer controls, permission onboarding, doctor/repair UI, update progress, standards-compatible public OAuth and richer attention states remain. Private-mode bearer/cookie authentication is implemented; Internet-facing deployment still requires the final OAuth/TLS edge rather than treating the admin credential as a public identity system.
+
+## Device and session controls — 2026-10-16
+
+The dashboard now includes addressable device detail views (Overview, Terminal,
+Files, Sessions and Activity). Device status, version, capabilities, last seen and
+active-work counts use the existing registry. Check agent sends a real status RPC;
+it is a connectivity check, not a substitute for local `infra doctor`.
+
+The browser terminal uses a locally bundled, MIT-licensed xterm.js 5.5.0 renderer.
+It opens and attaches to the same durable PTY IDs that MCP uses, with incremental
+32 KB transcript reads, serialized/batched input, resize, Ctrl+C and explicit close.
+Leaving the page detaches the viewer. Refreshing a session URL reattaches to that
+ID; it never opens a replacement terminal. Lost/ambiguous writes pause input and
+require an explicit Resume connection action; they are never automatically replayed.
+Terminal history expiry is reported. Job output is bounded in the browser, and jobs
+and transfers have explicit cancellation controls naming the device and session.
+
+Sessions can be filtered by device and type. Files supports directory browsing,
+parent navigation and bounded UTF-8 preview with byte ranges/next-chunk controls.
+File and terminal text are rendered as text, not injected as HTML. Sign-out clears
+private views; offline/revoked devices cannot receive browser actions.
+
+`POST /api/devices/{device_id}/operations` is inside the existing bearer/signed
+cookie + CSRF boundary. It accepts only the currently supported status, terminal,
+job list/read/cancel, file list/read/stat/hash and transfer list/status/cancel
+operations, and shares MCP's dispatcher/audit path. Responses use `no-store`.
+The static CSP allows inline **styles** for xterm's generated grid, while scripts
+remain self-only and inline scripts/remote assets remain blocked.
+
+Remaining dashboard work: file upload/download and mutation UX, full doctor/repair
+and sanitized export, permission onboarding, updater/rollback views, richer session
+metadata/history, automatic terminal fitting, and broader real-device/mobile
+acceptance. The current checks do not claim those features are implemented.
+
+
+## Password sign-in and branding — 2026-10-16
+
+A dedicated sign-in screen now owns the unauthenticated/loading state. The app
+shell stays hidden until authentication succeeds; a signed-out browser no longer
+shows a misleading zero-device dashboard. Initial data loading starts after the
+session check, and logout/session expiry closes SSE and clears private views.
+
+Owner mode is configured with `INFRA_DASHBOARD_AUTH_FILE`. The login uses username
+and password, an Argon2id hash, a separate random browser signing secret, bounded
+verification concurrency and a global 12-attempt/minute limit. Settings supports
+password changes after verifying the current password. Changes atomically update
+the private auth file and rotate the signing secret, invalidating older browser
+sessions. Browser credentials are never saved in Web Storage or returned by APIs.
+
+The gateway serves locally bundled image assets for the logo, PNG/ICO favicons and
+touch icon. The monochrome mark appears on sign-in and in the sidebar, with a
+dark-mode treatment. See `apps/dashboard/assets/README.md` for its generation brief.
+
+The HTTPS dashboard hostname is routed through Cloudflare Tunnel to the private
+origin. The public hostname redirects HTTP reads to HTTPS, rejects cross-origin
+requests, and does not expose `/mcp`; that endpoint remains private pending OAuth.
+Agent challenge authentication and one-time enrollment keep their separate trust
+boundaries. No public inbound host port is added.

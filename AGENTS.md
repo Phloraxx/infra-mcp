@@ -78,9 +78,9 @@ The regular agent must not quietly become root/SYSTEM. The privileged helper is 
 
 Never commit real pairing credentials, private keys, OAuth secrets, machine tokens, passwords, or live environment files. Audit metadata should identify actions while avoiding command output or file contents unless explicitly configured.
 
-## Initial Rust workspace proposal
+## Current Rust workspace
 
-Create only when implementation begins:
+Implementation has begun. Preserve and extend this workspace:
 
 ```text
 Cargo.toml
@@ -89,7 +89,9 @@ crates/
   gateway/
   agent/
   platform/
-  privileged-helper/
+  local-state/
+  cli/
+  privileged-helper/   # planned; not created yet
 ```
 
 Suggested dependency categories, not mandates:
@@ -105,6 +107,13 @@ Suggested dependency categories, not mandates:
 - file notifications: `notify`
 
 Do not adopt a heavy framework solely because it is convenient for one platform.
+
+
+## Current implementation checkpoint
+
+As of 2026-10-16 the branch contains working SQLite persistence/audit metadata, one-time Ed25519 enrollment/challenge authentication, MCP `devices`/`exec`/`files`/`search`/`processes`/`jobs`/`terminal`/`transfer` plus structured `system`/`network`/`services`/`containers`/`git`, durable workers, persistent PTYs, reconnect reconciliation, native bootstrap installers/startup adapters, an `infra` lifecycle/doctor CLI, and an embedded dashboard foundation. Linux ARM64 has a real side-by-side user-service burn-in proving fresh PTY I/O across gateway and controller restarts. A real Mac burn-in now verifies cross-device enrollment/exec plus fresh same-PTY I/O and same-job continuation across controller restart, fresh same-PTY I/O after gateway restart, and zero leaked launchd worker registrations/processes afterward; macOS uses self-cleaning independent launchd workers, stable boot identity, and bounded blocking control sockets. Windows ConPTY startup-query/close/shutdown handling now passes the full Windows CI suite and native x64 artifact build; only real-device Windows acceptance remains gated. Device identity metadata is now v2: signing keys migrate into the native OS credential store when available, while headless Linux exposes an explicit private-file fallback through `infra doctor`. Gateway liveness now retires stale sockets through protocol heartbeats/RPC timeout and refreshes session reconciliation periodically, so online/session state must not be inferred from socket existence alone. Private-mode gateway access is authenticated: MCP uses the admin bearer credential and the browser exchanges it for a restart-stable HMAC-signed HttpOnly session with CSRF protection; public standards-compatible OAuth remains pending. Real Mac acceptance has migrated the v1 identity into Keychain-backed `native_keyring` metadata with no private key on disk and successfully reconnected. `infra doctor` must not read native secret bytes; the agent records only a non-secret storage/verification timestamp after successful signed authentication. Abandoned `starting` PTY/job metadata without a worker PID expires after a startup grace so failed spawns cannot remain active forever. The dashboard now also has device detail, a locally bundled xterm.js browser terminal using the same PTY IDs as MCP, session filters/output/cancel, and directory browsing/bounded text preview. Its authenticated operations API shares MCP dispatch/audit; it is not a second execution backend. A dedicated owner sign-in screen now hides the app before authentication. Owner mode uses an Argon2id password file, independent session signing secret, bounded/rate-limited verification and password-change session rotation. The branded HTTPS dashboard blocks public MCP while signed agents and one-time enrollments retain their own authentication. Full file transfers, doctor/repair, permissions and updater UX remain unfinished. Read `docs/IMPLEMENTATION_STATUS.md` before choosing the next task; do not recreate these features.
+
+The live Node v0.3 deployment remains separate and must not be modified as a side effect of v1 development.
 
 ## Testing expectations
 

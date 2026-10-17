@@ -27,7 +27,7 @@ Even on WebSocket, multiplex independent logical streams at the protocol layer.
 
 ## 3. Identity
 
-A paired device should eventually possess an asymmetric keypair generated locally.
+A paired device possesses an Ed25519 asymmetric keypair generated locally; this is implemented in the v1 agent/gateway.
 
 Conceptual pairing flow:
 
@@ -38,7 +38,7 @@ Conceptual pairing flow:
 5. agent stores private identity using protected local storage when possible.
 6. future connections authenticate possession of that device key.
 
-A temporary bearer-token implementation is acceptable only during bootstrap if the migration plan is explicit.
+A legacy bearer-token path remains only as an explicitly named development/migration fallback; signed challenge authentication is the normal v1 path.
 
 ## 4. Connection handshake
 
@@ -215,3 +215,23 @@ Never automatically replay a non-idempotent RPC purely because the connection dr
 ## 15. Observability
 
 Each operation should carry trace/request identifiers so gateway and agent logs can be correlated without logging the sensitive payload itself.
+
+## 16. Implemented v1 handshake and reconciliation
+
+The current Rust implementation uses the following signed path:
+
+1. agent sends `auth_start` with protocol, stable device ID, and fresh agent-instance ID;
+2. gateway loads the enrolled public key and rejects unknown/revoked devices;
+3. gateway sends a fresh random `auth_challenge` bound to the gateway epoch and a short expiry;
+4. agent signs a deterministic length-prefixed authentication message containing the nonce, gateway epoch, protocol, device ID, agent instance and boot ID;
+5. agent sends `signed_hello`;
+6. gateway verifies Ed25519 possession and returns `hello_ack` with connection generation;
+7. agent immediately sends its active job/terminal reconciliation snapshot.
+
+Enrollment codes are short-lived and stored hashed. The gateway retains an explicitly separate legacy bearer-token handshake only for migration/development. Non-idempotent requests are not automatically replayed after connection loss.
+
+The current PTY/job streams use byte-offset reads over typed RPC rather than the future general multiplexed binary-stream envelope. Binary/resumable transfer is still pending.
+
+### Current transfer RPC mapping
+
+The first implementation maps resumable transfer semantics onto bounded control RPCs: `upload_begin`, `upload_chunk`, `upload_commit`, `download_begin`, `download_chunk`, `status`, `list`, and `cancel`. Chunks are capped so their base64 representation remains comfortably below the control-frame limit. The persistent transfer ID and byte offsets provide resume semantics now; a later dedicated binary stream transport may replace base64 chunks without changing the higher-level lifecycle.

@@ -99,3 +99,19 @@ The same product should own its lifecycle:
 ## Acceptance requirements
 
 A fresh supported machine should reach an Online state through the normal install path without reading documentation. Re-running the installer on an existing healthy installation must be safe and should repair/upgrade rather than create a second logical device.
+
+## Implemented product foundation — 2026-10-15
+
+The repository now implements the first complete onboarding path rather than only the enrollment backend:
+
+- Dashboard **Add device** creates a short-lived one-time enrollment and generates the recommended macOS/Linux or Windows bootstrap command.
+- `scripts/install.sh` and `scripts/install.ps1` install two native binaries: `infra` and `infra-agent`. They require no Node/npm/Python runtime on the target machine.
+- Release mode downloads platform/architecture-specific GitHub Release assets and verifies SHA-256 sidecars before replacement. `--source-dir` / `-SourceDir` exists only for isolated development smoke tests. Cryptographically signed release/update metadata is still a required hardening step.
+- `infra install` writes versioned local config, performs one-time enrollment through `infra-agent --enroll-only`, and then registers automatic startup unless explicitly disabled. The enrollment code is not written to config.
+- The agent subsequently reads its gateway/device name from local config and authenticates with the persisted Ed25519 identity.
+- Startup adapters exist for systemd-user on Linux, LaunchAgent on macOS, and an ONLOGON Scheduled Task on Windows.
+- `infra status`, `doctor`, `repair`, `reconnect`, and `uninstall` operate on the same local state/startup model. `doctor` covers config, identity, credential-storage mode, runtime PID, startup state and gateway health. For native credential storage it never reads the private key itself; an online agent records a non-secret proof after it has loaded the key and completed signed gateway authentication.
+- Re-running `infra install` with an existing identity does not require or consume a new enrollment code; it can re-register startup around the same logical device.
+- The isolated installer/dashboard smoke test proves the configure/enroll/reconnect/status/doctor path without registering a real startup service.
+
+Still required before the UX is considered production-ready: real-device startup/reboot acceptance tests on all primary OSes, better phase-specific installer progress/error codes, native package installers where useful, eliminating/encrypting the explicit headless-Linux credential-file fallback plus broader Windows ACL hardening, `infra update` with staged rollback, permission onboarding, and standards-compatible public OAuth/TLS. Private-mode dashboard/MCP authentication and native Keychain/Credential Manager/Secret Service signing-key storage are already implemented.

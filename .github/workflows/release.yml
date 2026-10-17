@@ -1,0 +1,77 @@
+name: Release native binaries
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: ${{ matrix.asset }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-latest
+            asset: linux-x86_64
+            extension: ""
+          - runner: ubuntu-24.04-arm
+            asset: linux-aarch64
+            extension: ""
+          - runner: macos-latest
+            asset: macos-aarch64
+            extension: ""
+          - runner: macos-15-intel
+            asset: macos-x86_64
+            extension: ""
+          - runner: windows-latest
+            asset: windows-x86_64
+            extension: .exe
+          - runner: windows-11-arm
+            asset: windows-aarch64
+            extension: .exe
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.99.0
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo build --release -p infra-agent -p infra-cli
+      - name: Package binaries and checksums
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force dist | Out-Null
+          $extension = '${{ matrix.extension }}'
+          $asset = '${{ matrix.asset }}'
+          foreach ($binary in @('infra', 'infra-agent')) {
+            $source = "target/release/$binary$extension"
+            $name = "$binary-$asset$extension"
+            $destination = "dist/$name"
+            Copy-Item $source $destination
+            $hash = (Get-FileHash -Algorithm SHA256 $destination).Hash.ToLowerInvariant()
+            Set-Content -NoNewline -Encoding ascii "$destination.sha256" "$hash  $name"
+          }
+      - uses: actions/upload-artifact@v4
+        with:
+          name: infra-${{ matrix.asset }}
+          path: dist/*
+          if-no-files-found: error
+
+  release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: infra-*
+          path: release
+          merge-multiple: true
+      - name: Publish GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "$GITHUB_REF_NAME" release/* --verify-tag --generate-notes --title "$GITHUB_REF_NAME"

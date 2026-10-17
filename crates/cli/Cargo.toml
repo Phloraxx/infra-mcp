@@ -1,0 +1,25 @@
+[package]
+name = "infra-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[[bin]]
+name = "infra"
+path = "src/main.rs"
+
+[dependencies]
+anyhow.workspace = true
+infra-local-state = { path = "../local-state" }
+infra-platform = { path = "../platform" }
+reqwest.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+sysinfo.workspace = true
+tokio.workspace = true
+url.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
