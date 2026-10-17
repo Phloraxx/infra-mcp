@@ -103,6 +103,52 @@ pub enum AgentOperation {
     Services(ServiceRequest),
     Containers(ContainerRequest),
     Git(GitRequest),
+    Desktop(DesktopRequest),
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct DesktopRequest {
+    pub action: DesktopAction,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "action", rename_all = "snake_case")]
+pub enum DesktopAction {
+    Displays,
+    Windows,
+    Screenshot {
+        #[serde(default)]
+        display: Option<u32>,
+        #[serde(default)]
+        x: Option<i32>,
+        #[serde(default)]
+        y: Option<i32>,
+        #[serde(default)]
+        width: Option<u32>,
+        #[serde(default)]
+        height: Option<u32>,
+    },
+    Focus {
+        app: String,
+    },
+    Click {
+        x: i32,
+        y: i32,
+        #[serde(default)]
+        button: Option<String>,
+    },
+    TypeText {
+        text: String,
+    },
+    Key {
+        key: String,
+        #[serde(default)]
+        modifiers: Vec<String>,
+    },
+    ClipboardGet,
+    ClipboardSet {
+        text: String,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

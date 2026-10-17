@@ -21,12 +21,13 @@ use ed25519_dalek::{Signature, VerifyingKey};
 use hmac::{Hmac, Mac};
 use infra_protocol::{
     AgentOperation, AgentRequest, AgentResponse, AgentToGateway, AuthChallenge, ContainerAction,
-    ContainerRequest, DEFAULT_CONTROL_FRAME_LIMIT, DeviceAuthStart, DeviceHello, ExecOutput,
-    FileAction, FileRequest, GatewayToAgent, GitAction, GitRequest, HelloAck, JobAction,
-    JobRequest, LegacyDeviceHello, NetworkAction, NetworkRequest, OperationResult,
-    PROTOCOL_VERSION, ProcessAction, ProcessRequest, ReconcileSnapshot, SearchMode, SearchRequest,
-    ServiceAction, ServiceRequest, SignedDeviceHello, SystemAction, SystemRequest, TerminalAction,
-    TerminalRequest, TransferAction, TransferRequest, signed_auth_message,
+    ContainerRequest, DEFAULT_CONTROL_FRAME_LIMIT, DesktopAction, DesktopRequest, DeviceAuthStart,
+    DeviceHello, ExecOutput, FileAction, FileRequest, GatewayToAgent, GitAction, GitRequest,
+    HelloAck, JobAction, JobRequest, LegacyDeviceHello, NetworkAction, NetworkRequest,
+    OperationResult, PROTOCOL_VERSION, ProcessAction, ProcessRequest, ReconcileSnapshot,
+    SearchMode, SearchRequest, ServiceAction, ServiceRequest, SignedDeviceHello, SystemAction,
+    SystemRequest, TerminalAction, TerminalRequest, TransferAction, TransferRequest,
+    signed_auth_message,
 };
 use rmcp::{
     Json as McpJson,
@@ -351,6 +352,32 @@ struct McpTransferInput {
     data_base64: Option<String>,
     #[serde(default)]
     length: Option<usize>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+struct McpDesktopInput {
+    device: String,
+    action: String,
+    #[serde(default)]
+    display: Option<u32>,
+    #[serde(default)]
+    x: Option<i32>,
+    #[serde(default)]
+    y: Option<i32>,
+    #[serde(default)]
+    width: Option<u32>,
+    #[serde(default)]
+    height: Option<u32>,
+    #[serde(default)]
+    app: Option<String>,
+    #[serde(default)]
+    text: Option<String>,
+    #[serde(default)]
+    key: Option<String>,
+    #[serde(default)]
+    modifiers: Option<Vec<String>>,
+    #[serde(default)]
+    button: Option<String>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -703,6 +730,54 @@ impl InfraMcp {
             input.device,
             AgentOperation::Transfer(TransferRequest { action }),
             300_000,
+        )
+        .await
+    }
+
+    #[tool(
+        name = "desktop",
+        description = "Desktop control on an Infra device. Actions: displays, windows, screenshot, focus, click, type_text, key, clipboard_get, clipboard_set."
+    )]
+    async fn desktop(
+        &self,
+        Parameters(input): Parameters<McpDesktopInput>,
+    ) -> Result<McpJson<serde_json::Value>, String> {
+        let action = match input.action.as_str() {
+            "displays" => DesktopAction::Displays,
+            "windows" => DesktopAction::Windows,
+            "screenshot" => DesktopAction::Screenshot {
+                display: input.display,
+                x: input.x,
+                y: input.y,
+                width: input.width,
+                height: input.height,
+            },
+            "focus" => DesktopAction::Focus {
+                app: required(input.app, "app")?,
+            },
+            "click" => DesktopAction::Click {
+                x: input.x.ok_or("x is required")?,
+                y: input.y.ok_or("y is required")?,
+                button: input.button,
+            },
+            "type_text" => DesktopAction::TypeText {
+                text: required(input.text, "text")?,
+            },
+            "key" => DesktopAction::Key {
+                key: required(input.key, "key")?,
+                modifiers: input.modifiers.unwrap_or_default(),
+            },
+            "clipboard_get" => DesktopAction::ClipboardGet,
+            "clipboard_set" => DesktopAction::ClipboardSet {
+                text: required(input.text, "text")?,
+            },
+            _ => return Err("unknown desktop action".into()),
+        };
+        tool_operation(
+            &self.state,
+            input.device,
+            AgentOperation::Desktop(DesktopRequest { action }),
+            65_000,
         )
         .await
     }
@@ -1701,6 +1776,7 @@ fn operation_label(operation: &AgentOperation) -> &'static str {
         AgentOperation::Services(_) => "services",
         AgentOperation::Containers(_) => "containers",
         AgentOperation::Git(_) => "git",
+        AgentOperation::Desktop(_) => "desktop",
     }
 }
 

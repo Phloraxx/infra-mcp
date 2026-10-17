@@ -7,7 +7,7 @@ This file records what exists in code. Product intent remains in the other desig
 ### Implemented
 
 - Native Rust workspace with `protocol`, `gateway`, `agent`, `platform`, `local-state`, and `cli` crates.
-- MCP Streamable HTTP gateway with compact `devices`, `exec`, `files`, `search`, `processes`, `jobs`, `terminal`, `transfer`, `system`, `network`, `services`, `containers`, and `git` tools.
+- MCP Streamable HTTP gateway with compact `devices`, `exec`, `files`, `search`, `processes`, `jobs`, `terminal`, `transfer`, `system`, `network`, `services`, `containers`, `git`, and `desktop` tools.
 - WebSocket/WSS outbound agent connection with reconnect/backoff and connection-generation supersession.
 - SQLite gateway persistence for enrolled devices, last-seen/revocation state, one-time enrollments, reconciliation snapshots, and bounded audit metadata.
 - Offline enrolled devices remain visible after gateway restart.
@@ -29,7 +29,7 @@ This file records what exists in code. Product intent remains in the other desig
 - Structured Docker operations: list, inspect, bounded logs, start, stop and restart through direct argv calls. Inspect output redacts sensitive environment/key fields by default.
 - Structured Git operations: status, diff, log, branches, remotes, fetch, fast-forward-only pull, and push through direct argv calls with interactive credential prompts disabled. HTTP remote userinfo is redacted from returned URLs/output.
 - Local `config.json` and `runtime.json` state shared by agent and CLI. Runtime status records PID, connection state, stable device identity, generation, last successful connection, sanitized last error, and a non-secret credential-storage verification timestamp written only after successful signed gateway authentication.
-- `infra` CLI: `status`, `doctor`, `install`, `repair`, `reconnect`, and `uninstall`, including JSON status/doctor output.
+- `infra` CLI: `status`, `doctor`, `install`, `repair`, `reconnect`, `update`, and `uninstall`, including JSON status/doctor output.
 - Startup adapters implemented for Linux systemd user services, macOS LaunchAgents, and Windows logon Scheduled Tasks. Linux startup reconstructs the standard user-bus environment for non-login/remote shells, and idempotent reinstall/repair reloads and restarts the controller so a replaced binary actually becomes active. Linux uses `KillMode=process` so durable PTY/job workers outlive controller-only restarts; `infra uninstall` explicitly terminates persisted Infra worker trees to avoid leaking them.
 - Native bootstrap installers: `scripts/install.sh` and `scripts/install.ps1`. Development/source mode is testable without releases; release mode verifies SHA-256 sidecars before installing binaries.
 - GitHub tag-release workflow defined for Linux x64/ARM64, macOS Intel/ARM64, and Windows x64/ARM64 assets plus SHA-256 sidecars.
@@ -48,7 +48,7 @@ On the Linux ARM64 development host:
 
 - `cargo fmt --all -- --check`
 - `cargo clippy --workspace --all-targets -- -D warnings`
-- `cargo test --workspace` — 56 Rust tests, including real PTY/job workers, inherited-nonblocking control-socket normalization, protected-identity metadata/file-fallback coverage, search/edit/hash, resumable transfer, structured system/network parsers, Git, container redaction and local lifecycle tests.
+- `cargo test --workspace` — 59 Rust tests, including real PTY/job workers, inherited-nonblocking control-socket normalization, protected-identity metadata/file-fallback coverage, search/edit/hash, resumable transfer, structured system/network parsers, Git, container redaction and local lifecycle tests.
 - `./scripts/smoke-v1.sh`
 - `./scripts/smoke-install-dashboard.sh`
 
@@ -58,17 +58,17 @@ The current code head is green on Ubuntu x64, Ubuntu ARM64, macOS ARM64, and Win
 
 - Standards-compatible OAuth/token validation for an Internet-facing/public MCP endpoint is still pending. Private-mode access control is implemented: non-loopback binding requires a >=32-byte admin credential, MCP accepts that credential as a bearer token, protected dashboard APIs accept bearer or a signed HttpOnly browser session, and rotating the admin credential invalidates existing browser sessions.
 - Device signing keys now use native OS credential storage when available (macOS Keychain Services, Windows Credential Manager, Linux Secret Service) with automatic v1→v2 identity migration. Real macOS ARM64 validation migrated the side-by-side v1 identity into `native_keyring`, removed the private key from `identity.json`, and reconnected successfully with signed authentication. `infra doctor` no longer reads secret bytes from the native store; it consumes a non-secret runtime proof written by the agent after a successful signed connection. Headless Linux without Secret Service intentionally falls back to a `0600` private identity file; eliminating or encrypting that fallback and broader Windows state-directory ACL hardening remain pending.
-- Cryptographically signed release/update metadata. Bootstrap release installs currently verify SHA-256 assets; the steady-state updater and rollback chain remain to be built.
-- `infra update`, staged binary replacement, health-check rollback, sanitized log export, and permission-specific doctor checks.
+- Cryptographically signed release/update metadata. Bootstrap installs and the new steady-state updater verify release SHA-256 sidecars, but an independently signed/authenticated update manifest is still pending.
+- `infra update` now stages verified binaries, requires the replacement agent to reconnect healthy, retains rollback binaries, and restores the previous agent on health failure. macOS/Linux replace the CLI synchronously; Windows stops/replaces/restarts the agent and uses a short-lived helper to replace the running CLI after the command exits. Real-device Windows updater acceptance, sanitized log export, and permission-specific doctor checks remain.
 - Real-device reboot/sleep-wake testing across macOS and Windows remains. Linux user-service install/reinstall/controller-restart behavior is exercised on Oracle ARM64, and macOS ARM64 has a side-by-side native install with signed reconnect plus controller/gateway persistence burn-in; full machine reboot/reconnect tests are still required.
 - Unified patch, line-range read, tail/watch and recoverable platform trash.
 - Higher-level device-to-device transfer orchestration and throughput reporting. Binary device upload/download/resume exists at the MCP layer.
-- Privileged helper and semantic desktop automation.
+- Privileged helper and higher-level semantic desktop automation remain. The replacement-critical `desktop` foundation now includes display/window discovery, screenshots/regions, application focus, coordinate click, text typing, key/modifier input, and clipboard get/set on macOS and Windows; real-device permission/behavior acceptance remains.
 - Full dashboard device-detail/terminal/files/permission/diagnostic controls. The current dashboard is a functional control/status foundation, not the finished product.
 - Gateway control-path liveness now uses 10-second protocol heartbeats with a 30-second stale timeout; any bounded RPC timeout immediately retires that connection so a dead socket cannot remain “online”. Agents refresh durable-work reconciliation after operations and heartbeats, and the real Linux burn-in requires active PTY/job/transfer counts to return to zero after cleanup.
 - Linux PTY/job survival through a user-service controller restart is verified on Oracle by requiring fresh post-restart activity. The real Mac burn-in now passes with independent launchd workers + stable boot identity: the same PTY accepts fresh I/O and the same durable job emits later output after controller restart, and the same PTY remains usable after gateway restart. Submitted macOS worker wrappers self-remove after completion; post-burn-in validation shows zero worker launchd registrations/processes while both v0.3 and v1 controllers remain healthy. Windows CI is green and the x64 acceptance artifact is staged; Windows real-device validation remains pending.
 - PTYs/jobs never claim to survive a full machine reboot; stale-boot entries are marked interrupted.
-- Windows atomic replacement semantics need a platform-specific upgrade; overwrite may require destination removal before rename.
+- Windows update replacement now uses an agent stop/start cycle plus a post-exit PowerShell helper for the running CLI; real Windows/Rose acceptance remains before treating this as production-safe.
 
 ## Migration safety
 
@@ -167,3 +167,10 @@ All v1 development remains side-by-side. The deployed Node v0.3 remote-control s
   longer claims success while the replacement controller is still starting.
 - Full machine sleep/wake and reboot validation on macOS remains an explicit cutover
   gate; this milestone does not claim either one.
+
+## 2026-10-17 — replacement-critical desktop + updater batch
+
+- Added a compact `desktop` MCP tool and agent capability with macOS/Windows implementations for displays, windows, JPEG screenshots/regions, focus, coordinate click, text typing, key/modifier chords, and clipboard get/set. Screenshot payloads are bounded and permission failures are surfaced explicitly.
+- Added `infra update` with release SHA-256 verification, staged replacement, new-agent reconnect health checking and rollback retention. macOS/Linux apply both binaries synchronously; Windows updates/restarts the agent first and launches a bounded post-exit helper for CLI replacement.
+- Development was batched to avoid runner latency. The final local sweep passed formatting, strict clippy, all 59 Rust tests, `smoke-v1.sh`, `smoke-install-dashboard.sh`, and `smoke-dashboard-password.sh` before the batch was pushed for cross-platform CI.
+- Remaining validation for this batch is intentionally platform-focused: native macOS desktop permissions/actions, Windows compile/runtime acceptance, and updater acceptance on real devices.

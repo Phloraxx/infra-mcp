@@ -88,12 +88,12 @@ A full reboot remains required before declaring Linux startup validation complet
 
 ## Phase 7 — desktop control
 
-- [ ] application/window discovery
-- [ ] screenshots/regions
+- [x] application/window discovery foundation on macOS/Windows
+- [x] screenshots/regions foundation on macOS/Windows
 - [ ] accessibility/UI tree
 - [ ] semantic find/click/type/wait
-- [ ] mouse/keyboard fallback
-- [ ] clipboard
+- [x] coordinate click, text typing and key/chord fallback foundation on macOS/Windows
+- [x] clipboard get/set foundation on macOS/Windows
 - [ ] multi-display behavior
 
 ## Phase 8 — distribution, dashboard and updates
@@ -104,8 +104,8 @@ A full reboot remains required before declaring Linux startup validation complet
 - [ ] publish and validate a real release before using the bootstrap path as the default production installer
 - [ ] package installers (`.pkg`/MSI/etc.) where useful
 - [ ] cryptographically signed/authenticated update manifest
-- [ ] staged update + health check + rollback
-- [ ] `infra update`
+- [x] staged update + agent reconnect health check + rollback foundation on macOS/Linux/Windows
+- [x] `infra update` foundation on macOS/Linux plus staged Windows CLI helper; real Windows updater acceptance remains
 - [x] basic `repair` and `uninstall`
 - [x] functional embedded dashboard foundation
 - [x] dashboard enrollment and generated install command

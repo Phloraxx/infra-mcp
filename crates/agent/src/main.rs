@@ -1,5 +1,6 @@
 mod command_runner;
 mod container_ops;
+mod desktop_ops;
 mod files;
 mod git_ops;
 mod identity;
@@ -308,6 +309,7 @@ async fn run_connection(
             "services".into(),
             "containers".into(),
             "git".into(),
+            "desktop".into(),
         ],
         metadata: BTreeMap::from([("hostname".into(), platform.hostname)]),
     };
@@ -548,6 +550,13 @@ async fn dispatch(request: AgentRequest, context: AgentContext) -> AgentResponse
         }
         AgentOperation::Git(request) => {
             tokio::task::spawn_blocking(move || git_ops::handle(request))
+                .await
+                .unwrap_or_else(|e| OperationResult::Failed {
+                    error: e.to_string(),
+                })
+        }
+        AgentOperation::Desktop(request) => {
+            tokio::task::spawn_blocking(move || desktop_ops::handle(request))
                 .await
                 .unwrap_or_else(|e| OperationResult::Failed {
                     error: e.to_string(),

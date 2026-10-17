@@ -6,6 +6,7 @@ use infra_local_state::{
     write_config,
 };
 use serde::Serialize;
+use sha2::{Digest, Sha256};
 #[cfg(target_os = "macos")]
 use std::process::Stdio;
 use std::{
@@ -130,6 +131,7 @@ async fn run() -> anyhow::Result<ExitCode> {
             );
             Ok(ExitCode::SUCCESS)
         }
+        "update" => update_command(&state_dir, args).await,
         "uninstall" => {
             let remove_state = args.iter().any(|arg| arg == "--remove-state");
             let unknown = args
@@ -254,6 +256,395 @@ fn runtime_is_newer(previous: Option<&RuntimeStatus>, current: &RuntimeStatus) -
             (Some(_), None) => true,
             _ => false,
         }
+}
+
+async fn update_command(state_dir: &Path, mut args: Vec<String>) -> anyhow::Result<ExitCode> {
+    let repo = take_option(&mut args, "--repo").unwrap_or_else(|| "Phloraxx/infra-mcp".into());
+    let version = take_option(&mut args, "--version").unwrap_or_else(|| "latest".into());
+    let base_url = take_option(&mut args, "--base-url");
+    ensure_no_args(&args)?;
+
+    let config =
+        read_config(state_dir)?.ok_or_else(|| anyhow!("cannot update: config.json is missing"))?;
+    if !identity_path(state_dir).is_file() {
+        return Err(anyhow!("cannot update: device is not enrolled"));
+    }
+    if config.gateway_url.trim().is_empty() {
+        return Err(anyhow!("cannot update: gateway URL is empty"));
+    }
+
+    let cli_path = std::env::current_exe().context("resolve current infra CLI path")?;
+    let install_dir = cli_path
+        .parent()
+        .ok_or_else(|| anyhow!("infra CLI path has no parent"))?;
+    #[cfg(windows)]
+    let agent_path = install_dir.join("infra-agent.exe");
+    #[cfg(not(windows))]
+    let agent_path = install_dir.join("infra-agent");
+    if !agent_path.is_file() {
+        return Err(anyhow!(
+            "infra-agent is missing at {}",
+            agent_path.display()
+        ));
+    }
+
+    let (asset, extension) = release_asset_descriptor()?;
+    let base = base_url.unwrap_or_else(|| {
+        if version == "latest" {
+            format!("https://github.com/{repo}/releases/latest/download")
+        } else {
+            format!("https://github.com/{repo}/releases/download/{version}")
+        }
+    });
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(90))
+        .build()?;
+
+    let staged_cli = install_dir.join(format!(".infra.update.{}{}", std::process::id(), extension));
+    let staged_agent = install_dir.join(format!(
+        ".infra-agent.update.{}{}",
+        std::process::id(),
+        extension
+    ));
+    download_verified_release_asset(&client, &base, "infra", &asset, extension, &staged_cli)
+        .await?;
+    if let Err(error) = download_verified_release_asset(
+        &client,
+        &base,
+        "infra-agent",
+        &asset,
+        extension,
+        &staged_agent,
+    )
+    .await
+    {
+        let _ = fs::remove_file(&staged_cli);
+        return Err(error);
+    }
+    make_executable_like(&staged_cli, &cli_path)?;
+    make_executable_like(&staged_agent, &agent_path)?;
+
+    #[cfg(windows)]
+    {
+        apply_windows_update(
+            state_dir,
+            &base,
+            &cli_path,
+            &agent_path,
+            &staged_cli,
+            &staged_agent,
+        )
+        .await
+    }
+    #[cfg(not(windows))]
+    {
+        apply_unix_update(
+            state_dir,
+            &base,
+            &cli_path,
+            &agent_path,
+            &staged_cli,
+            &staged_agent,
+        )
+        .await
+    }
+}
+
+#[cfg(not(windows))]
+async fn apply_unix_update(
+    state_dir: &Path,
+    base: &str,
+    cli_path: &Path,
+    agent_path: &Path,
+    staged_cli: &Path,
+    staged_agent: &Path,
+) -> anyhow::Result<ExitCode> {
+    let install_dir = cli_path
+        .parent()
+        .ok_or_else(|| anyhow!("infra CLI path has no parent"))?;
+    let rollback_cli = install_dir.join("infra.rollback");
+    let rollback_agent = install_dir.join("infra-agent.rollback");
+    let _ = fs::remove_file(&rollback_cli);
+    let _ = fs::remove_file(&rollback_agent);
+
+    let previous_runtime = read_runtime(state_dir).ok().flatten();
+    fs::rename(agent_path, &rollback_agent)
+        .with_context(|| format!("stage rollback copy of {}", agent_path.display()))?;
+    if let Err(error) = fs::rename(staged_agent, agent_path) {
+        let _ = fs::rename(&rollback_agent, agent_path);
+        let _ = fs::remove_file(staged_cli);
+        return Err(error).context("activate downloaded infra-agent");
+    }
+
+    let reconnect = async {
+        startup::restart()?;
+        wait_for_online_reconnect(
+            state_dir,
+            previous_runtime.as_ref(),
+            Duration::from_secs(20),
+        )
+        .await
+    }
+    .await;
+    if let Err(error) = reconnect {
+        let _ = fs::remove_file(agent_path);
+        let rollback_result = fs::rename(&rollback_agent, agent_path);
+        if rollback_result.is_ok() {
+            let _ = startup::restart();
+            let _ = wait_for_online_reconnect(state_dir, None, Duration::from_secs(20)).await;
+        }
+        let _ = fs::remove_file(staged_cli);
+        return Err(anyhow!(
+            "new infra-agent failed its reconnect health check and rollback was attempted: {error:#}"
+        ));
+    }
+
+    fs::rename(cli_path, &rollback_cli)
+        .with_context(|| format!("stage rollback copy of {}", cli_path.display()))?;
+    if let Err(error) = fs::rename(staged_cli, cli_path) {
+        let _ = fs::rename(&rollback_cli, cli_path);
+        let _ = fs::remove_file(agent_path);
+        let _ = fs::rename(&rollback_agent, agent_path);
+        let _ = startup::restart();
+        return Err(error).context("activate downloaded infra CLI");
+    }
+
+    println!(
+        "Infra updated from {base}; the new agent is online. Previous binaries are retained as infra.rollback and infra-agent.rollback."
+    );
+    Ok(ExitCode::SUCCESS)
+}
+
+#[cfg(windows)]
+async fn apply_windows_update(
+    state_dir: &Path,
+    base: &str,
+    cli_path: &Path,
+    agent_path: &Path,
+    staged_cli: &Path,
+    staged_agent: &Path,
+) -> anyhow::Result<ExitCode> {
+    let install_dir = cli_path
+        .parent()
+        .ok_or_else(|| anyhow!("infra CLI path has no parent"))?;
+    let rollback_agent = install_dir.join("infra-agent.rollback.exe");
+    let rollback_cli = install_dir.join("infra.rollback.exe");
+    let _ = fs::remove_file(&rollback_agent);
+
+    let previous_runtime = read_runtime(state_dir).ok().flatten();
+    windows_stop_agent();
+    if let Some(runtime) = &previous_runtime {
+        wait_for_process_exit(runtime.pid, Duration::from_secs(10)).await?;
+    }
+
+    fs::rename(agent_path, &rollback_agent)
+        .with_context(|| format!("stage rollback copy of {}", agent_path.display()))?;
+    if let Err(error) = fs::rename(staged_agent, agent_path) {
+        let _ = fs::rename(&rollback_agent, agent_path);
+        let _ = fs::remove_file(staged_cli);
+        let _ = windows_start_agent();
+        return Err(error).context("activate downloaded infra-agent");
+    }
+
+    let reconnect = async {
+        windows_start_agent()?;
+        wait_for_online_reconnect(
+            state_dir,
+            previous_runtime.as_ref(),
+            Duration::from_secs(25),
+        )
+        .await
+    }
+    .await;
+    if let Err(error) = reconnect {
+        windows_stop_agent();
+        let _ = fs::remove_file(agent_path);
+        let rollback_result = fs::rename(&rollback_agent, agent_path);
+        if rollback_result.is_ok() {
+            let _ = windows_start_agent();
+            let _ = wait_for_online_reconnect(state_dir, None, Duration::from_secs(25)).await;
+        }
+        let _ = fs::remove_file(staged_cli);
+        return Err(anyhow!(
+            "new infra-agent failed its reconnect health check and rollback was attempted: {error:#}"
+        ));
+    }
+
+    let helper = install_dir.join(format!(".infra-update-helper-{}.ps1", std::process::id()));
+    write_windows_cli_update_helper(
+        &helper,
+        cli_path,
+        staged_cli,
+        &rollback_cli,
+        std::process::id(),
+    )?;
+    Command::new("powershell.exe")
+        .args([
+            "-NoLogo",
+            "-NoProfile",
+            "-NonInteractive",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-File",
+        ])
+        .arg(&helper)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .context("start Windows CLI replacement helper")?;
+
+    println!(
+        "Infra agent updated from {base} and is online. The verified CLI replacement is staged and will be applied immediately after this command exits; the prior CLI is retained as infra.rollback.exe."
+    );
+    Ok(ExitCode::SUCCESS)
+}
+
+#[cfg(windows)]
+fn windows_stop_agent() {
+    let _ = Command::new("schtasks")
+        .args(["/End", "/TN", "Infra MCP Agent"])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status();
+}
+
+#[cfg(windows)]
+fn windows_start_agent() -> anyhow::Result<()> {
+    let status = Command::new("schtasks")
+        .args(["/Run", "/TN", "Infra MCP Agent"])
+        .status()?;
+    if !status.success() {
+        return Err(anyhow!("failed to start Infra MCP Agent scheduled task"));
+    }
+    Ok(())
+}
+
+#[cfg(windows)]
+async fn wait_for_process_exit(pid: u32, timeout: Duration) -> anyhow::Result<()> {
+    let deadline = tokio::time::Instant::now() + timeout;
+    while process_alive(pid) {
+        if tokio::time::Instant::now() >= deadline {
+            return Err(anyhow!("agent PID {pid} did not stop for update"));
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    Ok(())
+}
+
+#[cfg(windows)]
+fn ps_quote_path(path: &Path) -> String {
+    path.to_string_lossy().replace('\'', "''")
+}
+
+#[cfg(windows)]
+fn write_windows_cli_update_helper(
+    helper: &Path,
+    cli_path: &Path,
+    staged_cli: &Path,
+    rollback_cli: &Path,
+    parent_pid: u32,
+) -> anyhow::Result<()> {
+    let cli = ps_quote_path(cli_path);
+    let staged = ps_quote_path(staged_cli);
+    let rollback = ps_quote_path(rollback_cli);
+    let script = format!(
+        r#"$ErrorActionPreference = 'Stop'
+$parentPid = {parent_pid}
+$deadline = (Get-Date).AddSeconds(20)
+while ((Get-Process -Id $parentPid -ErrorAction SilentlyContinue) -and (Get-Date) -lt $deadline) {{ Start-Sleep -Milliseconds 100 }}
+if (Get-Process -Id $parentPid -ErrorAction SilentlyContinue) {{ exit 12 }}
+$cli = '{cli}'
+$staged = '{staged}'
+$rollback = '{rollback}'
+try {{
+  if (Test-Path -LiteralPath $rollback) {{ Remove-Item -LiteralPath $rollback -Force }}
+  Move-Item -LiteralPath $cli -Destination $rollback -Force
+  Move-Item -LiteralPath $staged -Destination $cli -Force
+  Remove-Item -LiteralPath $MyInvocation.MyCommand.Path -Force -ErrorAction SilentlyContinue
+  exit 0
+}} catch {{
+  if (-not (Test-Path -LiteralPath $cli) -and (Test-Path -LiteralPath $rollback)) {{ Move-Item -LiteralPath $rollback -Destination $cli -Force }}
+  exit 13
+}}
+"#
+    );
+    fs::write(helper, script).with_context(|| format!("write {}", helper.display()))
+}
+
+fn release_asset_descriptor() -> anyhow::Result<(String, &'static str)> {
+    let os = match std::env::consts::OS {
+        "linux" => "linux",
+        "macos" => "macos",
+        "windows" => "windows",
+        other => return Err(anyhow!("unsupported update OS {other}")),
+    };
+    let arch = match std::env::consts::ARCH {
+        "x86_64" => "x86_64",
+        "aarch64" => "aarch64",
+        other => return Err(anyhow!("unsupported update architecture {other}")),
+    };
+    #[cfg(windows)]
+    let extension = ".exe";
+    #[cfg(not(windows))]
+    let extension = "";
+    Ok((format!("{os}-{arch}"), extension))
+}
+
+async fn download_verified_release_asset(
+    client: &reqwest::Client,
+    base: &str,
+    binary: &str,
+    asset: &str,
+    extension: &str,
+    destination: &Path,
+) -> anyhow::Result<()> {
+    let name = format!("{binary}-{asset}{extension}");
+    let bytes = client
+        .get(format!("{base}/{name}"))
+        .send()
+        .await?
+        .error_for_status()?
+        .bytes()
+        .await?;
+    let sidecar = client
+        .get(format!("{base}/{name}.sha256"))
+        .send()
+        .await?
+        .error_for_status()?
+        .text()
+        .await?;
+    let expected = sidecar
+        .split_whitespace()
+        .next()
+        .ok_or_else(|| anyhow!("empty SHA-256 sidecar for {name}"))?
+        .to_ascii_lowercase();
+    if expected.len() != 64 || !expected.chars().all(|ch| ch.is_ascii_hexdigit()) {
+        return Err(anyhow!("invalid SHA-256 sidecar for {name}"));
+    }
+    let actual = format!("{:x}", Sha256::digest(&bytes));
+    if actual != expected {
+        return Err(anyhow!(
+            "SHA-256 mismatch for {name}: expected {expected}, got {actual}"
+        ));
+    }
+    fs::write(destination, &bytes)
+        .with_context(|| format!("write staged update {}", destination.display()))?;
+    Ok(())
+}
+
+fn make_executable_like(path: &Path, reference: &Path) -> anyhow::Result<()> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let reference_mode = fs::metadata(reference)?.permissions().mode();
+        fs::set_permissions(path, fs::Permissions::from_mode(reference_mode))?;
+    }
+    #[cfg(windows)]
+    {
+        let _ = (path, reference);
+    }
+    Ok(())
 }
 
 fn collect_status(state_dir: &Path) -> anyhow::Result<LocalStatus> {
@@ -777,7 +1168,7 @@ fn yes_no(value: bool) -> &'static str {
 fn print_help() {
     println!(
         "Infra device CLI\n\n\
-Usage:\n  infra status [--json] [--state-dir PATH]\n  infra doctor [--json] [--state-dir PATH]\n  infra install --gateway WS_URL [--code CODE] [--name NAME] [--agent PATH] [--no-startup] [--state-dir PATH]\n  infra repair [--state-dir PATH]\n  infra reconnect [--state-dir PATH]\n  infra uninstall [--remove-state] [--state-dir PATH]\n"
+Usage:\n  infra status [--json] [--state-dir PATH]\n  infra doctor [--json] [--state-dir PATH]\n  infra install --gateway WS_URL [--code CODE] [--name NAME] [--agent PATH] [--no-startup] [--state-dir PATH]\n  infra repair [--state-dir PATH]\n  infra reconnect [--state-dir PATH]\n  infra update [--version TAG] [--repo OWNER/REPO] [--base-url URL] [--state-dir PATH]\n  infra uninstall [--remove-state] [--state-dir PATH]\n"
     );
 }
 
