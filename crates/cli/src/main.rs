@@ -433,6 +433,10 @@ async fn apply_unix_update(
     println!(
         "Infra updated from {base}; the new agent is online. Previous binaries are retained as infra.rollback and infra-agent.rollback."
     );
+    #[cfg(target_os = "macos")]
+    println!(
+        "macOS may require Accessibility and Screen Recording to be re-enabled after replacing the agent binary; verify desktop permissions before relying on GUI control."
+    );
     Ok(ExitCode::SUCCESS)
 }
 
