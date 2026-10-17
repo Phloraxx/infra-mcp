@@ -1054,6 +1054,14 @@ fn build_app(state: AppState) -> Router {
             move || Ok(InfraMcp::new(mcp_state.clone())),
             Default::default(),
             StreamableHttpServerConfig::default()
+                .with_allowed_hosts([
+                    "localhost",
+                    "127.0.0.1",
+                    "::1",
+                    "100.79.230.22",
+                    "100.79.230.22:18790",
+                    "infra.drbijoy.in",
+                ])
                 .with_legacy_session_mode(false)
                 .with_json_response(true),
         );
