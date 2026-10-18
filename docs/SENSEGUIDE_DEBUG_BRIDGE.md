@@ -35,3 +35,11 @@ SenseGuide `Assist` collects at most 100 allowlisted in-memory events only after
 ## Engineering next
 
 Develop and verify signed binary `transfer`, controlled install approvals via Android PackageInstaller, and an optional on-device diagnostic replay mechanism. Do **not** elevate to generic shell/ADB or covert screen capture. For SenseGuide sensing limits and research scope see `Phloraxx/SenseGuide/docs/11_STATUS.md`.
+
+## Verification update — 2026-10-18
+
+- The updated Infra Phone Dev package and separately named SenseGuide Diagnostics APK were installed on the Motorola. Existing SenseGuide stable application was preserved.
+- The Infra Phone signed session reconnected without re-enrollment after the upgrade; ordinary Infra `devices` reported the Android phone online again.
+- SenseGuide Android + offline core GitHub Actions and Infra Phone Android GitHub Actions both succeeded. Local Gradle Android unit/build tests passed.
+- **Actual report grant/import is pending manual owner action.** Android rejected a synthetic `am start` URI-grant imitation from `run-as` because the caller package identity belonged to the shell; do not weaken the ContentProvider's `exported=false` or permission checks to bypass this.
+- Synthetic report cache artifacts used while testing transport were removed. No real SenseGuide telemetry was imported. Follow the 8-step checklist above from the phone UI.
