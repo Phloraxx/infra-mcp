@@ -161,3 +161,10 @@ Full plan: [ANDROID_AGENT_PLAN.md](ANDROID_AGENT_PLAN.md). This section tracks t
 - [ ] Verify real private WSS without USB/debug reverse tunnel; ensure production ingress accepts `/agent` without relaxing owner/MCP auth.
 - [ ] Add scoped Android `files`/`transfer` operations and tests.
 - [ ] Real-device sleep/network/permission/revocation and reboot acceptance.
+
+### Android scoped workspace progress
+
+- [x] Implement and build-test non-destructive Android `files` RPC for app-private workspace; include path traversal/symlink denial JVM tests.
+- [ ] Confirm `devices`, `system` and signed `files` roundtrip through an actually enrolled phone on an isolated gateway.
+- [ ] Add user-selected Storage Access Framework tree handling to signed `files` with explicit URIs and permissions.
+- [ ] Add resumable, hash-checked signed `transfer` and test large binary uploads/downloads.

@@ -220,3 +220,9 @@ All v1 development remains side-by-side. The deployed Node v0.3 remote-control s
 - Rust protocol and Java tests share a deterministic 118-byte authentication message SHA-256; both toolchain suites passed. Dev APK built and installed on the target phone.
 - Verified isolated Rust test gateway health and local enrollment route authentication. A temporary USB tunnel could reach that test gateway. **Actual enrollment handshake, signed WebSocket session, gateway device registry entry, and ChatGPT `devices`/ `system` call on Android are still unverified.** No live canonical gateway deployment, Cloudflare changes, or user-device bootloader actions performed.
 - Production-ready WSS ingress, permissioned file/transfer support and Android lifecycle acceptance remain open.
+
+## 2026-10-18 — scoped Android file RPC in signed agent
+
+- Implemented a bounded worker pool for signed request handling and structured failure replies, plus limited `files` RPC using `AndroidFilesOps` and app-private path containment via `ScopedWorkspace`.
+- Supported list/stat/read/hash/mkdir/write/exact_edit, with 1 MiB inline limits and no destructive delete. Symlinks and traversal cannot escape the app workspace. Tests for escaping via `..` and a symlink are included.
+- Android JVM unit tests and Gradle debug build passed locally after the addition. **Live signed phone enrollment and MCP file roundtrip are not yet verified.**

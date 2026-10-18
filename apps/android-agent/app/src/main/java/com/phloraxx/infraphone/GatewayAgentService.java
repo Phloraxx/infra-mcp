@@ -31,6 +31,8 @@ public class GatewayAgentService extends Service {
     private volatile boolean authenticated=false;
     private DeviceIdentity identity;
     private Runnable reconnectTask;
+    private final java.util.concurrent.ThreadPoolExecutor work = new java.util.concurrent.ThreadPoolExecutor(
+        2,2,0,TimeUnit.MILLISECONDS,new java.util.concurrent.ArrayBlockingQueue<>(8));
     public static boolean isActive(){return active;}
     public static String connectionState(){return state;}
     public static String error(){return lastError;}
@@ -104,7 +106,7 @@ public class GatewayAgentService extends Service {
                              .put("device_name",identity.name()).put("agent_version","0.2.0")
                              .put("platform","android").put("arch",Build.SUPPORTED_ABIS[0])
                              .put("boot_id",boot).put("agent_instance_id",instance)
-                             .put("capabilities",new JSONArray().put("status").put("system"));
+                             .put("capabilities",new JSONArray().put("status").put("system").put("files"));
                             h.put("metadata",new JSONObject().put("android_api",String.valueOf(Build.VERSION.SDK_INT)));
                             hello=h;
                             String signature=identity.sign(body.getString("nonce"),body.getString("gateway_epoch"),
@@ -116,7 +118,7 @@ public class GatewayAgentService extends Service {
                             send(ws,"reconcile",new JSONObject().put("items",new JSONArray()));
                         }else if("request".equals(type)){
                             if(!authenticated)throw new IllegalStateException("Not authenticated");
-                            send(ws,"response",reply(body));
+                            dispatchRequest(ws,body);
                         }
                     }catch(Exception e){fail(ws,e);}
                 }
@@ -128,6 +130,27 @@ public class GatewayAgentService extends Service {
                 }
             });
         }catch(Exception e){retry(e.getClass().getSimpleName()+": "+e.getMessage());}
+    }
+    private void dispatchRequest(WebSocket ws,JSONObject request){
+        try {
+            work.execute(()->{
+                try {
+                    String id=request.getString("id");
+                    JSONObject result;
+                    try{result=reply(request).getJSONObject("result");}
+                    catch(Exception e){
+                        result=new JSONObject().put("status","failed")
+                            .put("error","Android operation failed: "+e.getClass().getSimpleName()+": "+e.getMessage());
+                    }
+                    send(ws,"response",new JSONObject().put("id",id).put("result",result));
+                }catch(Exception ignored){/* malformed requests never reveal local stack or secrets */}
+            });
+        }catch(java.util.concurrent.RejectedExecutionException busy){
+            try{
+                send(ws,"response",new JSONObject().put("id",request.getString("id"))
+                    .put("result",new JSONObject().put("status","failed").put("error","Android agent busy")));
+            }catch(Exception ignored){}
+        }
     }
     private JSONObject reply(JSONObject request)throws Exception {
         String id=request.getString("id");
@@ -158,6 +181,10 @@ public class GatewayAgentService extends Service {
                 details.put("workspace_available",stat.getAvailableBytes());
                 outcome=new JSONObject().put("status","ok").put("body",details);
             }else outcome=unsupported("system."+action);
+        }else if("files".equals(name)){
+            JSONObject body=new AndroidFilesOps(this).handle(op);
+            outcome=body==null?unsupported("files."+op.optString("action")):
+                new JSONObject().put("status","ok").put("body",body);
         }else outcome=unsupported(name);
         return new JSONObject().put("id",id).put("result",outcome);
     }
@@ -195,6 +222,7 @@ public class GatewayAgentService extends Service {
         active=false;state="Disconnected";authenticated=false;
         if(reconnectTask!=null)handler.removeCallbacks(reconnectTask);
         if(socket!=null){socket.cancel();socket=null;}
+        work.shutdownNow();
         if(client!=null){client.dispatcher().executorService().shutdown();client.connectionPool().evictAll();client=null;}
         super.onDestroy();
     }

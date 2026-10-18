@@ -74,3 +74,13 @@ Source implemented:
 A development user must generate a one-time code from an owner-authorized gateway, enter its URL and code in the dev app, press **Enroll phone**, then **Connect signed agent**. The current debug-only loopback lab address is not a production configuration. For real operation use a valid certificate on an accessible WSS gateway. Do not embed owner credentials in the APK.
 
 The existing v0.1 HTTP service remains as an explicit fallback until direct-agent acceptance. The new signed agent **does not** gain root, ADB, screen access, or arbitrary app data access. Files/transfer, production gateway configuration and end-to-end validation remain next milestones.
+
+## v0.2 signed-agent workspace file subset (2026-10-18)
+
+The outbound signed gateway agent now dispatches the existing Infra `files` operation for **only the app-private workspace**, rooted at `getFilesDir()/workspace`. Supported file actions: `list`, `stat`, `read` (byte-offset UTF-8), `hash` (SHA-256), `mkdir`, `write` (staged atomic replace), and `exact_edit` (expected match count).
+
+Send relative paths such as `site/index.html`; use `""` to list the workspace root. Absolute Android paths, `..` escapes, symlink escapes, NUL, and backslashes are rejected by `ScopedWorkspace`. Writes/inline reads/edits are capped at 1 MiB, and directory listings at 500 entries. Large binary transfers are **not implemented yet** in the outbound signed protocol. `append`, `delete_permanent`, `trash`, `copy`, and `move` explicitly return `unsupported` in this milestone. Never claim the phone has arbitrary Android filesystem access.
+
+File operations run in a bounded Android worker pool; unsuccessful authorized operations return a structured `failed` result rather than closing the signed connection. New `ScopedWorkspaceTest` exercises traversal and symlink denial in JVM tests. Gradle `:app:testDebugUnitTest :app:assembleDebug` passed on Mac after this change.
+
+**End-to-end caveat:** The automated entry of the one-time enrollment credential did not complete, so these operations are build-tested but **not yet validated through a live phone-to-MCP session**. Existing v0.1 HTTP fallback remains separate.
