@@ -98,3 +98,16 @@ The Rust internally tagged `AgentOperation` wraps `FileRequest` and `SystemReque
 ```
 
 Protocol unit tests in `crates/protocol` enforce these exact shapes; Android dispatcher now reads the nested object for both. Keep them aligned when adding operations.
+
+## First-class signed connection — live acceptance achieved (2026-10-18)
+
+The owner enrolled Infra Phone Dev as a signed Android agent in the **existing Rust Infra gateway**, using the HTTPS/WSS endpoint `https://infra.drbijoy.in/`. The normal Infra-MCP `devices` tool reported `online`, `android`, v0.2.0 and capabilities `status`, `system`, `files`.
+
+Verified live through MCP (not Oracle helper or ADB for RPC):
+- `system summary`: Android device, kernel/CPU, memory/storage data.
+- `files`: private workspace list, `mkdir`, `write`, `read`, SHA-256 `hash`, `exact_edit`, `stat`.
+- Explicit temporary test file/folder cleaned after successful round trip.
+
+Public Cloudflare hostname was verified to return healthy gateway and WebSocket upgrade, with unauthenticated enrollment rejected. Signed connection is independent of the Tailscale-only test proxy (which was removed). No change to live Cloudflare rules, no extra public port and no root/bootloader/debug dependency for the signed RPC path.
+
+**Scope caveat:** The current app still exposes its legacy manually started local/Tailscale-only HTTP server as v0.1 fallback; signed direct-agent RPC needs neither that listener nor USB/ADB. Mobile-only operation with VPN disabled and long idle/reconnect/revocation are still pending tests. This is a functional owner-enrolled development APK, not a production security-hardened agent or unrestricted ADB replacement.

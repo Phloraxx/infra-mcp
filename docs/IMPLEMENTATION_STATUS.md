@@ -228,3 +228,17 @@ All v1 development remains side-by-side. The deployed Node v0.3 remote-control s
 - Android JVM unit tests and Gradle debug build passed locally after the addition. **Live signed phone enrollment and MCP file roundtrip are not yet verified.**
 
 - Found and corrected a Rust/Android request encoding mismatch: `AgentOperation::System` and `AgentOperation::Files` both contain nested tagged `action` objects. Added Rust roundtrip/JSON-shape tests for the exact objects, and corrected Android dispatch for both.
+
+## 2026-10-18 — Android first-class Infra-MCP end-to-end ACCEPTED
+
+**Live verification completed on Motorola Edge 60 Stylus (Android 16) using the deployed Rust gateway.**
+
+- Owner completed one-time device enrollment within Infra Phone Dev. The existing authenticated `devices` MCP tool reported the Android phone **online**, `platform=android`, `agent_version=0.2.0`, `arch=arm64-v8a`, with signed device identity and advertised `status`, `system`, `files` capabilities. The agent now appears alongside macOS and Oracle Linux in the same registry.
+- Public endpoint `https://infra.drbijoy.in/` resolves to Cloudflare, serves the same gateway epoch as the existing private Rust endpoint and supports HTTP WebSocket Upgrade to `/agent` (101). The `/api/enrollments` route still denies unauthenticated requests with 401. Signed gateway access is therefore possible without requiring Tailscale, although uninterrupted mobile-only operation with Tailscale completely disconnected has **not yet** been endurance tested.
+- Through the **normal connected Infra MCP tools** targeting the Android device (not through Oracle `exec`/phone-agent helper, USB, ADB forwarding or a temporary test gateway), `system summary` returned Android 16, CPU architecture, memory and storage metrics.
+- MCP `files` operations passed: workspace root list; `mkdir`, text `write`, `read`, SHA-256 `hash`, `exact_edit`, `stat` and list. Every operation returned structured success with matching values. The temporary smoke-test file/folder were removed afterward (via debug `run-as` cleanup only; **core RPC operations did not use ADB**).
+- The current live Android app restricts `files` to its app-private workspace; it does NOT provide root, generic exec, unrestricted phone filesystem, binary transfer or screen/touch control. The original v0.1 Android app and transitional Oracle helper remain installed, but neither is required for the signed RPC path.
+- Removed the temporary extra Tailscale Serve HTTPS 12443 proxy created during integration. The existing 10443 and 11443 services are unchanged, as is the Cloudflare/production routing.
+- Remaining acceptance: unplugged/mobile-only and Android VPN off, long idle/doze, Wi-Fi/mobile switching, gateway restarts, key revocation, Transfer RPC, SAF permissioned folders, Termux development bridge and optional on-phone-approved screen control.
+
+**Next phase:** prioritize controlled binary transfer and SAF folder actions, then scoped development actions; keep telemetry minimal and all sensitive permissions explicitly owner-initiated.

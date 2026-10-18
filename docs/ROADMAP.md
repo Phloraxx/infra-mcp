@@ -168,3 +168,15 @@ Full plan: [ANDROID_AGENT_PLAN.md](ANDROID_AGENT_PLAN.md). This section tracks t
 - [ ] Confirm `devices`, `system` and signed `files` roundtrip through an actually enrolled phone on an isolated gateway.
 - [ ] Add user-selected Storage Access Framework tree handling to signed `files` with explicit URIs and permissions.
 - [ ] Add resumable, hash-checked signed `transfer` and test large binary uploads/downloads.
+
+### Android signed endpoint acceptance (verified 2026-10-18)
+
+- [x] Enroll the Motorola phone into the existing deployed Rust Infra v1 registry using one-time code and Ed25519 signed WebSocket.
+- [x] Confirm first-class Android shows **online** in native Infra-MCP `devices` with `status/system/files` capabilities.
+- [x] Verify public `https://infra.drbijoy.in/` health, verified TLS, `/agent` websocket upgrade and unauthenticated enrollment rejection.
+- [x] Verify live MCP `system summary` and scoped `files` list/write/read/hash/exact_edit/stat/mkdir using the phone device ID, **not Oracle helper or ADB forwarding**.
+- [x] Remove temporary Tailscale-only test proxy; preserve existing tailnet routes.
+- [ ] Test mobile data with Tailscale VPN disabled, Wi-Fi/mobile handoff, screen-off/Doze, service restart and revoke.
+- [ ] Implement signed `transfer`, user-approved SAF folder access, better diagnostics, CI Android device tests.
+- [ ] Decommission old per-session bearer HTTP helper and inbound local/tailnet listener after separate migration signoff.
+- [ ] Explore Termux sandbox and explicit Accessibility/MediaProjection controls separately.
