@@ -24,11 +24,11 @@ Status: implemented as a separate debug package `com.phloraxx.infraphone.dev` on
 ## Safety/acceptance gates
 
 - [x] Android JVM tests + debug build succeed with v0.3 source.
-- [ ] Debug APK installed in place on Motorola preserving Ed25519 enrollment.
-- [ ] Signed MCP Android capabilities and `exec help` and `senseguide status` pass.
-- [ ] Verified binary upload/download SHA-256 roundtrip and retry/negative-case checks on phone.
-- [ ] APK install UI and denial tested; **do not silently install** SenseGuide.
-- [ ] Android owner manually enables Accessibility service and five-minute session, then scoped `desktop.screenshot/click` verified against foreground SenseGuide.
+- [x] Debug APK installed in place on Motorola preserving Ed25519 enrollment.
+- [x] Signed MCP Android capabilities and `exec help` / `senseguide status` pass (use `cwd=""` through current connector).
+- [x] Binary upload/download SHA-256 roundtrip, idempotent retry and traversal rejection passed on phone.
+- [x] Owner-approved APK update reflected in installed Diagnostics package metadata; silent installation is not supported. **Negative permission-denial testing remains pending.**
+- [x] Android owner enabled Accessibility and timed session; signed `desktop.screenshot/click` passed while SenseGuide Diagnostics was foreground. Expiry/negative-case tests remain pending.
 - [ ] Screen-off/Doze/Wi-Fi↔mobile data, device reboot, gateway reboot and explicit disconnect reconnection tested.
 
 The APK is a developer preview. Do not claim autonomous obstacle safety, generic root/ADB access, unattended app installs, a full OS terminal, or unrestricted screen control.

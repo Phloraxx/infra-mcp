@@ -1,6 +1,8 @@
 # Infra Phone — Android companion
 
-**Current status: imported v0.1 prototype (October 18, 2026).** The buildable Android APK is installed on a Motorola Edge 60 Stylus, but **this source does not yet connect as a signed Infra gateway agent**.
+**Current status: Infra Phone Dev v0.3.0 is built, installed and live-verified as a first-class signed Android Infra-MCP agent.** It supports scoped workspace files, signed binary transfer, restricted SenseGuide commands, owner-approved APK installation, and temporary SenseGuide-only Accessibility controls. See **[Android current status](../../docs/ANDROID_CURRENT_STATUS.md)** for the authoritative acceptance matrix.
+
+The following v0.1 and v0.2 sections are **historical checkpoints**. Their "not implemented" language describes earlier builds, not current v0.3 functionality. The legacy v0.1 local HTTP fallback remains separate; signed RPC needs no inbound listener.
 
 This module is the baseline for the Android first-class-device work. Read [Android integration plan](../../docs/ANDROID_AGENT_PLAN.md), [wire protocol adapter](../../docs/ANDROID_PROTOCOL_ADAPTER.md), and [security/acceptance gates](../../docs/ANDROID_SECURITY_AND_TESTS.md) before modifying it.
 

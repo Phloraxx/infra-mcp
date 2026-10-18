@@ -2,6 +2,8 @@
 
 The roadmap is ordered to produce useful capability early while keeping the working v0.3 deployment available as fallback. Checked items mean the implementation exists in this repository; platform reliability still needs the acceptance tests in `RELIABILITY_UX_TESTS.md` before cutover.
 
+**Android v0.3 current acceptance is tracked in [ANDROID_CURRENT_STATUS.md](ANDROID_CURRENT_STATUS.md).** Earlier dated Android P0/P1 checkboxes below are historical progress snapshots; the canonical acceptance page takes precedence.
+
 ## Phase 0 — freeze the prototype
 
 - [x] Treat the live Node v0.3 system as compatibility reference, not the place for major new features.
@@ -186,7 +188,7 @@ Full plan: [ANDROID_AGENT_PLAN.md](ANDROID_AGENT_PLAN.md). This section tracks t
 - [x] Add a user-approved import Activity in Infra Phone Dev for a single bounded SenseGuide JSONL report.
 - [x] Require trusted SenseGuide provider, one-time URI read grant, explicit on-device Import confirmation, 64 KiB cap and valid report schema.
 - [x] Build/test Infra Phone Dev and SenseGuide experimental debugging source without changing stable SenseGuide.
-- [ ] Verify the complete phone-UI report export/import and signed MCP `files` retrieval using an actual running test app.
+- [x] Verify the complete phone-UI report export/import and signed MCP `files` retrieval using an actual running test app.
 - [ ] Implement binary transfer and user-confirmed APK installation, plus replay fixtures in SenseGuide.
 
 ### Infra Phone v0.3 SenseGuide development (2026-10-18)
@@ -197,8 +199,8 @@ Full plan: [ANDROID_AGENT_PLAN.md](ANDROID_AGENT_PLAN.md). This section tracks t
 - [x] Implement user-enabled Accessibility service, five-minute on-phone consent, foreground-SenseGuide guard, bounded screenshot/tap/back; no clipboard or global app control.
 - [x] Implement opt-in Android boot receiver and START_STICKY recovery; explicit limits apply to locked state and OS background restrictions.
 - [x] Compile v0.3 Android unit tests and debug build locally.
-- [ ] Verify signed transfer roundtrip, app status/request-launch, and installer UX on unlocked phone.
-- [ ] Verify five-minute SenseGuide-only permission screenshot/tap; no capture of other apps.
+- [x] Verify signed transfer roundtrip, app status/request-launch and owner-approved Diagnostics package update on the phone. Negative installer-permission tests remain pending.
+- [x] Verify owner-enabled SenseGuide foreground screenshot/tap. **Negative capture attempts outside SenseGuide and after five-minute expiry remain pending.**
 - [ ] Validate actual screen-off, mobile/Wi-Fi changes, boot and gateway restart; restore connectivity on user interaction after app update as Android requires.
 - [ ] Investigate optional Termux-backed command environments only with separate consent and owner-controlled containment.
 
@@ -209,6 +211,6 @@ Full plan: [ANDROID_AGENT_PLAN.md](ANDROID_AGENT_PLAN.md). This section tracks t
 - [x] Reject transfer path escape and unrestricted `exec`.
 - [x] Stage complete 12,451,391-byte SenseGuide Diagnostics APK over signed Mac-to-phone MCP without ADB; independent file-hash match.
 - [x] Restricted `request-install` returns owner review notice, with no silent installation.
-- [ ] Confirm user approval via Android APK installer and separate test-app package checks.
-- [ ] Enable and verify temporary Accessibility control by explicit on-device user action.
+- [x] Confirm on-device owner-approved Diagnostics installation and separate package/version metadata; independent end-to-end installer SHA-256 audit remains pending.
+- [x] Enable and verify temporary Accessibility control by explicit on-device user action.
 - [ ] Stress reconnect after screen-off/mobile network change/reboot; fix omitted-`cwd` ergonomics and completed transfer lifecycle polish.

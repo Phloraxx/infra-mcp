@@ -6,6 +6,12 @@ The product goal is not to be a thin SSH wrapper or a clone of Desktop Commander
 
 > **Current status:** **Infra v1 is actively implemented in Rust alongside the working v0.3 deployment.** The Rust control plane now covers signed device enrollment/authentication, persistent SQLite state/audit metadata, MCP `devices`/`exec`/`files`/`search`/`processes`/`jobs`/`terminal`/`transfer` plus structured `system`/`network`/`services`/`containers`/`git`, durable workers and PTYs, resumable binary transfer, native installers/startup adapters, `infra` status/doctor/repair commands, and a live embedded dashboard foundation. The live v0.3 runtime remains untouched until the benchmark/cutover criteria are met.
 
+## Android companion — Infra Phone v0.3
+
+The **Motorola Edge 60 Stylus** is enrolled as a first-class Android device over the existing signed Infra-MCP gateway. Live-verified v0.3 capabilities include scoped files, SHA-256-checked binary transfers, restricted SenseGuide development commands, user-reviewed APK installation and temporary, owner-enabled SenseGuide-only screenshot/tap access.
+
+**Start with [Android current status](docs/ANDROID_CURRENT_STATUS.md)** for the validated capabilities, owner workflow, privacy and safety constraints, and outstanding reliability tests. Historic desktop/Oracle v0.3 references elsewhere in this README describe a **different legacy deployment**, not the Android app version.
+
 ## Product principles
 
 1. **Native and lightweight.** The agent should be one native binary with no Node/npm runtime dependency.
