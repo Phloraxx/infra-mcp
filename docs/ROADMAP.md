@@ -201,3 +201,14 @@ Full plan: [ANDROID_AGENT_PLAN.md](ANDROID_AGENT_PLAN.md). This section tracks t
 - [ ] Verify five-minute SenseGuide-only permission screenshot/tap; no capture of other apps.
 - [ ] Validate actual screen-off, mobile/Wi-Fi changes, boot and gateway restart; restore connectivity on user interaction after app update as Android requires.
 - [ ] Investigate optional Termux-backed command environments only with separate consent and owner-controlled containment.
+
+### Android v0.3 live verification completed (2026-10-18)
+
+- [x] Real phone v0.3 reconnection, registry capabilities, `exec` status.
+- [x] Binary two-chunk upload, duplicate retry, SHA-256 commit, two-chunk byte-exact download.
+- [x] Reject transfer path escape and unrestricted `exec`.
+- [x] Stage complete 12,451,391-byte SenseGuide Diagnostics APK over signed Mac-to-phone MCP without ADB; independent file-hash match.
+- [x] Restricted `request-install` returns owner review notice, with no silent installation.
+- [ ] Confirm user approval via Android APK installer and separate test-app package checks.
+- [ ] Enable and verify temporary Accessibility control by explicit on-device user action.
+- [ ] Stress reconnect after screen-off/mobile network change/reboot; fix omitted-`cwd` ergonomics and completed transfer lifecycle polish.

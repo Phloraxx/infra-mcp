@@ -32,3 +32,18 @@ Status: implemented as a separate debug package `com.phloraxx.infraphone.dev` on
 - [ ] Screen-off/Doze/Wi-Fi↔mobile data, device reboot, gateway reboot and explicit disconnect reconnection tested.
 
 The APK is a developer preview. Do not claim autonomous obstacle safety, generic root/ADB access, unattended app installs, a full OS terminal, or unrestricted screen control.
+
+## Live v0.3 end-to-end acceptance — 2026-10-18
+
+**Observed and verified using normal Infra-MCP connector operations; no ADB used in the signed transfer path:**
+
+- Registered Motorola appeared online with `agent_version=0.3.0`, generation 17, and capabilities `status`, `system`, `files`, `transfer`, `exec`, `desktop`.
+- `exec(command="senseguide status", cwd="")` succeeded and identified both stable SenseGuide Lab and separate SenseGuide Diagnostics 0.5.5 packages. The connector's omitted/default working directory is currently rejected; explicitly set `cwd=""` for the safe command allowlist. An unrestricted `pwd` was correctly rejected.
+- `desktop.permissions` reported Accessibility disabled, five-minute consent disabled, and foreground SenseGuide false; **no screenshot/click permission was granted or exercised**.
+- A disposable 132,100-byte binary was uploaded in two chunks, with SHA-256 predeclared. Retrying the initial 131,072-byte chunk was accepted idempotently without advancing the offset; upload commit returned the expected SHA-256 `48a20eae42bbc77a9c24d4284d45d83668640645568a3894ad24853339bc3e33`. Two download chunks returned all 132,100 bytes exactly, with **zero byte mismatches** compared to deterministic source bytes.
+- Path traversal via `transfer.upload_begin("../outside-private-workspace.bin")` was rejected with `Path escapes app workspace`.
+- A real **12,451,391-byte** SenseGuide Diagnostics APK from the connected Mac was relayed using Mac `transfer.download_chunk` → Android `transfer.upload_chunk` in <=128 KiB chunks, and committed successfully at `apks/senseguide-debug.apk`. The destination's independent `files.hash` matched the Mac origin: `a55769552de9081d77b0ed85cdcdf8ae9b7855a94aceb65b670d880c0b9bcc0d`.
+- The Android `senseguide status` operation confirmed `staged_apk_bytes=12451391`. The `senseguide request-install` restricted command was accepted and returned the owner-review instruction; **it did not install or launch the APK**. The owner still must explicitly approve the APK review and the Android system installer. Do not infer approval or installation completion.
+- Completed transfer handles were cancelled/cleared; cancelling a completed transfer does not delete the committed destination file. The synthetic smoke-test file may remain in `infra-smoke/` and can be deleted during later scoped cleanup.
+
+**Remaining acceptance:** APK review screen, package match and system installer confirmation on-phone; Android Accessibility service enabled by owner and five-minute SenseGuide-only screen session; screen-off/Doze and network handoff and reboot recovery. No change to SenseGuide's actual camera/depth/voice/haptic logic. A request with default nonempty `cwd` and bounded transfer-handle cleanup ergonomics are implementation polish.
