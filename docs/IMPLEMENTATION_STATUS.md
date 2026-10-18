@@ -204,3 +204,10 @@ All v1 development remains side-by-side. The deployed Node v0.3 remote-control s
 - Owner explicitly removed macOS Accessibility, click/type/key interaction, Screen Recording/audio capture and screenshots from the required RDC-replacement scope. These desktop features remain optional and do not block cutover.
 - Re-ran the canonical safe acceptance matrix with desktop excluded: Oracle passes all 10 required categories and Mac passes all 10 required categories (exec, files/edit/hash, search, processes, system/network, PTY, durable jobs and resumable binary transfer).
 - Remaining cutover gates are real-device reliability only: Rose/Windows acceptance while the device is online, Mac sleep/wake and reboot/login reconnect, Windows reboot/reconnect, and Linux/Oracle reboot/reconnect if RDC is to be removed there as well. No additional product feature development is required for the narrowed scope.
+
+
+## 2026-10-18 — Android companion source and direct-agent design
+
+- Imported the already-built v0.1 Android prototype source into `apps/android-agent/` as a separately buildable Gradle project. Verified historical APK tests: app installed on Android 16 Motorola, local API 401 without bearer and 200 site response, file transfer with traversal denial, and Oracle tailnet reachability. The source itself is not yet wired into Infra Rust agent protocol.
+- Added [Android agent plan](ANDROID_AGENT_PLAN.md), [protocol compatibility adapter](ANDROID_PROTOCOL_ADAPTER.md), and [security & real-device acceptance gates](ANDROID_SECURITY_AND_TESTS.md).
+- First-class Android enrollment and outbound signed WSS **remain unimplemented**; do not infer success from the existing Oracle helper. No live gateway/deployment changes are part of the planning branch.

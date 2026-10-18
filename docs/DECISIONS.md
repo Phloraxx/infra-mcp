@@ -80,3 +80,14 @@ These remain intentionally open until prototypes/tests justify a choice:
 - exact update-signing framework
 - exact macOS privileged-helper/native shim approach
 - whether/when QUIC becomes default transport
+
+
+## D011 — Android as a first-class signed device using the existing gateway
+
+**Status:** Proposed direction, 2026-10-18; direct-agent transport and gateway enrollment NOT yet implemented in the APK.
+
+Implement outbound Android `wss://.../agent` using Infra's existing signed Ed25519 device identity/enrollment and Rust Serde wire protocol; surface the phone under existing MCP `devices` rather than shipping a separate phone MCP endpoint or retaining the Oracle HTTP helper. Android app-specific sandbox and per-feature permissions constrain capability advertisements; desktop user-shell assumptions do not apply. Foreground-service and screen permission restrictions must be designed and tested, not bypassed. Choose Java/Kotlin for the Android agent lifecycle and protocol compatibility tests first; a Rust/JNI core is an optional later optimization.
+
+**Tradeoffs:** maintain a small cross-language wire adapter + golden tests instead of introducing Rust/JNI packaging complexity now; rely on Android OS/background limits instead of promising persistent availability; use per-device strong signing identity rather than perpetual bearer token; use user's SAF selection instead of blanket storage privileges.
+
+See [ANDROID_AGENT_PLAN.md](ANDROID_AGENT_PLAN.md), [ANDROID_PROTOCOL_ADAPTER.md](ANDROID_PROTOCOL_ADAPTER.md) and [ANDROID_SECURITY_AND_TESTS.md](ANDROID_SECURITY_AND_TESTS.md).

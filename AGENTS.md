@@ -147,3 +147,16 @@ Do not perform a destructive cutover as part of an implementation PR.
 It is not enough to match a checklist. Infra should require fewer model tool calls for normal work, reconnect more reliably, cover more of the owner's devices, use substantially fewer resources, provide stronger session persistence, and expose a more coherent MCP interface.
 
 If a proposed feature makes the product significantly harder to install, repair, or understand, challenge the design before implementing it.
+
+
+## Android first-class agent track (planning, 2026-10-18)
+
+The initial Android companion source is now at `apps/android-agent/`. It is **v0.1 inbound HTTP prototype only** and has not implemented Infra signed WSS, device enrollment or MCP device registration.
+
+New work must start with:
+- `docs/ANDROID_AGENT_PLAN.md` (goal, architecture, product phases and Android restrictions)
+- `docs/ANDROID_PROTOCOL_ADAPTER.md` (Rust/Java wire interop, signed authentication)
+- `docs/ANDROID_SECURITY_AND_TESTS.md` (permission boundary and negative tests)
+- `apps/android-agent/AGENTS.md` (module-specific limitations and workflow)
+
+Use the existing Rust gateway's `/enroll` + `/agent` endpoints and signed Ed25519 protocol; don't create a second MCP server or use the temporary Oracle HTTP bridge as production architecture. Android runs under its app sandbox; unlike desktop agents, it must not advertise generic shell/PTY/process/filesystem capability unless a real separately authorized implementation exists. Never modify production during planning.

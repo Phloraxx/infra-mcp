@@ -133,3 +133,20 @@ For the owner-defined RDC replacement scope, GUI automation is not a release gat
 - [ ] archive/remove legacy Node implementation only after successful cutover
 
 Infra is not ready for destructive cutover merely because individual checked features work. Reliability, install/reboot behavior and the benchmark remain release gates.
+
+
+## Android first-class agent extension (separate track, scoped plan 2026-10-18)
+
+Full plan: [ANDROID_AGENT_PLAN.md](ANDROID_AGENT_PLAN.md). This section tracks the **Android project**, not the already-working desktop/Oracle agent implementation.
+
+- [x] Import the buildable v0.1 Java Android source into `apps/android-agent/` and document current limitations.
+- [x] Research the Android service, permissions, Keystore/SAF and network lifecycle constraints; write protocol/security/acceptance plans.
+- [ ] Add clean Android CI and cross-language Rust/Java signed-auth golden vectors.
+- [ ] Android `/enroll` plus signed outbound `/agent` WSS without an Oracle helper.
+- [ ] First-class stable Android `device_id`, `devices` MCP discovery, revoke, reconnect, connection-generation handling.
+- [ ] Implement Android `status` / `system` within sandbox and accurately scoped capability list.
+- [ ] Add permission-gated `files`/`transfer` workspace and SAF operations.
+- [ ] Remove temporary Oracle bearer-token bridge and unauthenticated inbound 8765 after acceptance.
+- [ ] Separately investigate Termux-based development runtime; no generic exec/PTY without a real scoped implementation.
+- [ ] Separately investigate on-demand Accessibility/MediaProjection UI control with visible consent and denial tests.
+- [ ] Real phone / Android 16 lifecycle, sleep, network switching, gateway restart, revocation, transfer and energy acceptance.

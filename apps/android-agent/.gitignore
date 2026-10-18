@@ -1,0 +1,21 @@
+# Android local and generated files
+.gradle/
+build/
+app/build/
+local.properties
+.idea/
+*.iml
+*.apk
+*.aab
+*.jks
+*.keystore
+*.p12
+*.pem
+*.key
+*.env
+.env*
+captures/
+screenshots/
+logs/
+*.log
+.DS_Store

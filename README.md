@@ -131,3 +131,10 @@ For safe local end-to-end checks, `scripts/smoke-v1.sh` verifies signed enrollme
 ## License
 
 No license has been selected yet. Do not assume third-party redistribution rights until a license is added.
+
+
+## Android companion (planning track)
+
+`apps/android-agent/` contains a separately buildable **v0.1 Android prototype** (device diagnostics, scoped local file API and short-lived private hosting). It does **not** yet directly enroll/connect to this Rust Infra gateway, or provide ADB/root/screen automation.
+
+The first-class Android device roadmap calls for signed outbound WSS to the same gateway so ChatGPT sees the phone in the existing `devices` MCP tool without the temporary Oracle helper. See the [full plan](docs/ANDROID_AGENT_PLAN.md), [protocol adapter](docs/ANDROID_PROTOCOL_ADAPTER.md) and [security/acceptance checklist](docs/ANDROID_SECURITY_AND_TESTS.md).
