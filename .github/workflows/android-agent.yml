@@ -1,0 +1,44 @@
+name: Android Infra Phone
+
+on:
+  push:
+    paths:
+      - 'apps/android-agent/**'
+      - '.github/workflows/android-agent.yml'
+  pull_request:
+    paths:
+      - 'apps/android-agent/**'
+      - '.github/workflows/android-agent.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  android:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    defaults:
+      run:
+        working-directory: apps/android-agent
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+          cache: gradle
+          cache-dependency-path: apps/android-agent/**/*.gradle*
+      - uses: android-actions/setup-android@v3
+      - name: Install Android SDK
+        run: |
+          yes | sdkmanager --licenses >/dev/null || true
+          sdkmanager "platforms;android-35" "build-tools;35.0.0"
+      - name: Unit tests and debug APK build
+        run: ./gradlew :app:testDebugUnitTest :app:assembleDebug --no-daemon --console=plain
+      - name: Upload disposable development APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: infra-phone-development-apk
+          path: apps/android-agent/app/build/outputs/apk/debug/app-debug.apk
+          retention-days: 7

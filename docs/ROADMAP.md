@@ -150,3 +150,14 @@ Full plan: [ANDROID_AGENT_PLAN.md](ANDROID_AGENT_PLAN.md). This section tracks t
 - [ ] Separately investigate Termux-based development runtime; no generic exec/PTY without a real scoped implementation.
 - [ ] Separately investigate on-demand Accessibility/MediaProjection UI control with visible consent and denial tests.
 - [ ] Real phone / Android 16 lifecycle, sleep, network switching, gateway restart, revocation, transfer and energy acceptance.
+
+
+### Android v0.2 implementation checkpoint (2026-10-18)
+
+- [x] Ed25519 device identity encrypted at rest via AndroidKeyStore-wrapped AES-GCM and one-time code enrollment client.
+- [x] Implement outbound WebSocket protocol client, signed hello, heartbeat and minimal status/system dispatcher in Java.
+- [x] Install v0.2 as a separate `.dev` package; build Android and pass Java/Rust golden vector tests.
+- [ ] **Verify** real signed enrollment and first-class device registration end to end against an isolated Rust gateway.
+- [ ] Verify real private WSS without USB/debug reverse tunnel; ensure production ingress accepts `/agent` without relaxing owner/MCP auth.
+- [ ] Add scoped Android `files`/`transfer` operations and tests.
+- [ ] Real-device sleep/network/permission/revocation and reboot acceptance.

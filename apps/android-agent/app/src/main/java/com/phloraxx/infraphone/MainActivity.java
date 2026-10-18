@@ -18,8 +18,11 @@ import android.widget.*;
 public class MainActivity extends Activity {
     private static final int PICK_FOLDER = 21;
     private final int bg = Color.rgb(12,18,32), panel = Color.rgb(22,32,52), fg = Color.WHITE;
-    private TextView status, token, hint, folder;
+    private TextView status, token, hint, folder, gatewayStatus;
+    private EditText gatewayInput, pairingInput;
     private LinearLayout root;
+    private final android.os.Handler uiHandler=new android.os.Handler(android.os.Looper.getMainLooper());
+    private final Runnable statusPoll=new Runnable(){public void run(){if(root!=null)refresh();uiHandler.postDelayed(this,2500);}};
 
     @Override public void onCreate(Bundle b) {
         super.onCreate(b);
@@ -49,6 +52,55 @@ public class MainActivity extends Activity {
             ((android.content.ClipboardManager)getSystemService(CLIPBOARD_SERVICE))
                 .setPrimaryClip(ClipData.newPlainText("Infra Phone key",t));
             Toast.makeText(this,"Session key copied",Toast.LENGTH_SHORT).show();
+        });
+        space(14);
+
+        LinearLayout gateway=card();
+        labelIn(gateway,"Direct Infra-MCP connection (v0.2)",18,fg,true);
+        labelIn(gateway,"Enroll this Android phone as a separate signed device. For production, enter the trusted HTTPS gateway address.",13,0xffA8B9D4,false);
+        gatewayInput=new EditText(this);
+        gatewayInput.setSingleLine(true);gatewayInput.setTextColor(fg);gatewayInput.setHintTextColor(0xff8A9DBB);
+        gatewayInput.setText(new DeviceIdentity(this).gateway());
+        gatewayInput.setHint("https://your-infra-gateway");
+        gatewayInput.setTextSize(14);gateway.addView(gatewayInput);
+        pairingInput=new EditText(this);pairingInput.setTextColor(fg);pairingInput.setSingleLine(true);
+        pairingInput.setHintTextColor(0xff8A9DBB);pairingInput.setHint("One-time pairing code");
+        pairingInput.setTextSize(14);gateway.addView(pairingInput);
+        gatewayStatus=labelIn(gateway,"",13,0xffA7E6D7,false);
+        button(gateway,"Enroll phone",0xff3365E8,()-> {
+            String url=gatewayInput.getText().toString(),code=pairingInput.getText().toString();
+            gatewayStatus.setText("Enrolling…");
+            new Thread(()-> {
+                try {
+                    GatewayEnrollment.pair(getApplicationContext(),url,code);
+                    runOnUiThread(()->{pairingInput.setText("");refresh();});
+                }catch(Exception e){runOnUiThread(()->gatewayStatus.setText("Enrollment failed: "+e.getMessage()));}
+            },"infra-enroll").start();
+        });
+        button(gateway,"Connect signed agent",0xff3365E8,()-> {
+            if(!new DeviceIdentity(this).enrolled()){
+                gatewayStatus.setText("Enroll with a one-time code first.");return;
+            }
+            if(Build.VERSION.SDK_INT>=33 && checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS)!=PackageManager.PERMISSION_GRANTED)
+                requestPermissions(new String[]{Manifest.permission.POST_NOTIFICATIONS},31);
+            Intent svc=new Intent(this,GatewayAgentService.class).setAction(GatewayAgentService.ACTION_CONNECT);
+            if(Build.VERSION.SDK_INT>=26)startForegroundService(svc);else startService(svc);
+            root.postDelayed(this::refresh,900);
+        });
+        button(gateway,"Disconnect signed agent",0xff663845,()->{
+            stopService(new Intent(this,GatewayAgentService.class));
+            root.postDelayed(this::refresh,300);
+        });
+        button(gateway,"Unpair (local identity)",0xff663845,()->{
+            if(GatewayAgentService.isActive()){
+                gatewayStatus.setText("Disconnect first, then unpair.");return;
+            }
+            new android.app.AlertDialog.Builder(this)
+                .setTitle("Unpair this device locally?")
+                .setMessage("You must also revoke the device in the Infra gateway dashboard. This clears the local signing identity.")
+                .setNegativeButton("Cancel",null)
+                .setPositiveButton("Unpair",(d,w)->{new DeviceIdentity(this).clear();refresh();})
+                .show();
         });
         space(14);
 
@@ -94,7 +146,8 @@ public class MainActivity extends Activity {
         label("Only use this agent on your own devices. Keep the session key private. Stop the agent when finished.",12,0xff8397B3,false);
         refresh();
     }
-    @Override protected void onResume(){super.onResume();if(root!=null) refresh();}
+    @Override protected void onResume(){super.onResume();if(root!=null){uiHandler.removeCallbacks(statusPoll);uiHandler.post(statusPoll);}}
+    @Override protected void onPause(){uiHandler.removeCallbacks(statusPoll);super.onPause();}
     @Override protected void onActivityResult(int request,int result,Intent data){
         super.onActivityResult(request,result,data);
         if(request==PICK_FOLDER && result==RESULT_OK && data!=null && data.getData()!=null){
@@ -115,6 +168,12 @@ public class MainActivity extends Activity {
         token.setText(key==null?"":"Session key (private):\n"+key);
         String uri=getSharedPreferences("owner",MODE_PRIVATE).getString("folder",null);
         folder.setText(uri==null?"No shared folder selected":"Shared folder permission granted");
+        if(gatewayStatus!=null){
+          DeviceIdentity ident=new DeviceIdentity(this);
+          gatewayStatus.setText((ident.enrolled()?"Enrolled: "+ident.name():"Not enrolled")
+              +"\nAgent: "+GatewayAgentService.connectionState()
+              +(GatewayAgentService.error().isEmpty()?"":"\n"+GatewayAgentService.error()));
+        }
     }
     private LinearLayout card(){
         LinearLayout l=new LinearLayout(this);

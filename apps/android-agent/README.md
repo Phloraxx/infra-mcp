@@ -55,3 +55,22 @@ ChatGPT → existing Infra v1 Rust MCP gateway ← outbound signed WSS ← Andro
 New functions should use the **existing Rust Wire Protocol v1**, the existing gateway `/enroll`/`/agent` routes and capability-aware tool dispatch. The final direct agent should not require the temporary Oracle `phone-agent` helper or inbound port `8765`.
 
 Read `AGENTS.md` in this folder for integration conventions.
+
+
+## v0.2 signed direct-agent development (2026-10-18)
+
+The Android module now contains a second **development** mode, alongside the v0.1 local HTTP fallback. Its debug application ID is `com.phloraxx.infraphone.dev`, so it can be installed alongside the stable v0.1 package.
+
+Source implemented:
+- Per-installation Ed25519 signing seed encrypted under AndroidKeyStore AES-GCM.
+- Existing gateway one-time `POST /enroll` flow through a user-visible pairing form.
+- Outbound signed WebSocket client for existing Rust `/agent`, challenge/hello/ack, heartbeat, reconnect and stop.
+- Minimal `status` and `system summary` requests; all other operations explicitly unsupported.
+- Dev-only cleartext allowance restricted in the app's URL validator to loopback/Tailscale IPv4 addresses, for an isolated lab gateway. Production uses verified HTTPS/WSS.
+- Rust + Android JVM SHA-256 golden fixture for the exact signed-auth bytes.
+
+**Verification:** Gradle `:app:testDebugUnitTest :app:assembleDebug` passed on Mac; Rust `cargo test -p infra-protocol` passed; v0.2 dev package installed and launched on Android 16 without runtime exceptions. An isolated Rust gateway and SSH/ADB test tunnel were reachable. The secure `/api/enrollments` route rejected requests lacking its bearer credential as expected. **Real phone enrollment and device visibility through MCP have not been verified**; the one-time-code UI automation was not completed. Do not report this as end-to-end complete.
+
+A development user must generate a one-time code from an owner-authorized gateway, enter its URL and code in the dev app, press **Enroll phone**, then **Connect signed agent**. The current debug-only loopback lab address is not a production configuration. For real operation use a valid certificate on an accessible WSS gateway. Do not embed owner credentials in the APK.
+
+The existing v0.1 HTTP service remains as an explicit fallback until direct-agent acceptance. The new signed agent **does not** gain root, ADB, screen access, or arbitrary app data access. Files/transfer, production gateway configuration and end-to-end validation remain next milestones.

@@ -211,3 +211,12 @@ All v1 development remains side-by-side. The deployed Node v0.3 remote-control s
 - Imported the already-built v0.1 Android prototype source into `apps/android-agent/` as a separately buildable Gradle project. Verified historical APK tests: app installed on Android 16 Motorola, local API 401 without bearer and 200 site response, file transfer with traversal denial, and Oracle tailnet reachability. The source itself is not yet wired into Infra Rust agent protocol.
 - Added [Android agent plan](ANDROID_AGENT_PLAN.md), [protocol compatibility adapter](ANDROID_PROTOCOL_ADAPTER.md), and [security & real-device acceptance gates](ANDROID_SECURITY_AND_TESTS.md).
 - First-class Android enrollment and outbound signed WSS **remain unimplemented**; do not infer success from the existing Oracle helper. No live gateway/deployment changes are part of the planning branch.
+
+
+## 2026-10-18 — Android signed-agent P1 prototype built
+
+- Implemented `DeviceIdentity.java` (AndroidKeyStore AES-GCM-wrapped Ed25519 seed, stable identity and signed-message framing), `GatewayEnrollment.java` (one-time code enrollment), `GatewayAgentService.java` (outbound signed `/agent` WebSocket, ping/pong, reconnect, minimal status/system summary), and explicit phone UI controls.
+- Kept the v0.1 local HTTP fallback and installed new debug package as `com.phloraxx.infraphone.dev` alongside stable, not over it. This avoids a destructive installation or live gateway change.
+- Rust protocol and Java tests share a deterministic 118-byte authentication message SHA-256; both toolchain suites passed. Dev APK built and installed on the target phone.
+- Verified isolated Rust test gateway health and local enrollment route authentication. A temporary USB tunnel could reach that test gateway. **Actual enrollment handshake, signed WebSocket session, gateway device registry entry, and ChatGPT `devices`/ `system` call on Android are still unverified.** No live canonical gateway deployment, Cloudflare changes, or user-device bootloader actions performed.
+- Production-ready WSS ingress, permissioned file/transfer support and Android lifecycle acceptance remain open.

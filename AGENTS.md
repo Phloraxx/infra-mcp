@@ -160,3 +160,8 @@ New work must start with:
 - `apps/android-agent/AGENTS.md` (module-specific limitations and workflow)
 
 Use the existing Rust gateway's `/enroll` + `/agent` endpoints and signed Ed25519 protocol; don't create a second MCP server or use the temporary Oracle HTTP bridge as production architecture. Android runs under its app sandbox; unlike desktop agents, it must not advertise generic shell/PTY/process/filesystem capability unless a real separately authorized implementation exists. Never modify production during planning.
+
+
+## Android P1 prototype status (2026-10-18)
+
+`apps/android-agent/` now includes Java `DeviceIdentity`, `GatewayEnrollment` and `GatewayAgentService` for the existing v1 signed protocol. A side-by-side v0.2 development APK compiles and installs. Rust and Android JVM signed-message golden vector tests pass. **Actual signed enrollment and live MCP device discovery have NOT yet passed acceptance.** Keep the legacy local-HTTP route and live gateway unchanged until that acceptance.

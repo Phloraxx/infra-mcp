@@ -587,6 +587,22 @@ pub struct ExecOutput {
 mod tests {
     use super::*;
 
+    #[test]
+    fn android_java_signed_payload_golden() {
+        use sha2::{Digest, Sha256};
+        let mut h = hello();
+        h.device_id = "android-fixture".into();
+        h.agent_instance_id = Uuid::parse_str("00000000-0000-4000-8000-000000000002").unwrap();
+        h.boot_id = "boot-fixture".into();
+        let epoch = Uuid::parse_str("00000000-0000-4000-8000-000000000001").unwrap();
+        let payload = signed_auth_message("signed-nonce", epoch, &h);
+        assert_eq!(payload.len(), 118);
+        assert_eq!(
+            format!("{:x}", Sha256::digest(&payload)),
+            "ee24049221d4c59b6d8da0914704309e01b9d205bc5f18599edccbd34a02783a"
+        );
+    }
+
     fn hello() -> DeviceHello {
         DeviceHello {
             protocol: PROTOCOL_VERSION,

@@ -10,6 +10,11 @@
     <activity android:name=".MainActivity" android:exported="true">
       <intent-filter><action android:name="android.intent.action.MAIN"/><category android:name="android.intent.category.LAUNCHER"/></intent-filter>
     </activity>
+    <service android:name=".GatewayAgentService" android:exported="false"
+       android:foregroundServiceType="specialUse">
+      <property android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
+        android:value="User-initiated outbound secure private Infra gateway session"/>
+    </service>
     <service android:name=".AgentService" android:exported="false"
        android:foregroundServiceType="specialUse">
       <property android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
