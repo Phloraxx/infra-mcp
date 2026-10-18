@@ -31,6 +31,7 @@ public class GatewayAgentService extends Service {
     private volatile boolean authenticated=false;
     private DeviceIdentity identity;
     private Runnable reconnectTask;
+    private AndroidTransfers transfers;
     private final java.util.concurrent.ThreadPoolExecutor work = new java.util.concurrent.ThreadPoolExecutor(
         2,2,0,TimeUnit.MILLISECONDS,new java.util.concurrent.ArrayBlockingQueue<>(8));
     public static boolean isActive(){return active;}
@@ -44,6 +45,8 @@ public class GatewayAgentService extends Service {
         identity=new DeviceIdentity(this);
         if(!identity.enrolled()){state="Not enrolled";stopSelf();return START_NOT_STICKY;}
         createChannel();
+        try { transfers=new AndroidTransfers(this); }
+        catch(Exception e){state="Workspace unavailable";lastError=e.getMessage();stopSelf();return START_NOT_STICKY;}
         PendingIntent stop=PendingIntent.getService(this,88,
             new Intent(this,GatewayAgentService.class).setAction(ACTION_STOP),
             PendingIntent.FLAG_IMMUTABLE|PendingIntent.FLAG_UPDATE_CURRENT);
@@ -62,7 +65,7 @@ public class GatewayAgentService extends Service {
             .readTimeout(0,TimeUnit.MILLISECONDS)
             .pingInterval(15,TimeUnit.SECONDS).build();
         connect();
-        return START_NOT_STICKY;
+        return START_STICKY;
     }
     private void createChannel(){
         if(Build.VERSION.SDK_INT>=26){
@@ -103,10 +106,10 @@ public class GatewayAgentService extends Service {
                         if("auth_challenge".equals(type)){
                             JSONObject h=new JSONObject();
                             h.put("protocol",1).put("device_id",identity.deviceId())
-                             .put("device_name",identity.name()).put("agent_version","0.2.0")
+                             .put("device_name",identity.name()).put("agent_version","0.3.0")
                              .put("platform","android").put("arch",Build.SUPPORTED_ABIS[0])
                              .put("boot_id",boot).put("agent_instance_id",instance)
-                             .put("capabilities",new JSONArray().put("status").put("system").put("files"));
+                             .put("capabilities",new JSONArray().put("status").put("system").put("files").put("transfer").put("exec").put("desktop"));
                             h.put("metadata",new JSONObject().put("android_api",String.valueOf(Build.VERSION.SDK_INT)));
                             hello=h;
                             String signature=identity.sign(body.getString("nonce"),body.getString("gateway_epoch"),
@@ -189,6 +192,23 @@ public class GatewayAgentService extends Service {
             JSONObject body=new AndroidFilesOps(this).handle(fileAction);
             outcome=body==null?unsupported("files."+fileAction.optString("action")):
                 new JSONObject().put("status","ok").put("body",body);
+        }else if("transfer".equals(name)){
+            JSONObject transferAction=op.optJSONObject("action");
+            if(transferAction==null)throw new IllegalArgumentException("Missing transfer action object");
+            JSONObject body=transfers.handle(transferAction);
+            outcome=body==null?unsupported("transfer."+transferAction.optString("action")):
+                    new JSONObject().put("status","ok").put("body",body);
+        }else if("exec".equals(name)){
+            outcome=SenseGuideDevelopment.command(this,op.getString("command"),op.optString("cwd",""));
+        }else if("desktop".equals(name)){
+            JSONObject d=op.optJSONObject("action");
+            if(d==null)throw new IllegalArgumentException("Missing desktop action object");
+            try{
+                JSONObject body=SenseGuideAccessibility.perform(this,d);
+                outcome=new JSONObject().put("status","ok").put("body",body);
+            }catch(UnsupportedOperationException e){
+                outcome=unsupported("desktop."+d.optString("action"));
+            }
         }else outcome=unsupported(name);
         return new JSONObject().put("id",id).put("result",outcome);
     }

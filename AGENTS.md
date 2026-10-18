@@ -169,3 +169,7 @@ Use the existing Rust gateway's `/enroll` + `/agent` endpoints and signed Ed2551
 ## SenseGuide metadata bridge (experimental)
 
 The phone-side receiver `apps/android-agent/.../ImportDiagnosticsActivity.java` is a one-shot, **owner-approved** reader of an explicitly granted SenseGuide diagnostic-report URI, not a system logging API or automatic camera telemetry. Report persists under the app-private workspace and is then retrievable with existing signed `files` RPC. Follow `docs/SENSEGUIDE_DEBUG_BRIDGE.md`, especially permission denial tests and strict size/authority validation. Never commit diagnostic reports, unredacted test data or session tokens.
+
+## Android v0.3 safety gates
+
+When modifying `apps/android-agent`, read `docs/ANDROID_V03_DEVELOPMENT.md`. Always enforce scoped workspace paths and SHA-256 for signed binary transfers. The only installable APK from developer controls is the separately named SenseGuide Diagnostics lab package, and the on-device owner plus Android package installer must confirm; no silent installs. `exec` is allowlisted and **never** a system shell. Accessibility is a user-enabled Android Settings service with separate five-minute on-device grant, restricted to foreground SenseGuide screenshot/tap/back, no background capture, typed text, clipboard or other apps. Reboot autoreconnect is opt-in and subject to OS restrictions. Do not silently enable any privileged permission or infer success from a build without live acceptance.

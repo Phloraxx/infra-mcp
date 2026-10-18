@@ -188,3 +188,16 @@ Full plan: [ANDROID_AGENT_PLAN.md](ANDROID_AGENT_PLAN.md). This section tracks t
 - [x] Build/test Infra Phone Dev and SenseGuide experimental debugging source without changing stable SenseGuide.
 - [ ] Verify the complete phone-UI report export/import and signed MCP `files` retrieval using an actual running test app.
 - [ ] Implement binary transfer and user-confirmed APK installation, plus replay fixtures in SenseGuide.
+
+### Infra Phone v0.3 SenseGuide development (2026-10-18)
+
+- [x] Implement scoped, SHA-256-verified binary `transfer` upload/download with <=128 KiB chunks, retries, cancel and bounds.
+- [x] Implement owner-approved `apks/senseguide-debug.apk` installation intent with package check and standard Android installer confirmation.
+- [x] Implement `exec` as exact allowlisted SenseGuide development operations; **not** general OS shell/Termux.
+- [x] Implement user-enabled Accessibility service, five-minute on-phone consent, foreground-SenseGuide guard, bounded screenshot/tap/back; no clipboard or global app control.
+- [x] Implement opt-in Android boot receiver and START_STICKY recovery; explicit limits apply to locked state and OS background restrictions.
+- [x] Compile v0.3 Android unit tests and debug build locally.
+- [ ] Verify signed transfer roundtrip, app status/request-launch, and installer UX on unlocked phone.
+- [ ] Verify five-minute SenseGuide-only permission screenshot/tap; no capture of other apps.
+- [ ] Validate actual screen-off, mobile/Wi-Fi changes, boot and gateway restart; restore connectivity on user interaction after app update as Android requires.
+- [ ] Investigate optional Termux-backed command environments only with separate consent and owner-controlled containment.

@@ -242,3 +242,9 @@ All v1 development remains side-by-side. The deployed Node v0.3 remote-control s
 - Remaining acceptance: unplugged/mobile-only and Android VPN off, long idle/doze, Wi-Fi/mobile switching, gateway restarts, key revocation, Transfer RPC, SAF permissioned folders, Termux development bridge and optional on-phone-approved screen control.
 
 **Next phase:** prioritize controlled binary transfer and SAF folder actions, then scoped development actions; keep telemetry minimal and all sensitive permissions explicitly owner-initiated.
+
+## 2026-10-18 — Android v0.3 developer extension
+
+Implemented `AndroidTransfers` for signed MCP binary transfer with 128 KiB chunks, 256 MiB max, SHA-256 checks, exact idempotent chunk retries, bounded handles, and app-private `ScopedWorkspace` paths. Added `SenseGuideDevelopment` exact-command allowlist (no OS shell), local owner approval screen for staging/reviewing `io.github.phloraxx.senseguide.lab.bridge` APK, read-only one-file ContentProvider for system installer, and optional Accessibility service constrained to a five-minute locally activated SenseGuide foreground session. Boot receiver is opt-in and the signed foreground service requests Android sticky recovery. Version 0.3.0 preserves the separate `.dev` app ID and existing enrollment.
+
+Local Android `:app:testDebugUnitTest :app:assembleDebug --offline` succeeded after fixing a lambda variable collision and an Accessibility description resource name. Debug v0.3 APK installed on the Motorola. **Hardware RPC v0.3 acceptance remains pending** because Android's lock-screen/background foreground-service policy blocked restarting the gateway agent while locked. Do not claim the new transfer/desktop operations worked live until independently verified. See [developer guide](ANDROID_V03_DEVELOPMENT.md). Stable SenseGuide and the existing Infra Phone enrollment are not removed.

@@ -56,7 +56,7 @@ public class MainActivity extends Activity {
         space(14);
 
         LinearLayout gateway=card();
-        labelIn(gateway,"Direct Infra-MCP connection (v0.2)",18,fg,true);
+        labelIn(gateway,"Direct Infra-MCP connection (v0.3)",18,fg,true);
         labelIn(gateway,"Enroll this Android phone as a separate signed device. For production, enter the trusted HTTPS gateway address.",13,0xffA8B9D4,false);
         gatewayInput=new EditText(this);
         gatewayInput.setSingleLine(true);gatewayInput.setTextColor(fg);gatewayInput.setHintTextColor(0xff8A9DBB);
@@ -99,9 +99,26 @@ public class MainActivity extends Activity {
                 .setTitle("Unpair this device locally?")
                 .setMessage("You must also revoke the device in the Infra gateway dashboard. This clears the local signing identity.")
                 .setNegativeButton("Cancel",null)
-                .setPositiveButton("Unpair",(d,w)->{new DeviceIdentity(this).clear();refresh();})
+                .setPositiveButton("Unpair",(d,w)->{
+                    getSharedPreferences("owner",MODE_PRIVATE).edit().remove("reconnect_boot").apply();
+                    getSharedPreferences("dev-control",MODE_PRIVATE).edit().remove("until").apply();
+                    new DeviceIdentity(this).clear();refresh();})
                 .show();
         });
+        space(14);
+
+        LinearLayout advanced=card();
+        labelIn(advanced,"SenseGuide development controls",18,fg,true);
+        labelIn(advanced,"Signed transfers, staged APK review, consent-based app launch and optional SenseGuide-only Accessibility controls. Installations are never silent.",13,0xffA8B9D4,false);
+        button(advanced,"Open developer controls",0xff3365E8,()->
+            startActivity(new Intent(this,DevToolsActivity.class)));
+        CheckBox reboot=new CheckBox(this);
+        reboot.setText("Reconnect signed gateway after phone reboot (opt-in)");
+        reboot.setTextColor(fg);
+        reboot.setChecked(getSharedPreferences("owner",MODE_PRIVATE).getBoolean("reconnect_boot",false));
+        reboot.setOnCheckedChangeListener((checkbox,enabled)->
+            getSharedPreferences("owner",MODE_PRIVATE).edit().putBoolean("reconnect_boot",enabled).apply());
+        advanced.addView(reboot);
         space(14);
 
         LinearLayout controls = card();

@@ -4,6 +4,8 @@
   <uses-permission android:name="android.permission.FOREGROUND_SERVICE"/>
   <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE"/>
   <uses-permission android:name="android.permission.POST_NOTIFICATIONS"/>
+  <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED"/>
+  <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES"/>
   <queries><intent><action android:name="android.intent.action.MAIN"/><category android:name="android.intent.category.LAUNCHER"/></intent></queries>
   <application android:label="Infra Phone" android:theme="@android:style/Theme.Material.NoActionBar"
     android:usesCleartextTraffic="false" android:allowBackup="false">
@@ -17,6 +19,20 @@
         <data android:mimeType="application/x-ndjson"/>
       </intent-filter>
     </activity>
+    <activity android:name=".DevToolsActivity" android:exported="false"/>
+    <provider android:name=".StagedApkProvider"
+      android:authorities="${applicationId}.stagedapk"
+      android:exported="false" android:grantUriPermissions="true"/>
+    <receiver android:name=".BootConnectReceiver" android:exported="false">
+      <intent-filter><action android:name="android.intent.action.BOOT_COMPLETED"/></intent-filter>
+    </receiver>
+    <service android:name=".SenseGuideAccessibility"
+       android:permission="android.permission.BIND_ACCESSIBILITY_SERVICE"
+       android:exported="true" android:label="Infra Phone: SenseGuide-only controls">
+      <intent-filter><action android:name="android.accessibilityservice.AccessibilityService"/></intent-filter>
+      <meta-data android:name="android.accessibilityservice"
+        android:resource="@xml/senseguide_accessibility"/>
+    </service>
     <service android:name=".GatewayAgentService" android:exported="false"
        android:foregroundServiceType="specialUse">
       <property android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
