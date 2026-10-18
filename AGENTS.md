@@ -165,3 +165,7 @@ Use the existing Rust gateway's `/enroll` + `/agent` endpoints and signed Ed2551
 ## Android P1 prototype status (2026-10-18)
 
 `apps/android-agent/` now includes Java `DeviceIdentity`, `GatewayEnrollment` and `GatewayAgentService` for the existing v1 signed protocol. A side-by-side v0.2 development APK compiles and installs. Rust and Android JVM signed-message golden vector tests pass. **Actual signed enrollment and live MCP device discovery have NOT yet passed acceptance.** Keep the legacy local-HTTP route and live gateway unchanged until that acceptance.
+
+## SenseGuide metadata bridge (experimental)
+
+The phone-side receiver `apps/android-agent/.../ImportDiagnosticsActivity.java` is a one-shot, **owner-approved** reader of an explicitly granted SenseGuide diagnostic-report URI, not a system logging API or automatic camera telemetry. Report persists under the app-private workspace and is then retrievable with existing signed `files` RPC. Follow `docs/SENSEGUIDE_DEBUG_BRIDGE.md`, especially permission denial tests and strict size/authority validation. Never commit diagnostic reports, unredacted test data or session tokens.

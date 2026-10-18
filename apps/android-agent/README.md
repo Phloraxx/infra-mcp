@@ -111,3 +111,9 @@ Verified live through MCP (not Oracle helper or ADB for RPC):
 Public Cloudflare hostname was verified to return healthy gateway and WebSocket upgrade, with unauthenticated enrollment rejected. Signed connection is independent of the Tailscale-only test proxy (which was removed). No change to live Cloudflare rules, no extra public port and no root/bootloader/debug dependency for the signed RPC path.
 
 **Scope caveat:** The current app still exposes its legacy manually started local/Tailscale-only HTTP server as v0.1 fallback; signed direct-agent RPC needs neither that listener nor USB/ADB. Mobile-only operation with VPN disabled and long idle/reconnect/revocation are still pending tests. This is a functional owner-enrolled development APK, not a production security-hardened agent or unrestricted ADB replacement.
+
+## SenseGuide debug import (opt-in)
+
+The Android dev app now has `ImportDiagnosticsActivity`: SenseGuide can send a **one-time, explicit URI grant** for its bounded metadata-only JSONL report. The user must tap **Import report** on their phone; declining does not copy anything. Only the expected `senseguide.debug.v1` schema, fixed allowed SenseGuide `content://` provider authorities, and <=64 KiB files are accepted. Reports are written to private `workspace/senseguide/reports/`; the signed Infra-MCP `files` tool can then list/read/hash them.
+
+This does not confer system log access, general SenseGuide storage access, live video/microphone access, app installation privileges, or remote shell. See [diagnostic bridge security and acceptance](../../docs/SENSEGUIDE_DEBUG_BRIDGE.md).

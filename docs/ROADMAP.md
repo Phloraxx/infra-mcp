@@ -180,3 +180,11 @@ Full plan: [ANDROID_AGENT_PLAN.md](ANDROID_AGENT_PLAN.md). This section tracks t
 - [ ] Implement signed `transfer`, user-approved SAF folder access, better diagnostics, CI Android device tests.
 - [ ] Decommission old per-session bearer HTTP helper and inbound local/tailnet listener after separate migration signoff.
 - [ ] Explore Termux sandbox and explicit Accessibility/MediaProjection controls separately.
+
+### SenseGuide diagnostic bridge (2026-10-18)
+
+- [x] Add a user-approved import Activity in Infra Phone Dev for a single bounded SenseGuide JSONL report.
+- [x] Require trusted SenseGuide provider, one-time URI read grant, explicit on-device Import confirmation, 64 KiB cap and valid report schema.
+- [x] Build/test Infra Phone Dev and SenseGuide experimental debugging source without changing stable SenseGuide.
+- [ ] Verify the complete phone-UI report export/import and signed MCP `files` retrieval using an actual running test app.
+- [ ] Implement binary transfer and user-confirmed APK installation, plus replay fixtures in SenseGuide.

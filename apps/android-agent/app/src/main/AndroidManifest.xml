@@ -10,6 +10,13 @@
     <activity android:name=".MainActivity" android:exported="true">
       <intent-filter><action android:name="android.intent.action.MAIN"/><category android:name="android.intent.category.LAUNCHER"/></intent-filter>
     </activity>
+    <activity android:name=".ImportDiagnosticsActivity" android:exported="true">
+      <intent-filter>
+        <action android:name="io.github.phloraxx.infraphone.IMPORT_DIAGNOSTICS"/>
+        <category android:name="android.intent.category.DEFAULT"/>
+        <data android:mimeType="application/x-ndjson"/>
+      </intent-filter>
+    </activity>
     <service android:name=".GatewayAgentService" android:exported="false"
        android:foregroundServiceType="specialUse">
       <property android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
