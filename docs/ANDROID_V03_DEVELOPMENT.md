@@ -47,3 +47,16 @@ The APK is a developer preview. Do not claim autonomous obstacle safety, generic
 - Completed transfer handles were cancelled/cleared; cancelling a completed transfer does not delete the committed destination file. The synthetic smoke-test file may remain in `infra-smoke/` and can be deleted during later scoped cleanup.
 
 **Remaining acceptance:** APK review screen, package match and system installer confirmation on-phone; Android Accessibility service enabled by owner and five-minute SenseGuide-only screen session; screen-off/Doze and network handoff and reboot recovery. No change to SenseGuide's actual camera/depth/voice/haptic logic. A request with default nonempty `cwd` and bounded transfer-handle cleanup ergonomics are implementation polish.
+
+## 2026-10-18 — Live owner-enabled APK/Accessibility acceptance
+
+After owner completed the phone-side setup, Infra `devices` confirmed Android v0.3.0 **online** at connection generation 17, advertising `status`, `system`, `files`, `transfer`, `exec`, `desktop`.
+- Signed `exec("senseguide status", cwd="")` succeeded. Stable `io.github.phloraxx.senseguide.lab` and separate `io.github.phloraxx.senseguide.lab.bridge` both still report version 0.5.5. The staged Diagnostics APK is 12,451,391 bytes. Omitting `cwd` with the current MCP wrapper may send an unsupported default; passing `cwd=""` fixes this and the correct error path was observed for other values.
+- Android package metadata confirmed Diagnostics latest `lastUpdateTime=2026-10-18 23:17:59`, `firstInstallTime=2026-10-18 20:44:40` (device-local), establishing that the separate developer package was updated on-device without uninstalling it.
+- `desktop.permissions` confirmed Accessibility service enabled and separate five-minute on-device screen-control consent active. Initially `foreground_senseguide=false`, correctly distinguishing the foreground-app gate.
+- Requested `senseguide request-launch` over signed `exec`; a local approval notification was posted, without bypassing the owner. After foreground changed to SenseGuide Diagnostics, `desktop.permissions` confirmed `foreground_senseguide=true`.
+- Signed `desktop.screenshot` returned a valid `image/jpeg` image (431 × 960, downsized) and signed `desktop.click(x=600,y=170,button="left")` returned `ok=true` on a static/noninteractive SenseGuide title, rather than a test-warning button. No images were persisted or committed; this test does **not** establish navigation safety.
+- `transfer.list` and workspace `files.list` succeeded. The previously verified 132,100-byte synthetic file roundtrip and 12,451,391-byte signed APK stage are documented in the prior acceptance checkpoint. No new install or file mutation was requested during these UI tests.
+- **Not yet checked**: denial outside SenseGuide with an actually active five-minute lease and untrusted app in foreground; expiry at five minutes, screen-off/Doze/battery kill, Wi-Fi/mobile transition, fresh reboot and foreground-service relaunch. Do not claim the user-enabled Accessibility service is appropriate outside a controlled testing session. Manually disable it when not needed.
+
+No generic shell, ADB-equivalent privileged control, background recording, silent APK install or unapproved application tapping was enabled.
