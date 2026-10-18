@@ -29,11 +29,19 @@ jobs:
           java-version: '21'
           cache: gradle
           cache-dependency-path: apps/android-agent/**/*.gradle*
-      - uses: android-actions/setup-android@v3
-      - name: Install Android SDK
+      - name: Install Android SDK components
+        shell: bash
         run: |
-          yes | sdkmanager --licenses >/dev/null || true
-          sdkmanager "platforms;android-35" "build-tools;35.0.0"
+          set -e
+          SDK="${ANDROID_SDK_ROOT:-${ANDROID_HOME:-/usr/local/lib/android/sdk}}"
+          echo "ANDROID_HOME=$SDK" >> "$GITHUB_ENV"
+          SM="$(command -v sdkmanager || true)"
+          if [ -z "$SM" ]; then
+            SM="$(find "$SDK/cmdline-tools" -name sdkmanager -type f | head -n 1)"
+          fi
+          test -x "$SM"
+          yes | "$SM" --sdk_root="$SDK" --licenses >/dev/null || true
+          "$SM" --sdk_root="$SDK" "platforms;android-35" "build-tools;35.0.0"
       - name: Unit tests and debug APK build
         run: ./gradlew :app:testDebugUnitTest :app:assembleDebug --no-daemon --console=plain
       - name: Upload disposable development APK
