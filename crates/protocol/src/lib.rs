@@ -588,6 +588,39 @@ mod tests {
     use super::*;
 
     #[test]
+    fn android_files_operation_uses_nested_action_json() {
+        let request = AgentRequest {
+            id: Uuid::parse_str("11111111-1111-4111-8111-111111111111").unwrap(),
+            operation: AgentOperation::Files(FileRequest {
+                action: FileAction::List {
+                    path: String::from("site"),
+                },
+            }),
+        };
+        let json = serde_json::to_value(&request).unwrap();
+        assert_eq!(json["operation"]["op"], "files");
+        assert_eq!(json["operation"]["action"]["action"], "list");
+        assert_eq!(json["operation"]["action"]["path"], "site");
+        let decoded: AgentRequest = serde_json::from_value(json).unwrap();
+        assert_eq!(decoded, request);
+    }
+
+    #[test]
+    fn android_system_operation_uses_nested_action_json() {
+        let request = AgentRequest {
+            id: Uuid::new_v4(),
+            operation: AgentOperation::System(SystemRequest {
+                action: SystemAction::Summary,
+            }),
+        };
+        let json = serde_json::to_value(&request).unwrap();
+        assert_eq!(json["operation"]["op"], "system");
+        assert_eq!(json["operation"]["action"]["action"], "summary");
+        let decoded: AgentRequest = serde_json::from_value(json).unwrap();
+        assert_eq!(decoded, request);
+    }
+
+    #[test]
     fn android_java_signed_payload_golden() {
         use sha2::{Digest, Sha256};
         let mut h = hello();

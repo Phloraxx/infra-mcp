@@ -84,3 +84,17 @@ Send relative paths such as `site/index.html`; use `""` to list the workspace ro
 File operations run in a bounded Android worker pool; unsuccessful authorized operations return a structured `failed` result rather than closing the signed connection. New `ScopedWorkspaceTest` exercises traversal and symlink denial in JVM tests. Gradle `:app:testDebugUnitTest :app:assembleDebug` passed on Mac after this change.
 
 **End-to-end caveat:** The automated entry of the one-time enrollment credential did not complete, so these operations are build-tested but **not yet validated through a live phone-to-MCP session**. Existing v0.1 HTTP fallback remains separate.
+
+### Rust wire-shape compatibility correction
+
+The Rust internally tagged `AgentOperation` wraps `FileRequest` and `SystemRequest`; the Android JSON dispatcher must therefore read `operation.action.action`, **not** `operation.action` as a string. Examples:
+
+```json
+{"op":"system","action":{"action":"summary"}}
+```
+
+```json
+{"op":"files","action":{"action":"list","path":"site"}}
+```
+
+Protocol unit tests in `crates/protocol` enforce these exact shapes; Android dispatcher now reads the nested object for both. Keep them aligned when adding operations.

@@ -226,3 +226,5 @@ All v1 development remains side-by-side. The deployed Node v0.3 remote-control s
 - Implemented a bounded worker pool for signed request handling and structured failure replies, plus limited `files` RPC using `AndroidFilesOps` and app-private path containment via `ScopedWorkspace`.
 - Supported list/stat/read/hash/mkdir/write/exact_edit, with 1 MiB inline limits and no destructive delete. Symlinks and traversal cannot escape the app workspace. Tests for escaping via `..` and a symlink are included.
 - Android JVM unit tests and Gradle debug build passed locally after the addition. **Live signed phone enrollment and MCP file roundtrip are not yet verified.**
+
+- Found and corrected a Rust/Android request encoding mismatch: `AgentOperation::System` and `AgentOperation::Files` both contain nested tagged `action` objects. Added Rust roundtrip/JSON-shape tests for the exact objects, and corrected Android dispatch for both.

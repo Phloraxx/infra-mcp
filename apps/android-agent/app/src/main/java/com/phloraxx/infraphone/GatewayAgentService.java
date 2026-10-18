@@ -161,7 +161,9 @@ public class GatewayAgentService extends Service {
             outcome=new JSONObject().put("status","ok")
                 .put("body",new JSONObject().put("protocol",1).put("pid",android.os.Process.myPid()));
         }else if("system".equals(name)){
-            String action=op.optString("action");
+            JSONObject systemAction=op.optJSONObject("action");
+            if(systemAction==null)throw new IllegalArgumentException("Missing system action object");
+            String action=systemAction.optString("action");
             if("summary".equals(action)){
                 StatFs stat=new StatFs(getFilesDir().getAbsolutePath());
                 JSONObject details=new JSONObject();
@@ -182,8 +184,10 @@ public class GatewayAgentService extends Service {
                 outcome=new JSONObject().put("status","ok").put("body",details);
             }else outcome=unsupported("system."+action);
         }else if("files".equals(name)){
-            JSONObject body=new AndroidFilesOps(this).handle(op);
-            outcome=body==null?unsupported("files."+op.optString("action")):
+            JSONObject fileAction=op.optJSONObject("action");
+            if(fileAction==null)throw new IllegalArgumentException("Missing files action object");
+            JSONObject body=new AndroidFilesOps(this).handle(fileAction);
+            outcome=body==null?unsupported("files."+fileAction.optString("action")):
                 new JSONObject().put("status","ok").put("body",body);
         }else outcome=unsupported(name);
         return new JSONObject().put("id",id).put("result",outcome);
