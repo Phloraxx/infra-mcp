@@ -1,3 +1,5 @@
+> **Current primary first-run direction (2026-10-24):** [ONBOARDING_REDESIGN.md](ONBOARDING_REDESIGN.md) supersedes the script/code/name-entry first-run flow below. This page retains the earlier historical foundation and installer requirements.
+
 # Installation and onboarding UX
 
 ## Desired first-run flow

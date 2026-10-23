@@ -1,3 +1,5 @@
+> **Owner-feedback update (2026-10-24):** the primary onboarding, device naming and Windows installer plan is [ONBOARDING_REDESIGN.md](ONBOARDING_REDESIGN.md). Treat its signed installer + device-initiated approval as authoritative over the previous long bootstrap command/code flow below.
+
 # Infra v1 — next implementation plan
 Decision draft: 23 October 2026. Read [CURRENT_REALITY.md](CURRENT_REALITY.md) first. **Implement incremental changes, not a replacement architecture.** This file replaces the ambiguous "future" portions of older roadmap documents as the short-term work order.
 

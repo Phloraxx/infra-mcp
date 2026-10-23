@@ -115,3 +115,16 @@ Do not conflate an OS capability advertisement with runtime permission, or a dis
 **Status:** Code exists in feature branch; release trust root/first-install bootstrap incomplete.
 
 Feature code can verify Ed25519-signed update manifests and asset hashes, but neither private release-signing key provisioning nor signed bootstrap authenticity and downgrade protection are complete. Public distribution and unattended update are **not** ready until their own security and OS acceptance gates pass. See [RELEASE_SIGNING.md](RELEASE_SIGNING.md).
+
+
+## D015 — Rebuild first-run onboarding, preserve native execution core (2026-10-24)
+
+**Status:** Product direction proposed for implementation; not deployed.
+
+The current dashboard name field, one-time code before installation, multi-flag PowerShell command, and "installed" message without actual signed online readiness fail the expected nontechnical owner journey. The verified Windows trial hit a null-valued script download and an unreachable installer host. Further first-run patches cannot repair the basic workflow shape.
+
+Use a **signed per-user Windows MSI** as the first supported primary installation surface (after a real release/publisher trust root exists), plus the existing Rust CLI to open a browser-based, device-initiated, owner-approved pairing flow. Detect OS hostname locally, allow renaming as a separate server-side alias later. Keep a text bootstrap only under Advanced/headless. Stop claiming completion before signed agent handshake and status probe. Pairing must resume without reinstall.
+
+Preserve existing Rust gateway, Ed25519 identities, SQLite, MCP and PTY/job/transfer logic. Do **not** add Electron/Tauri, a second gateway, or a new always-running onboarding service. Pair approval lives in the existing gateway and SQLite; the CLI can temporarily handle pending enrollment and open the browser. Implement the independent local verification code with the lightest safe UI proven by a Windows prototype, not an elevated MSI custom dialog by assumption.
+
+Detailed protocol, threat model, UX storyboard, migration and acceptance tests: [ONBOARDING_REDESIGN.md](ONBOARDING_REDESIGN.md).
