@@ -6,8 +6,8 @@ android {
         applicationId 'com.phloraxx.infraphone'
         minSdk 28
         targetSdk 35
-        versionCode 4
-        versionName '0.3.1'
+        versionCode 5
+        versionName '0.3.2'
     }
     compileOptions {
         sourceCompatibility JavaVersion.VERSION_17
@@ -20,5 +20,7 @@ dependencies {
   implementation 'org.nanohttpd:nanohttpd:2.3.1'
   implementation 'com.squareup.okhttp3:okhttp:4.12.0'
   implementation 'org.bouncycastle:bcprov-jdk18on:1.82'
+  // Development-only local pairing probe; NOT exposed via the signed MCP agent.
+  debugImplementation('com.github.MuntashirAkon:libadb-android:3.1.1') { exclude group: 'org.bouncycastle' }
   testImplementation 'junit:junit:4.13.2'
 }
