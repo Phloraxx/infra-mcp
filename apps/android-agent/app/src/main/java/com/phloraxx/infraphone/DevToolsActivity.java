@@ -37,13 +37,14 @@ public final class DevToolsActivity extends Activity {
                 approve("Install "+info+"? Android will separately ask for installation approval.",this::install);
             }catch(Exception e){status.setText(e.getMessage());}
         });
+        button("Review staged Infra Phone update",this::reviewInfraUpdate);
         button("Accessibility settings (optional screen control)",()->{
             startActivity(new Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS));
         });
-        button("Enable 5-minute SenseGuide-only screen control",()->{
+        button("Enable 1-hour SenseGuide-only screen control",()->{
             new AlertDialog.Builder(this)
                 .setTitle("Enable restricted remote screen controls?")
-                .setMessage("Only while SenseGuide is foreground. Remote screenshots/taps can reveal camera views. Requires explicitly enabled Android Accessibility service. Expires after 5 minutes; disable from this screen anytime.")
+                .setMessage("Only while SenseGuide is foreground. Remote screenshots/taps can reveal camera views. Requires explicitly enabled Android Accessibility service. Expires after 1 hour; disable from this screen anytime.")
                 .setNegativeButton("Cancel",null)
                 .setPositiveButton("Enable",(d,w)->{ScreenConsent.grant(this);refresh();})
                 .show();
@@ -53,6 +54,8 @@ public final class DevToolsActivity extends Activity {
             refresh();
         });
         setContentView(layout);refresh();
+        if(InfraSelfUpdate.ACTION_REVIEW.equals(getIntent().getAction()))
+            layout.post(this::reviewInfraUpdate);
     }
     private TextView title(String t,int size) {
         TextView text=new TextView(this);text.setText(t);text.setTextColor(Color.WHITE);
@@ -71,8 +74,26 @@ public final class DevToolsActivity extends Activity {
     private void refresh(){
         try {
             status.setText(SenseGuideDevelopment.status(this).toString(2)
-                +"\nScreen control: "+(ScreenConsent.enabled(this)?"5-minute consent active":"disabled"));
+                +"\nScreen control: "+(ScreenConsent.enabled(this)?"1-hour consent active":"disabled"));
         }catch(Exception e){status.setText(e.getMessage());}
+    }
+    private void reviewInfraUpdate() {
+        try {
+            String info=InfraSelfUpdate.description(this);
+            approve("Install this Infra Phone update? "+info+". Android will ask you to confirm the installation.",
+                this::installInfraUpdate);
+        }catch(Exception e){status.setText("Update unavailable: "+e.getMessage());}
+    }
+    private void installInfraUpdate() {
+        try {
+            if(Build.VERSION.SDK_INT>=26&&!getPackageManager().canRequestPackageInstalls()){
+                status.setText("Allow installs from Infra Phone, then return and tap Review staged Infra Phone update.");
+                startActivity(new Intent(Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES,
+                    Uri.parse("package:"+getPackageName())));
+                return;
+            }
+            startActivity(InfraSelfUpdate.installIntent(this));
+        }catch(Exception e){status.setText("Update failed: "+e.getMessage());}
     }
     private void install() {
         try{

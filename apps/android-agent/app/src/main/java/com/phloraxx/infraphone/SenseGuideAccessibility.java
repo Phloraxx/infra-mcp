@@ -17,7 +17,7 @@ import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 
 /**
- * Explicit Android Settings grant + foreground SenseGuide window + locally timed five-minute lease.
+ * Explicit Android Settings grant + foreground SenseGuide window + locally timed one-hour lease.
  * Never interacts with installer/settings/other apps and never reads clipboard or types arbitrary text.
  */
 public final class SenseGuideAccessibility extends AccessibilityService {
@@ -44,7 +44,7 @@ public final class SenseGuideAccessibility extends AccessibilityService {
             .put("requires_owner_activation",true);
         SenseGuideAccessibility svc=instance;
         if(svc==null||!svc.authorized())throw new SecurityException(
-            "Enable Accessibility manually, open SenseGuide, and grant 5-minute consent in Infra Phone");
+            "Enable Accessibility manually, open SenseGuide, and grant 1-hour consent in Infra Phone");
         if("screenshot".equals(kind))return svc.screenshot(op);
         if("click".equals(kind))return svc.click(op);
         if("key".equals(kind) && "back".equalsIgnoreCase(op.optString("key"))

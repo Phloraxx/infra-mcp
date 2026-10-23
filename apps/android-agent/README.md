@@ -1,6 +1,6 @@
 # Infra Phone — Android companion
 
-**Current status: Infra Phone Dev v0.3.0 is built, installed and live-verified as a first-class signed Android Infra-MCP agent.** It supports scoped workspace files, signed binary transfer, restricted SenseGuide commands, owner-approved APK installation, and temporary SenseGuide-only Accessibility controls. See **[Android current status](../../docs/ANDROID_CURRENT_STATUS.md)** for the authoritative acceptance matrix.
+**Verified baseline: Infra Phone Dev v0.3.0 was installed and live-verified on 2026-10-18 as a first-class signed Android Infra-MCP agent.** A newer v0.3.1 APK with one-hour SenseGuide consent and owner-approved Infra Phone self-updating was built, but on-phone installation/verification must be checked separately. It supports scoped workspace files, signed binary transfer, restricted SenseGuide commands, owner-approved APK installation, and temporary SenseGuide-only Accessibility controls. See **[Android current status](../../docs/ANDROID_CURRENT_STATUS.md)** for the authoritative acceptance matrix.
 
 The following v0.1 and v0.2 sections are **historical checkpoints**. Their "not implemented" language describes earlier builds, not current v0.3 functionality. The legacy v0.1 local HTTP fallback remains separate; signed RPC needs no inbound listener.
 
@@ -125,3 +125,14 @@ This does not confer system log access, general SenseGuide storage access, live 
 Debug app v0.3.0 adds actual signed `transfer` (bounded binary upload/download, SHA-256 and retry checks), explicit owner-reviewed staged APK installation (only `io.github.phloraxx.senseguide.lab.bridge`), `exec` **allowlist** (help, status, workspace, request-launch, request-install), opt-in 5-minute **SenseGuide-only** Accessibility screenshot/tap/back, and optionally reconnect-on-boot / Android START_STICKY foreground service recovery. User permission requirements mean this is **not** silent installation or a full terminal, general purpose remote control, root/ADB replacement, nor a guarantee of reboot persistence.
 
 Open Infra Phone Dev → **Open developer controls** to review the staged APK, launch SenseGuide Diagnostics, open Accessibility settings, grant/revoke the timed session, or inspect status. Binary staging path for SenseGuide builds: `apks/senseguide-debug.apk`. The Android OS still requires owner confirmation to install. Do not uninstall the dev package or lose its enrolled Ed25519 identity. Detailed design and verification steps: [v0.3 developer guide](../../docs/ANDROID_V03_DEVELOPMENT.md).
+
+
+## Infra Phone self-update (v0.3.1)
+
+Infra Phone can request an **owner-approved update of itself**, without ADB once this version is installed.
+
+1. Stage the matching signed APK through MCP `transfer` at `apks/infra-phone-update.apk`, including SHA-256.
+2. Run `infra update status` to check the staged package or `infra request-update` for an owner-review notification.
+3. On the phone, choose **Developer controls and updates → Review staged Infra Phone update**, approve the review and then the Android installer dialog. If required, allow app installations from this source and review again.
+
+The staged package must match the app package identifier and installed signing certificate(s), and must not downgrade the version code. No silent installs. The initial update that introduces this feature must be installed by the owner/ADB first. Keep the same release signing identity; never uninstall to bypass certificate checks. This is v0.3.1 source/build behavior, **not proof of live on-phone installation**.
