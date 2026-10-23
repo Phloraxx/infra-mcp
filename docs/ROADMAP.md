@@ -1,3 +1,5 @@
+> **Canonical next work (2026-10-23):** [NEXT_STEPS.md](NEXT_STEPS.md), grounded in [CURRENT_REALITY.md](CURRENT_REALITY.md). The historical checkboxes below are retained for audit, not as a promise of production readiness.
+
 # Infra v1 roadmap
 
 The roadmap is ordered to produce useful capability early while keeping the working v0.3 deployment available as fallback. Checked items mean the implementation exists in this repository; platform reliability still needs the acceptance tests in `RELIABILITY_UX_TESTS.md` before cutover.

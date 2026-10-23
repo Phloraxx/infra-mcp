@@ -1,3 +1,5 @@
+> **Canonical 2026-10-23 architecture decision:** [CURRENT_REALITY.md](CURRENT_REALITY.md) and [NEXT_STEPS.md](NEXT_STEPS.md). Current development targets outbound verified public WSS on 443 with no mandatory VPN, via a loopback Rust origin and existing HTTPS ingress. Older future-transport discussion below is aspirational, not a new mandatory implementation.
+
 # Infra v1 architecture
 
 ## 1. Goal

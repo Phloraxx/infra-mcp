@@ -91,3 +91,27 @@ Implement outbound Android `wss://.../agent` using Infra's existing signed Ed255
 **Tradeoffs:** maintain a small cross-language wire adapter + golden tests instead of introducing Rust/JNI packaging complexity now; rely on Android OS/background limits instead of promising persistent availability; use per-device strong signing identity rather than perpetual bearer token; use user's SAF selection instead of blanket storage privileges.
 
 See [ANDROID_AGENT_PLAN.md](ANDROID_AGENT_PLAN.md), [ANDROID_PROTOCOL_ADAPTER.md](ANDROID_PROTOCOL_ADAPTER.md) and [ANDROID_SECURITY_AND_TESTS.md](ANDROID_SECURITY_AND_TESTS.md).
+
+## D012 — Public outbound WSS with no required VPN (2026-10-23)
+
+**Status:** Preferred staging experiment; production cutover not approved.
+
+Keep the Rust gateway, existing signed agent protocol and SQLite. A public HTTPS/WSS hostname on port 443 terminates at an existing gateway ingress, with the Rust gateway bound to loopback, while native/Android devices make outbound signed WSS connections. Default enrollment must not require Tailscale or an inbound port on devices.
+
+First test the existing Cloudflare Tunnel. It already exists, supports WebSockets, and avoids a new public origin listener. Benchmark against an existing direct HTTPS reverse proxy if the edge dominates warmed operations or causes unacceptable reconnect churn. Tailscale remains an optional recovery/maintenance path. Neither Cloudflare Access cookie challenges nor broad anonymous MCP permissions may be added to the signed agent path.
+
+Do not replace with QUIC/WebRTC, run a new persistent relay service, or change current production endpoints before staging/rollback acceptance. See [CURRENT_REALITY.md](CURRENT_REALITY.md) and [NEXT_STEPS.md](NEXT_STEPS.md).
+
+## D013 — UX and observability before another rewrite (2026-10-23)
+
+**Status:** Locked direction.
+
+One pairing flow, one unique human-readable device alias, actionable diagnostic states, structured errors, bounded outputs and resumable handles. Avoid a new SPA/runtime, a tray app, and extra tool families unless measured model/tool performance requires them. Use existing Rust tracing, SQLite, native agents and the embedded dashboard.
+
+Do not conflate an OS capability advertisement with runtime permission, or a disconnected client with a remotely repairable process. Treat `outcome_unknown` as a first-class UX state that blocks blind mutation retries.
+
+## D014 — Signed updates are a staged security feature (2026-10-23)
+
+**Status:** Code exists in feature branch; release trust root/first-install bootstrap incomplete.
+
+Feature code can verify Ed25519-signed update manifests and asset hashes, but neither private release-signing key provisioning nor signed bootstrap authenticity and downgrade protection are complete. Public distribution and unattended update are **not** ready until their own security and OS acceptance gates pass. See [RELEASE_SIGNING.md](RELEASE_SIGNING.md).

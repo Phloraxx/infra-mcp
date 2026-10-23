@@ -6,6 +6,12 @@ The product goal is not to be a thin SSH wrapper or a clone of Desktop Commander
 
 > **Current status:** **Infra v1 is actively implemented in Rust alongside the working v0.3 deployment.** The Rust control plane now covers signed device enrollment/authentication, persistent SQLite state/audit metadata, MCP `devices`/`exec`/`files`/`search`/`processes`/`jobs`/`terminal`/`transfer` plus structured `system`/`network`/`services`/`containers`/`git`, durable workers and PTYs, resumable binary transfer, native installers/startup adapters, `infra` status/doctor/repair commands, and a live embedded dashboard foundation. The live v0.3 runtime remains untouched until the benchmark/cutover criteria are met.
 
+## Read this first (23 October 2026)
+
+The current-state review and implementation plan are in [docs/CURRENT_REALITY.md](docs/CURRENT_REALITY.md) and [docs/NEXT_STEPS.md](docs/NEXT_STEPS.md).
+
+**Next direction:** keep the existing Rust gateway, SQLite, outbound authenticated agents, and Android service. Make Tailscale optional rather than required: a private loopback gateway behind an existing HTTPS ingress, signed agents connecting over public `wss://` on 443, tested OAuth for MCP, and smooth installation/recovery. Measure persistent-connection latency and actual failures before introducing another transport or rewriting the UI. The feature branch is not production, and old fallback services stay until acceptance.
+
 ## Android companion — Infra Phone v0.3
 
 The **Motorola Edge 60 Stylus** is enrolled as a first-class Android device over the existing signed Infra-MCP gateway. Live-verified v0.3 capabilities include scoped files, SHA-256-checked binary transfers, restricted SenseGuide development commands, user-reviewed APK installation and temporary, owner-enabled SenseGuide-only screenshot/tap access.

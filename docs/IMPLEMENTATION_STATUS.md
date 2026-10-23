@@ -1,3 +1,5 @@
+> **Time-sensitive notice:** this document contains dated engineering snapshots and deliberately retains historical claims. For current code-vs-production status and next priorities use [CURRENT_REALITY.md](CURRENT_REALITY.md) and [NEXT_STEPS.md](NEXT_STEPS.md). In particular the working Rust implementation, Android signed agent and OAuth routes supersede some early “pending” assertions below.
+
 # Infra v1 implementation status
 
 This file records what exists in code. Product intent remains in the other design documents.
