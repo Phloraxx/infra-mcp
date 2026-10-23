@@ -4,8 +4,9 @@ import android.content.Context;
 import android.os.SystemClock;
 import android.provider.Settings;
 
-/** Foreground-only five-minute lease; never survives reboot or explicit revoke. */
+/** Foreground-only one-hour lease; never survives reboot or explicit revoke. */
 public final class ScreenConsent {
+    private static final long CONSENT_DURATION_MS=60L*60L*1000L;
     private static int bootCount(Context c) {
         try{return Settings.Global.getInt(c.getContentResolver(),Settings.Global.BOOT_COUNT,-1);}
         catch(Exception e){return -1;}
@@ -13,8 +14,8 @@ public final class ScreenConsent {
     public static void grant(Context c) {
         c.getSharedPreferences("dev-control",Context.MODE_PRIVATE).edit()
             .putLong("start_elapsed",SystemClock.elapsedRealtime())
-            .putLong("until_elapsed",SystemClock.elapsedRealtime()+300000)
-            .putLong("until_wall",System.currentTimeMillis()+300000)
+            .putLong("until_elapsed",SystemClock.elapsedRealtime()+CONSENT_DURATION_MS)
+            .putLong("until_wall",System.currentTimeMillis()+CONSENT_DURATION_MS)
             .putInt("boot_count",bootCount(c)).apply();
     }
     public static void revoke(Context c) {

@@ -24,8 +24,12 @@ public final class SenseGuideDevelopment {
         if(cwd!=null&&!cwd.isEmpty())return error("Working directories unsupported");
         command=command.trim();
         switch(command){
-            case "help":return success("Supported: help | senseguide status | senseguide request-launch | senseguide request-install | senseguide workspace\nNo Android shell, ADB, root, or unrestricted commands.\n");
+            case "help":return success("Supported: help | senseguide status | senseguide request-launch | senseguide request-install | senseguide workspace | infra update status | infra request-update\nNo Android shell, ADB, root, or unrestricted commands.\n");
             case "senseguide status":return success(status(ctx).toString(2)+"\n");
+            case "infra update status":return success(InfraSelfUpdate.status(ctx).toString(2)+"\n");
+            case "infra request-update":
+                InfraSelfUpdate.requestReview(ctx);
+                return success("Infra Phone update review notification sent. Installation requires approval on the phone.\n");
             case "senseguide workspace":return success("Infra Phone private workspace: /senseguide/reports and /apks; use MCP files and transfer.\n");
             case "senseguide request-launch":
                 notifyOwner(ctx,ACTION_LAUNCH);
