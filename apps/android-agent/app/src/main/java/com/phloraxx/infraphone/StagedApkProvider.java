@@ -13,6 +13,15 @@ public final class StagedApkProvider extends ContentProvider {
     @Override public boolean onCreate(){return true;}
     @Override public String getType(Uri uri){return "application/vnd.android.package-archive";}
     @Override public ParcelFileDescriptor openFile(Uri uri,String mode)throws FileNotFoundException {
+        if("r".equals(mode) && uri!=null && uri.getPathSegments().size()==1
+            && "infra-phone-update.apk".equals(uri.getLastPathSegment())
+            && (getContext().getPackageName()+".stagedapk").equals(uri.getAuthority())){
+            try {
+                InfraSelfUpdate.validate(getContext());
+                return ParcelFileDescriptor.open(InfraSelfUpdate.stagedFile(getContext()),
+                    ParcelFileDescriptor.MODE_READ_ONLY);
+            }catch(Exception e){throw new FileNotFoundException("Invalid Infra Phone update: "+e.getMessage());}
+        }
         if(!"r".equals(mode)||uri==null||uri.getPathSegments().size()!=1
             ||!"senseguide-debug.apk".equals(uri.getLastPathSegment())
             ||!(getContext().getPackageName()+".stagedapk").equals(uri.getAuthority()))

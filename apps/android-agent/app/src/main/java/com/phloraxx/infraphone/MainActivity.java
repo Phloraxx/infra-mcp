@@ -108,8 +108,8 @@ public class MainActivity extends Activity {
         space(14);
 
         LinearLayout advanced=card();
-        labelIn(advanced,"SenseGuide development controls",18,fg,true);
-        labelIn(advanced,"Signed transfers, staged APK review, consent-based app launch and optional SenseGuide-only Accessibility controls. Installations are never silent.",13,0xffA8B9D4,false);
+        labelIn(advanced,"Developer controls and updates",18,fg,true);
+        labelIn(advanced,"Signed transfers, owner-approved Infra Phone updates, SenseGuide APK review and optional SenseGuide-only Accessibility controls. Installations are never silent.",13,0xffA8B9D4,false);
         button(advanced,"Open developer controls",0xff3365E8,()->
             startActivity(new Intent(this,DevToolsActivity.class)));
         CheckBox reboot=new CheckBox(this);
