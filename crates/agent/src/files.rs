@@ -35,14 +35,12 @@ struct FileEntry {
 pub fn handle(request: FileRequest) -> OperationResult {
     match handle_inner(request.action) {
         Ok(body) => OperationResult::Ok { body },
-        Err(FileError::Unsupported(message)) => OperationResult::Unsupported { operation: message },
         Err(FileError::Other(message)) => OperationResult::Failed { error: message },
     }
 }
 
 #[derive(Debug)]
 enum FileError {
-    Unsupported(String),
     Other(String),
 }
 
@@ -97,7 +95,7 @@ fn handle_inner(action: FileAction) -> Result<serde_json::Value, FileError> {
             fs::rename(&source, &destination)?;
             Ok(serde_json::json!({"ok": true, "source": display(&source), "destination": display(&destination)}))
         }
-        FileAction::Trash { .. } => Err(FileError::Unsupported("trash is not implemented on this platform build; use delete_permanent only when permanent deletion is intended".into())),
+        FileAction::Trash { path } => trash_path(&PathBuf::from(path)),
         FileAction::DeletePermanent { path, recursive } => {
             let path = PathBuf::from(path);
             let metadata = fs::symlink_metadata(&path)?;
@@ -109,6 +107,16 @@ fn handle_inner(action: FileAction) -> Result<serde_json::Value, FileError> {
             Ok(serde_json::json!({"ok": true, "path": display(&path), "permanent": true}))
         }
     }
+}
+
+fn trash_path(path: &Path) -> Result<serde_json::Value, FileError> {
+    let absolute = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        std::env::current_dir()?.join(path)
+    };
+    trash::delete(&absolute).map_err(|error| FileError::Other(error.to_string()))?;
+    Ok(serde_json::json!({"ok": true, "path": display(&absolute), "trashed": true}))
 }
 
 fn bounded_length(length: Option<usize>) -> usize {

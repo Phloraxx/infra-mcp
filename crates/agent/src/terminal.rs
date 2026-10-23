@@ -108,9 +108,7 @@ impl Terminals {
                 rows,
                 cols,
             }),
-            TerminalAction::Close { session_id } => {
-                self.control(session_id, |token| ControlRequest::Close { token })
-            }
+            TerminalAction::Close { session_id } => self.close(session_id),
         }
     }
 
@@ -272,6 +270,26 @@ impl Terminals {
             Err(response
                 .error
                 .unwrap_or_else(|| "terminal worker rejected request".into()))
+        }
+    }
+
+    fn close(&self, id: Uuid) -> Result<serde_json::Value, String> {
+        let dir = self.root.join(id.to_string());
+        let meta = read_meta(&dir).map_err(|_| "terminal session not found".to_string())?;
+        if meta.boot_id != self.boot_id {
+            return Err("terminal belongs to a previous machine boot".into());
+        }
+        if is_terminal_status(&meta.status) {
+            return Ok(serde_json::json!({"ok": true, "session_id": id, "already_closed": true}));
+        }
+        match self.control(id, |token| ControlRequest::Close { token }) {
+            Ok(value) => Ok(value),
+            Err(error) => match read_meta(&dir) {
+                Ok(latest) if is_terminal_status(&latest.status) => {
+                    Ok(serde_json::json!({"ok": true, "session_id": id, "already_closed": true}))
+                }
+                _ => Err(error),
+            },
         }
     }
 
@@ -637,6 +655,10 @@ fn append_and_compact(output_path: &Path, session_dir: &Path, bytes: &[u8]) -> a
     meta.output_truncated = true;
     write_meta(session_dir, &meta)?;
     Ok(())
+}
+
+fn is_terminal_status(status: &str) -> bool {
+    matches!(status, "closed" | "completed" | "failed")
 }
 
 fn read_meta(dir: &Path) -> anyhow::Result<SessionMeta> {
