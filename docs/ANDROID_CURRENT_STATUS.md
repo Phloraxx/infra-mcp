@@ -1,5 +1,7 @@
 # Android / Infra Phone — current status
 
+> **Later context (2026-10-23):** This page is the **2026-10-18 v0.3.0 acceptance snapshot**, not proof of the latest installed APK. A newer v0.3.1 Android source/build is on the Mac, with one-hour SenseGuide consent and an owner-reviewed Infra Phone self-update workflow; **on-phone installation and end-to-end verification are not established here**. Read [2026-10-23 handoff](ANDROID_HANDOFF_2026-10-23.md) for source reconciliation, and [embedded ADB research/plan](ANDROID_ADB_RESEARCH_AND_PLAN.md) before attempting privileges. On-device ADB is **not implemented** in the documented build.
+
 **Verified on:** 18 October 2026 (IST)
 **Application:** Infra Phone Dev `com.phloraxx.infraphone.dev` v0.3.0, Android 16, Motorola Edge 60 Stylus
 **Branch:** `feat/android-agent-plan`
