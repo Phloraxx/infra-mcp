@@ -56,7 +56,16 @@ class NoRedirect(urllib.request.HTTPRedirectHandler):
 redirect_client=urllib.request.build_opener(NoRedirect())
 try:redirect_client.open(urllib.request.Request(base+'/',headers={'Host':'infra.example.com'}));raise AssertionError('HTTP was accepted')
 except urllib.error.HTTPError as error:assert error.code==308 and error.headers['Location']=='https://infra.example.com/'
-call('/mcp',expected=404,headers={'Host':'infra.example.com','X-Forwarded-Proto':'https'},opener=unauth)
+# Public MCP now exists, but must reject unauthenticated clients.
+# The old 404 check became stale when OAuth discovery was added.
+req=urllib.request.Request(base+'/mcp',headers={'Host':'infra.example.com','X-Forwarded-Proto':'https'})
+try:
+ unauth.open(req,timeout=10)
+ raise AssertionError('Public MCP accepted an unauthenticated request')
+except urllib.error.HTTPError as error:
+ assert error.code==401,('/mcp',error.code,401)
+ assert 'Bearer' in error.headers.get('WWW-Authenticate','')
+ assert 'resource_metadata=' in error.headers.get('WWW-Authenticate','')
 call('/api/auth/session',expected=403,headers={'Host':'infra.example.com','X-Forwarded-Proto':'https','Origin':'http://infra.example.com'},opener=unauth)
 secure=http.cookiejar.CookieJar();secure_client=urllib.request.build_opener(urllib.request.HTTPCookieProcessor(secure))
 call('/api/auth/session',{'username':'owner','password':'second-fixture-password'},headers={'Host':'infra.example.com','X-Forwarded-Proto':'https'},opener=secure_client)

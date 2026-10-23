@@ -22,17 +22,19 @@ $Arch = switch ([System.Runtime.InteropServices.RuntimeInformation]::OSArchitect
   default { throw "Unsupported Windows architecture: $_" }
 }
 
-New-Item -ItemType Directory -Force -Path $InstallDir, $StateDir | Out-Null
+# Download and verify BOTH assets before modifying a working installation.
+# This also means a missing GitHub release cannot leave a half-installed agent.
 $TempDir = Join-Path ([IO.Path]::GetTempPath()) ("infra-install-" + [guid]::NewGuid())
-New-Item -ItemType Directory -Path $TempDir | Out-Null
+New-Item -ItemType Directory -Force -Path $TempDir | Out-Null
 
-function Install-InfraBinary([string]$Name) {
-  $Destination = Join-Path $InstallDir "$Name.exe"
-  $TempDestination = "$Destination.tmp"
+function Stage-InfraBinary([string]$Name) {
+  $Staged = Join-Path $TempDir "$Name.exe"
   if (-not [string]::IsNullOrWhiteSpace($SourceDir)) {
     $Source = Join-Path $SourceDir "$Name.exe"
-    if (-not (Test-Path $Source)) { throw "Missing development binary $Source" }
-    Copy-Item $Source $TempDestination -Force
+    if (-not (Test-Path -LiteralPath $Source -PathType Leaf)) {
+      throw "Missing local development binary $Source. Build infra-agent and infra-cli first."
+    }
+    Copy-Item -LiteralPath $Source -Destination $Staged
   } else {
     $Asset = "$Name-windows-$Arch.exe"
     if ($Version -eq "latest") {
@@ -40,22 +42,54 @@ function Install-InfraBinary([string]$Name) {
     } else {
       $Base = "https://github.com/$Repo/releases/download/$Version"
     }
-    $AssetPath = Join-Path $TempDir $Asset
-    $ChecksumPath = "$AssetPath.sha256"
-    Invoke-WebRequest -UseBasicParsing -Uri "$Base/$Asset" -OutFile $AssetPath
-    Invoke-WebRequest -UseBasicParsing -Uri "$Base/$Asset.sha256" -OutFile $ChecksumPath
-    $Expected = ((Get-Content $ChecksumPath -Raw).Trim() -split '\s+')[0].ToLowerInvariant()
-    $Actual = (Get-FileHash -Algorithm SHA256 $AssetPath).Hash.ToLowerInvariant()
+    $ChecksumPath = "$Staged.sha256"
+    try {
+      Invoke-WebRequest -UseBasicParsing -Uri "$Base/$Asset" -OutFile $Staged -ErrorAction Stop
+      Invoke-WebRequest -UseBasicParsing -Uri "$Base/$Asset.sha256" -OutFile $ChecksumPath -ErrorAction Stop
+    } catch {
+      $Status = $null
+      if ($null -ne $_.Exception.Response) {
+        $Status = [int]$_.Exception.Response.StatusCode
+      }
+      if ($Status -eq 404) {
+        throw "Infra $Version has no published $Asset release asset. This repository may not have published a release yet; do not use an unverified third-party binary. For development, build locally and use -SourceDir."
+      }
+      throw "Unable to download $Asset from GitHub ($($_.Exception.Message)). Check network access, proxy/TLS and the release tag."
+    }
+    $Parts = ((Get-Content -LiteralPath $ChecksumPath -Raw).Trim() -split '\s+')
+    $Expected = $Parts[0].ToLowerInvariant()
+    if ($Expected -notmatch '^[0-9a-f]{64}$') {
+      throw "Release checksum format is invalid for $Asset"
+    }
+    if ($Parts.Length -ge 2 -and ($Parts[1] -ne $Asset -and $Parts[1] -ne "*$Asset")) {
+      throw "Release checksum references a different asset, refusing $Asset"
+    }
+    $Actual = (Get-FileHash -LiteralPath $Staged -Algorithm SHA256).Hash.ToLowerInvariant()
     if ($Expected -ne $Actual) { throw "SHA-256 verification failed for $Asset" }
-    Copy-Item $AssetPath $TempDestination -Force
+    # SHA-256 is only an integrity check. First-install publisher authentication
+    # needs a signed bootstrap trust root (tracked separately).
   }
-  Move-Item $TempDestination $Destination -Force
+  return $Staged
+}
+
+function Activate-InfraBinary([string]$Name, [string]$Staged) {
+  $Destination = Join-Path $InstallDir "$Name.exe"
+  $TempDestination = "$Destination.$([guid]::NewGuid().ToString('N')).tmp"
+  try {
+    Copy-Item -LiteralPath $Staged -Destination $TempDestination
+    Move-Item -LiteralPath $TempDestination -Destination $Destination -Force
+  } finally {
+    Remove-Item -LiteralPath $TempDestination -Force -ErrorAction SilentlyContinue
+  }
 }
 
 try {
-  Write-Host "Infra · installing native binaries"
-  Install-InfraBinary "infra"
-  Install-InfraBinary "infra-agent"
+  Write-Host "Infra · preparing verified native binaries"
+  $CliStage = Stage-InfraBinary "infra"
+  $AgentStage = Stage-InfraBinary "infra-agent"
+  New-Item -ItemType Directory -Force -Path $InstallDir, $StateDir | Out-Null
+  Activate-InfraBinary "infra-agent" $AgentStage
+  Activate-InfraBinary "infra" $CliStage
 
   $Cli = Join-Path $InstallDir "infra.exe"
   $Agent = Join-Path $InstallDir "infra-agent.exe"

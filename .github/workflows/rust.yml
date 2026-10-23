@@ -58,6 +58,13 @@ jobs:
             target/release/infra-agent
           if-no-files-found: error
           retention-days: 7
+      - name: Windows installer and signed enrollment smoke
+        if: matrix.os == 'windows-latest'
+        shell: powershell
+        run: |
+          cargo build -p infra-gateway
+          if ($LASTEXITCODE -ne 0) { throw "Gateway build failed" }
+          .\scripts\smoke-install-windows.ps1
       - name: Upload Windows x64 acceptance binaries
         if: matrix.os == 'windows-latest'
         uses: actions/upload-artifact@v4

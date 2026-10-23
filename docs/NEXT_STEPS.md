@@ -161,4 +161,5 @@ Low-risk speed choices first:
 - Not all advertised capabilities mean current permission: desktop may need TCC or OS prompt, Android permissions are lease-scoped. Do not turn "capability exists" into "usable now".
 - Persistent worker spools and signed transfer metadata should have bounded retention/cleanup. Recover from stale `ready`/abandoned uploads with explicit policy.
 - The repository is **public**; never add private deployment secrets, routes containing credentials, identifying device identifiers, or raw operational transcripts.
+- **Windows installer status:** GitHub Releases were empty at review; a green Windows acceptance artifact is not a published release. See [WINDOWS_INSTALL_ACCEPTANCE.md](WINDOWS_INSTALL_ACCEPTANCE.md).
 - Avoid release claims from green Linux tests alone. Windows/Android native distribution, boot/wake cycles, production Cloudflare ingress and cross-device copy are separate acceptance gates.

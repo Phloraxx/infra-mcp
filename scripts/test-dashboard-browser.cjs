@@ -30,6 +30,7 @@ const server=http.createServer(async(req,res)=>{
   }
   if(req.url.startsWith('/api/')){
     if(!authenticated)return send({error:'Authentication required'},401);
+    if(req.url==='/api/enrollments'&&req.method==='POST')return send({code:'fixture-5-minute-code',expires_at_unix_ms:Date.now()+300000});
     if(req.url==='/api/events'){res.writeHead(200,{'Content-Type':'text/event-stream'});res.write(': connected\n\n');streams.add(res);res.on('close',()=>streams.delete(res));return;}
     if(req.url==='/api/overview')return send({devices,sessions,activity:[]});
     if(req.url==='/api/devices')return send(devices);
@@ -91,6 +92,14 @@ const server=http.createServer(async(req,res)=>{
     await page.waitForFunction(()=>document.querySelector('#login-error').textContent.includes('Incorrect'));assert.equal(await page.locator('#app-shell').isVisible(),false);
     await page.locator('#login-password').fill('fixture-password-123');await page.locator('#login-submit').click();
     await page.locator('#overview-devices [data-device="online"]').waitFor();
+    await page.locator('#add-device').click();
+    await page.locator('#create-enrollment').click();
+    await page.waitForFunction(()=>document.querySelector('#enrollment-code').textContent.includes('fixture-5-minute-code'));
+    await page.locator('[data-platform="windows"]').click();
+    assert.match(await page.locator('#install-command').textContent(),/Invoke-WebRequest -UseBasicParsing -Uri/);
+    assert.match(await page.locator('#install-command').textContent(),/fixture-5-minute-code/);
+    await page.locator('#enroll-dialog').evaluate(element=>element.close());
+
     assert.equal(await page.locator('#summary .summary-card').nth(2).locator('strong').textContent(),'3');
     await page.locator('#overview-devices [data-device="online"]').click();
     await page.waitForFunction(()=>document.querySelector('#device-detail').classList.contains('active'));

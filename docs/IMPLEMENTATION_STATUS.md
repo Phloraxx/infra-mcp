@@ -309,3 +309,11 @@ These patches were developed in an isolated worktree. They do **not** imply that
   production control plane and legacy fallback services should remain untouched.
 
 - The agent writer now prioritizes Pong messages over queued operation output, rejects overload without blocking WebSocket reads, and treats reconciliation as opportunistic under backpressure. An empty download is immediately completed instead of lingering in active work. These address potential control-channel saturation but do not prove the root cause of earlier Mac network resets.
+
+## 2026-10-23 — Windows installer/CI follow-up
+
+- GitHub API reports **zero published GitHub Releases**: Windows release-mode download defaults to missing assets. Do not mistake a green x64 acceptance artifact for a published installer.
+- A newer smoke previously required unauthenticated public `/mcp` to return 404, but OAuth now correctly returns 401 with `WWW-Authenticate` challenge. Updated the test to enforce that security boundary; local regression passed.
+- Windows installer preflights and verifies both assets before mutating destination; reports missing release assets explicitly, retains safe `-UseBasicParsing` download mode, and isolates staging files. Dashboard generated Windows command now explicitly downloads scripts with basic parsing.
+- Added Windows PowerShell 5.1 CI fixture covering no-partial-install preflight, native local-source install, isolated one-time enrollment, paths with spaces and signed handshake.
+- This does not establish the referenced separate Windows session's unseen error; actual physical Windows, release-signing and restart acceptance remain open. See [WINDOWS_INSTALL_ACCEPTANCE.md](WINDOWS_INSTALL_ACCEPTANCE.md).
