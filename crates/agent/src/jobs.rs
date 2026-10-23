@@ -15,7 +15,7 @@ use std::{
     sync::{Arc, Mutex},
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
-use sysinfo::{Pid, System};
+use sysinfo::{Pid, ProcessRefreshKind, ProcessesToUpdate, System};
 use uuid::Uuid;
 
 const MAX_JOB_OUTPUT: usize = 16 * 1024 * 1024;
@@ -363,7 +363,14 @@ fn bounded_length(length: Option<usize>) -> usize {
         .clamp(1, MAX_READ_LIMIT)
 }
 fn process_alive(pid: u32) -> bool {
-    System::new_all().process(Pid::from_u32(pid)).is_some()
+    let pid = Pid::from_u32(pid);
+    let mut system = System::new();
+    system.refresh_processes_specifics(
+        ProcessesToUpdate::Some(&[pid]),
+        true,
+        ProcessRefreshKind::nothing(),
+    );
+    system.process(pid).is_some()
 }
 fn now_ms() -> u64 {
     SystemTime::now()
