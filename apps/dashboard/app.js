@@ -29,8 +29,20 @@ function relative(ms){if(!ms)return 'never';const sec=Math.max(0,Math.floor((Dat
 function platformMark(platform){const p=String(platform||'').toLowerCase();if(p.includes('win'))return 'W';if(p.includes('darwin')||p.includes('mac'))return 'M';if(p.includes('linux'))return 'L';return 'D';}
 function kindMark(kind){return kind==='terminal'?'>_':kind==='job'?'J':kind==='transfer'?'↕':'·';}
 function capabilityLabel(cap){return ({exec:'shell',files:'files',terminal:'terminal',jobs:'jobs',transfer:'transfer',system:'system',network:'network',services:'services',containers:'docker',git:'git',desktop:'desktop'})[cap]||cap;}
+function deviceState(d){return d.connection_state|| (d.revoked?'revoked':d.online?'online':'offline');}
+function reconnectExplanation(d){
+  const reason=({heartbeat_timeout:'No heartbeat was received; check sleep, network quality or agent load.',
+    heartbeat_queue_full:'The control channel was saturated; inspect concurrent work and agent logs.',
+    control_path_timeout:'A device operation stopped responding; its result may be uncertain.',
+    send_timeout:'Sending to the agent timed out; check connectivity and system load.',
+    send_error:'The gateway could not deliver a request to the agent.',
+    socket_error:'The agent connection was interrupted; check Wi-Fi or tunnel stability.',
+    socket_closed:'The WebSocket connection closed.'})[d.last_disconnect_reason]||'The agent is not connected.';
+  const action=d.platform==='android'?'Open Infra Phone and check its background-service and battery settings.':'If this persists, run infra doctor --json on the device.';
+  return reason+' '+action;
+}
 function deviceRow(d){
-  const status=d.revoked?'revoked':d.online?'online':'offline',work=(d.active_jobs||0)+(d.active_terminals||0)+(d.active_transfers||0),caps=d.capabilities||[];
+  const status=deviceState(d),work=(d.active_jobs||0)+(d.active_terminals||0)+(d.active_transfers||0),caps=d.capabilities||[];
   const shown=caps.slice(0,3).map(c=>`<span class="pill">${esc(capabilityLabel(c))}</span>`).join(''),more=caps.length>3?`<span class="pill more">+${caps.length-3}</span>`:'';
   return `<div class="device-row"><div class="device-primary"><div class="device-avatar ${d.online&&!d.revoked?'online':''}">${platformMark(d.platform)}</div><div class="device-primary-text"><button class="device-link" data-device="${esc(d.device_id)}">${esc(d.device_name)}</button><div class="device-meta">${esc(d.platform)} · ${esc(d.arch)} · ${d.online?'connected now':`seen ${relative(d.last_seen_unix_ms)}`}</div></div></div><div class="caps">${shown}${more}</div><div class="work-count">${work?`${work} active`:'—'}</div><div class="status ${status}">${status[0].toUpperCase()+status.slice(1)}</div></div>`;
 }
@@ -53,7 +65,7 @@ function render(){
   const sessions=state.sessions.filter(activeSession);renderSessionList();
   $('#overview-sessions').innerHTML=sessions.length?sessions.slice(0,6).map(sessionRow).join(''):'<div class="empty">No active work. Persistent sessions will appear here.</div>';
   $('#activity-list').innerHTML=state.activity.length?state.activity.map(activityRow).join(''):'<div class="empty">No operational activity recorded yet.</div>';
-  const attention=[];state.devices.filter(d=>!d.revoked&&!d.online).forEach(d=>attention.push(`<div class="attention-row"><div class="session-title">${esc(d.device_name)} is offline</div><div class="session-meta">Last seen ${relative(d.last_seen_unix_ms)}. ${d.platform==='android'?'Open Infra Phone and check its connection and battery restrictions.':'The agent should reconnect automatically. If it stays offline, run infra doctor --json on that device.'}</div></div>`));
+  const attention=[];state.devices.filter(d=>!d.revoked&&!d.online).forEach(d=>attention.push(`<div class="attention-row"><div class="session-title">${esc(d.device_name)} is ${esc(deviceState(d))}</div><div class="session-meta">Last seen ${relative(d.last_seen_unix_ms)}. ${esc(reconnectExplanation(d))}</div></div>`));
   $('#attention').innerHTML=attention.join('');$('#attention-section').classList.toggle('hidden',attention.length===0);renderDevice();
 }
 // Merge bursts of SSE notifications and periodic fallbacks into a single in-flight
@@ -161,8 +173,8 @@ function renderDevice(){
   const d=currentDevice();
   if(!d){$('#device-summary').textContent='Device unavailable. Sign in or return to Devices.';$$('.device-pane').forEach(p=>p.classList.add('hidden'));return;}
   $('#view-title').textContent=d.device_name;
-  const status=d.revoked?'revoked':d.online?'online':'offline';
-  $('#device-summary').innerHTML=`<div class="device-hero-head"><div class="device-hero-avatar ${d.online&&!d.revoked?'online':''}">${platformMark(d.platform)}</div><div class="device-hero-copy"><span class="eyebrow">DEVICE</span><h2>${esc(d.device_name)}</h2><p>${esc(d.platform)} · ${esc(d.arch)} · Infra ${esc(d.agent_version)}</p></div><span class="status ${status}">${status}</span></div><div class="device-metrics"><div class="device-metric"><span>Last seen</span><strong>${relative(d.last_seen_unix_ms)}</strong></div><div class="device-metric"><span>Terminals</span><strong>${d.active_terminals||0}</strong></div><div class="device-metric"><span>Jobs</span><strong>${d.active_jobs||0}</strong></div><div class="device-metric"><span>Transfers</span><strong>${d.active_transfers||0}</strong></div><div class="device-metric"><span>Device ID</span><code>${esc(d.device_id)}</code></div></div>${d.online?'':'<p class="small muted" style="margin-top:12px">Controls will return automatically when this agent reconnects. Session state shown here is the last reported state.</p>'}`;
+  const status=deviceState(d);
+  $('#device-summary').innerHTML=`<div class="device-hero-head"><div class="device-hero-avatar ${d.online&&!d.revoked?'online':''}">${platformMark(d.platform)}</div><div class="device-hero-copy"><span class="eyebrow">DEVICE</span><h2>${esc(d.device_name)}</h2><p>${esc(d.platform)} · ${esc(d.arch)} · Infra ${esc(d.agent_version)}</p></div><span class="status ${status}">${status}</span></div><div class="device-metrics"><div class="device-metric"><span>Last seen</span><strong>${relative(d.last_seen_unix_ms)}</strong></div><div class="device-metric"><span>Terminals</span><strong>${d.active_terminals||0}</strong></div><div class="device-metric"><span>Jobs</span><strong>${d.active_jobs||0}</strong></div><div class="device-metric"><span>Transfers</span><strong>${d.active_transfers||0}</strong></div><div class="device-metric"><span>Device ID</span><code>${esc(d.device_id)}</code></div></div>${d.online?'':`<p class="small muted" style="margin-top:12px">${esc(reconnectExplanation(d))} Session state shown here is the last reported state.</p>`}`;
   const caps=new Set(d.capabilities||[]);
   const defs=[['Shell','exec','>_'],['Files','files','F'],['Terminal','terminal','T'],['Jobs','jobs','J'],['Transfers','transfer','↕'],['System','system','S'],['Network','network','N'],['Services','services','S'],['Docker','containers','D'],['Git','git','G'],['Desktop','desktop','▣']];
   $('#device-capabilities').innerHTML=defs.map(([name,cap,icon])=>{const advertised=caps.has(cap),availableNow=advertised&&d.online;return `<div class="capability-card ${availableNow?'available':''}"><div class="cap-icon">${icon}</div><strong>${name}</strong><p>${advertised?(d.online?(cap==='desktop'?'Permission check needed':'Available'):'Device offline'):'Not advertised'}</p></div>`;}).join('');

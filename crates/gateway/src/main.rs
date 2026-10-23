@@ -1,4 +1,5 @@
 mod auth;
+mod copy;
 mod oauth;
 mod store;
 
@@ -138,6 +139,9 @@ struct McpDeviceView {
     online: bool,
     revoked: bool,
     last_seen_unix_ms: u64,
+    connection_state: &'static str,
+    last_disconnect_reason: Option<String>,
+    last_disconnect_at_unix_ms: Option<u64>,
     connection_generation: Option<u64>,
     active_jobs: usize,
     active_terminals: usize,
@@ -386,6 +390,25 @@ struct McpTerminalInput {
     offset: Option<u64>,
     #[serde(default)]
     length: Option<usize>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+struct McpCopyInput {
+    source_device: String,
+    destination_device: String,
+    source_path: String,
+    destination_path: String,
+    #[serde(default)]
+    overwrite: Option<bool>,
+    #[serde(default)]
+    create_parents: Option<bool>,
+    #[serde(default)]
+    source_transfer_id: Option<String>,
+    #[serde(default)]
+    destination_transfer_id: Option<String>,
+    /// Max bytes relayed this request (default 16 MiB, cap 64 MiB).
+    #[serde(default)]
+    max_bytes: Option<u64>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -792,6 +815,17 @@ impl InfraMcp {
             300_000,
         )
         .await
+    }
+
+    #[tool(
+        name = "copy",
+        description = "Copy a file between enrolled Infra devices by name or ID. SHA-256 verified, resumable, bounded to 16 MiB per call by default. For partial results call again with both transfer IDs. Never auto-retry an uncertain chunk."
+    )]
+    async fn copy(
+        &self,
+        Parameters(input): Parameters<McpCopyInput>,
+    ) -> Result<McpJson<serde_json::Value>, String> {
+        Ok(McpJson(copy::run(&self.state, input).await?))
     }
 
     #[tool(
@@ -2263,6 +2297,17 @@ fn device_view(record: DeviceRecord, live: Option<&DeviceConnection>) -> McpDevi
         online: live.is_some(),
         revoked: record.revoked,
         last_seen_unix_ms: record.last_seen_unix_ms,
+        connection_state: if record.revoked {
+            "revoked"
+        } else if live.is_some() {
+            "online"
+        } else if now_ms().saturating_sub(record.last_seen_unix_ms) < 60_000 {
+            "reconnecting"
+        } else {
+            "offline"
+        },
+        last_disconnect_reason: record.last_disconnect_reason,
+        last_disconnect_at_unix_ms: record.last_disconnect_at_unix_ms,
         connection_generation: live.map(|d| d.generation),
         active_jobs,
         active_terminals,
@@ -2582,27 +2627,31 @@ async fn handle_agent(mut socket: WebSocket, state: AppState) {
     // connection gets a full interval before its first protocol heartbeat.
     heartbeat.tick().await;
     let mut last_inbound = Instant::now();
+    let mut disconnect_reason = "connection_closed";
     loop {
         tokio::select! {
             _ = heartbeat.tick() => {
                 if last_inbound.elapsed() >= AGENT_HEARTBEAT_TIMEOUT {
                     warn!(device_id=%hello.device_id,generation,"agent heartbeat timed out; retiring stale connection");
+                    disconnect_reason = "heartbeat_timeout";
                     break;
                 }
                 if out_tx.try_send(GatewayToAgent::Ping).is_err() {
                     warn!(device_id=%hello.device_id,generation,"agent heartbeat queue unavailable");
+                    disconnect_reason = "heartbeat_queue_full";
                     break;
                 }
             },
             _ = retire_rx.recv() => {
                 warn!(device_id=%hello.device_id,generation,"agent connection retired after failed control-path health check");
+                disconnect_reason = "control_path_timeout";
                 break;
             },
             maybe_out=out_rx.recv()=>match maybe_out{Some(message)=>{
                 match tokio::time::timeout(Duration::from_secs(5),send_json(&mut socket,&message)).await {
                     Ok(Ok(()))=>{},
-                    Ok(Err(e))=>{warn!(device_id=%hello.device_id,error=%e,"failed to send to agent");break},
-                    Err(_)=>{warn!(device_id=%hello.device_id,generation,"timed out sending to agent");break},
+                    Ok(Err(e))=>{warn!(device_id=%hello.device_id,error=%e,"failed to send to agent");disconnect_reason="send_error";break},
+                    Err(_)=>{warn!(device_id=%hello.device_id,generation,"timed out sending to agent");disconnect_reason="send_timeout";break},
                 }
             },None=>break},
             incoming=socket.recv()=>match incoming{
@@ -2624,7 +2673,7 @@ async fn handle_agent(mut socket: WebSocket, state: AppState) {
                 },
                 Some(Ok(Message::Ping(payload)))=>{last_inbound=Instant::now();if socket.send(Message::Pong(payload)).await.is_err(){break}},
                 Some(Ok(Message::Pong(_)))=>{last_inbound=Instant::now();},
-                Some(Ok(Message::Close(_)))|None=>break,Some(Ok(_))=>{},Some(Err(e))=>{warn!(device_id=%hello.device_id,error=%e,"agent websocket error");break}
+                Some(Ok(Message::Close(_)))|None=>{disconnect_reason="socket_closed";break},Some(Ok(_))=>{},Some(Err(e))=>{warn!(device_id=%hello.device_id,error=%e,"agent websocket error");disconnect_reason="socket_error";break}
             }
         }
     }
@@ -2634,7 +2683,9 @@ async fn handle_agent(mut socket: WebSocket, state: AppState) {
         .is_some_and(|d| d.generation == generation)
     {
         devices.remove(&hello.device_id);
-        let _ = state.store.record_disconnect(&hello.device_id);
+        let _ = state
+            .store
+            .record_disconnect(&hello.device_id, disconnect_reason);
         let _ =
             state
                 .store
@@ -2785,6 +2836,8 @@ mod tests {
             last_seen_unix_ms: 1,
             revoked: false,
             reconcile: None,
+            last_disconnect_reason: None,
+            last_disconnect_at_unix_ms: None,
         }
     }
 

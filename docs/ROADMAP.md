@@ -214,3 +214,7 @@ Full plan: [ANDROID_AGENT_PLAN.md](ANDROID_AGENT_PLAN.md). This section tracks t
 - [x] Confirm on-device owner-approved Diagnostics installation and separate package/version metadata; independent end-to-end installer SHA-256 audit remains pending.
 - [x] Enable and verify temporary Accessibility control by explicit on-device user action.
 - [ ] Stress reconnect after screen-off/mobile network change/reboot; fix omitted-`cwd` ergonomics and completed transfer lifecycle polish.
+
+## Follow-up as of 2026-10-23
+
+The isolated UX/reliability branch implements bounded resumable `copy`, persisted disconnect diagnostics and signed-manifest verification for the CLI updater. The signed manifest producer needs owner key provisioning. This is **not** a claim of signed bootstrap provenance, automatic 1-GB copying or production cutover; see [release signing](RELEASE_SIGNING.md) and [implementation status](IMPLEMENTATION_STATUS.md).

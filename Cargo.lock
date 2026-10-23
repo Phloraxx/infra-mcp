@@ -1409,6 +1409,8 @@ name = "infra-cli"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "base64 0.23.1",
+ "ed25519-dalek",
  "infra-local-state",
  "infra-platform",
  "reqwest",

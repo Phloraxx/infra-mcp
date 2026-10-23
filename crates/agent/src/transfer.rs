@@ -262,7 +262,12 @@ impl Transfers {
             size: metadata.len(),
             sha256: Some(hash),
             overwrite: false,
-            status: "ready".into(),
+            status: if metadata.len() == 0 {
+                "completed"
+            } else {
+                "ready"
+            }
+            .into(),
             boot_id: self.boot_id.clone(),
             created_at_unix_ms: now_ms(),
             updated_at_unix_ms: now_ms(),

@@ -12,7 +12,7 @@ const transferId = '00000000-0000-4000-8000-000000000003';
 const badName = '<img src=x onerror="window.xss=1">';
 const devices = [
   {device_id:'online',device_name:badName,platform:'linux',arch:'aarch64',agent_version:'test',online:true,capabilities:['exec','files','terminal','jobs','transfer','desktop'],active_terminals:1,last_seen_unix_ms:Date.now()},
-  {device_id:'offline',device_name:'Rose',platform:'windows',arch:'x86_64',agent_version:'test',online:false,capabilities:['terminal'],last_seen_unix_ms:Date.now()-90000}
+  {device_id:'offline',device_name:'Rose',platform:'windows',arch:'x86_64',agent_version:'test',online:false,connection_state:'reconnecting',last_disconnect_reason:'heartbeat_timeout',capabilities:['terminal'],last_seen_unix_ms:Date.now()-90000}
 ];
 let sessions = [
   {id:terminalId,kind:'terminal',status:'running',device_id:'online',device_name:badName,device_online:true,started_at_unix_ms:Date.now()},
@@ -130,7 +130,10 @@ const server=http.createServer(async(req,res)=>{
     failWrite=false;await page.locator('#session-resume').click();await page.locator('.xterm-helper-textarea').focus();await page.keyboard.type('Z');await page.waitForTimeout(150);
     assert.equal(operations.filter(o=>o.action?.action==='write').at(-1).action.data,'Z');
     await page.locator('[data-view="devices"]').click();assert.equal(operations.filter(o=>o.action?.action==='close').length,0);
-    await page.locator('#all-devices [data-device="offline"]').click();await page.locator('[data-device-tab="terminal"]').click();assert(await page.locator('#terminal-open button').isDisabled());
+    await page.locator('#all-devices [data-device="offline"]').click();
+    await page.waitForFunction(()=>document.querySelector('#device-summary').textContent.includes('No heartbeat was received'));
+    assert.match(await page.locator('#device-summary').textContent(),/No heartbeat was received/);
+    assert.match(await page.locator('#device-summary .status').textContent(),/reconnecting/);await page.locator('[data-device-tab="terminal"]').click();assert(await page.locator('#terminal-open button').isDisabled());
     await page.goto(`${base}/#session/online/job/${jobId}`);await page.locator('#session-output').waitFor();
     await page.waitForFunction(()=>document.querySelector('#session-output').textContent.includes('fixture job output'));
     page.once('dialog',dialog=>dialog.accept());await page.locator('#session-stop').click();await page.waitForTimeout(100);

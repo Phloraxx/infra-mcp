@@ -44,6 +44,8 @@ pub struct DeviceRecord {
     pub last_seen_unix_ms: u64,
     pub revoked: bool,
     pub reconcile: Option<ReconcileSnapshot>,
+    pub last_disconnect_reason: Option<String>,
+    pub last_disconnect_at_unix_ms: Option<u64>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -149,6 +151,13 @@ impl Store {
                 CREATE INDEX IF NOT EXISTS audit_events_device_idx ON audit_events(device_id, at_ms DESC);
                 PRAGMA user_version=2;
                 "#,
+            )?;
+        }
+        if version < 3 {
+            conn.execute_batch(
+                "ALTER TABLE devices ADD COLUMN last_disconnect_reason TEXT;
+                 ALTER TABLE devices ADD COLUMN last_disconnect_at_ms INTEGER;
+                 PRAGMA user_version=3;",
             )?;
         }
         Ok(())
@@ -266,7 +275,7 @@ impl Store {
         conn.query_row(
             r#"SELECT device_id, device_name, public_key, platform, arch, agent_version,
                boot_id, capabilities_json, metadata_json, paired_at_ms, last_seen_ms,
-               revoked, reconcile_json FROM devices WHERE device_id=?1"#,
+               revoked, reconcile_json, last_disconnect_reason, last_disconnect_at_ms FROM devices WHERE device_id=?1"#,
             params![device_id],
             decode_device,
         )
@@ -279,7 +288,7 @@ impl Store {
         let mut stmt = conn.prepare(
             r#"SELECT device_id, device_name, public_key, platform, arch, agent_version,
                boot_id, capabilities_json, metadata_json, paired_at_ms, last_seen_ms,
-               revoked, reconcile_json FROM devices ORDER BY device_name COLLATE NOCASE"#,
+               revoked, reconcile_json, last_disconnect_reason, last_disconnect_at_ms FROM devices ORDER BY device_name COLLATE NOCASE"#,
         )?;
         let rows = stmt.query_map([], decode_device)?;
         rows.collect::<Result<Vec<_>, _>>()
@@ -326,11 +335,12 @@ impl Store {
         Ok(())
     }
 
-    pub fn record_disconnect(&self, device_id: &str) -> Result<(), StoreError> {
+    pub fn record_disconnect(&self, device_id: &str, reason: &str) -> Result<(), StoreError> {
         let conn = self.connection()?;
+        // Reason is a fixed backend classification, not raw OS/network error content.
         conn.execute(
-            "UPDATE devices SET last_seen_ms=?1 WHERE device_id=?2",
-            params![now_ms() as i64, device_id],
+            "UPDATE devices SET last_seen_ms=?1, last_disconnect_at_ms=?1, last_disconnect_reason=?3 WHERE device_id=?2",
+            params![now_ms() as i64, device_id, reason],
         )?;
         Ok(())
     }
@@ -416,6 +426,10 @@ fn decode_device(row: &rusqlite::Row<'_>) -> rusqlite::Result<DeviceRecord> {
         last_seen_unix_ms: row.get::<_, i64>(10)?.max(0) as u64,
         revoked: row.get::<_, i64>(11)? != 0,
         reconcile: reconcile_json.and_then(|json| serde_json::from_str(&json).ok()),
+        last_disconnect_reason: row.get(13)?,
+        last_disconnect_at_unix_ms: row
+            .get::<_, Option<i64>>(14)?
+            .map(|value| value.max(0) as u64),
     })
 }
 
@@ -522,11 +536,19 @@ mod tests {
                 "test",
             )
             .unwrap();
+        store
+            .record_disconnect(&result.device_id, "heartbeat_timeout")
+            .unwrap();
         drop(store);
         let reopened = Store::open(&path).unwrap();
         let device = reopened.get_device(&result.device_id).unwrap().unwrap();
         assert_eq!(device.device_name, "Oracle");
         assert!(!device.revoked);
+        assert_eq!(
+            device.last_disconnect_reason.as_deref(),
+            Some("heartbeat_timeout")
+        );
+        assert!(device.last_disconnect_at_unix_ms.is_some());
     }
 
     #[test]

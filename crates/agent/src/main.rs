@@ -390,8 +390,16 @@ async fn run_connection(
     }
 
     let (out_tx, mut out_rx) = mpsc::channel::<AgentToGateway>(64);
+    let (heartbeat_tx, mut heartbeat_rx) = mpsc::channel::<AgentToGateway>(8);
     let writer = tokio::spawn(async move {
-        while let Some(message) = out_rx.recv().await {
+        loop {
+            // Liveness must not queue behind large result/reconciliation bursts.
+            let message = tokio::select! {
+                biased;
+                Some(message) = heartbeat_rx.recv() => message,
+                Some(message) = out_rx.recv() => message,
+                else => break,
+            };
             let text = serde_json::to_string(&message)?;
             ws_tx.send(Message::Text(text.into())).await?;
         }
@@ -431,19 +439,21 @@ async fn run_connection(
                                     .await;
                             });
                         } else {
-                            out_tx.send(AgentToGateway::Response(AgentResponse {
-                            id: request.id,
-                            result: OperationResult::Failed {
-                                error: "agent_busy: concurrent request limit reached; retry later".into(),
-                            },
-                        })).await?;
+                            out_tx.try_send(AgentToGateway::Response(AgentResponse {
+                                id: request.id,
+                                result: OperationResult::Failed {
+                                    error: "agent_busy: concurrent request limit reached; retry later".into(),
+                                },
+                            })).map_err(|_| anyhow::anyhow!("agent response channel full; reconnecting"))?;
                         }
                     }
                     Ok(GatewayToAgent::Ping) => {
-                        out_tx.send(AgentToGateway::Pong).await?;
-                        out_tx
-                            .send(AgentToGateway::Reconcile(reconcile_snapshot(&context)))
-                            .await?;
+                        heartbeat_tx.try_send(AgentToGateway::Pong).map_err(|_| {
+                            anyhow::anyhow!("heartbeat response queue full; reconnecting")
+                        })?;
+                        // Reconcile is opportunistic: no work snapshot is worth losing liveness.
+                        let _ = out_tx
+                            .try_send(AgentToGateway::Reconcile(reconcile_snapshot(&context)));
                     }
                     Ok(GatewayToAgent::HelloAck(_)) | Ok(GatewayToAgent::AuthChallenge(_)) => {
                         warn!("unexpected handshake frame ignored")

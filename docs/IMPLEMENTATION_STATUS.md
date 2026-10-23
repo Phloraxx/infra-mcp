@@ -284,3 +284,26 @@ No generic shell, ADB-equivalent privileged control, background recording, silen
 6. Verify MCP 2026-07-28 transport interoperability against the currently connected client before changing the working rmcp transport. That revision removes protocol-level sessions and changes request metadata, so migration must be negotiated and tested.
 
 These patches were developed in an isolated worktree. They do **not** imply that the live gateway or enrolled agents were updated.
+
+## 2026-10-23 — continuation: cross-device copy, diagnostics and release authenticity
+
+- Implemented MCP `copy`: a single operation relays file bytes between two signed agents
+  through the existing transfer primitives, verifies source and destination SHA-256,
+  honors no-overwrite by default, returns both durable transfer IDs, and resumes
+  partial copies across calls. Each call is bounded (16 MiB default, 64 MiB max,
+  100-second work budget) rather than creating an unbounded gateway task.
+- Gateway SQLite v3 persists classified disconnect reasons/times. Device views
+  return online/reconnecting/offline/revoked state, and dashboard attention messages
+  distinguish heartbeat timeout from socket/command failures, with a local diagnostic step.
+- The native CLI updater verifies an Ed25519 detached signature over a JSON
+  manifest and verifies binaries against signed SHA-256 digests before staging them.
+  Release CI builds embed the trusted public key and sign the manifest using a
+  separately provisioned private GitHub secret. No signing keys have been provisioned
+  by this change; a tagged release now requires owner setup.
+- Bootstrap installers are still checksum-only, not release-signature-authenticated.
+  Full signing chain and anti-rollback support remain incomplete. See
+  [RELEASE_SIGNING.md](RELEASE_SIGNING.md).
+- Until the new code has been released and real-device acceptance passes, the existing
+  production control plane and legacy fallback services should remain untouched.
+
+- The agent writer now prioritizes Pong messages over queued operation output, rejects overload without blocking WebSocket reads, and treats reconciliation as opportunistic under backpressure. An empty download is immediately completed instead of lingering in active work. These address potential control-channel saturation but do not prove the root cause of earlier Mac network resets.

@@ -1,3 +1,4 @@
+mod release_verify;
 mod startup;
 
 use anyhow::{Context, anyhow};
@@ -262,6 +263,22 @@ async fn update_command(state_dir: &Path, mut args: Vec<String>) -> anyhow::Resu
     let repo = take_option(&mut args, "--repo").unwrap_or_else(|| "Phloraxx/infra-mcp".into());
     let version = take_option(&mut args, "--version").unwrap_or_else(|| "latest".into());
     let base_url = take_option(&mut args, "--base-url");
+    let explicitly_trusted = take_option(&mut args, "--trusted-update-key")
+        .or_else(|| std::env::var("INFRA_RELEASE_PUBLIC_KEY_B64").ok())
+        .filter(|key| !key.trim().is_empty());
+    let pinned = option_env!("INFRA_RELEASE_PUBLIC_KEY_B64").filter(|key| !key.trim().is_empty());
+    if let (Some(pinned), Some(supplied)) = (pinned, &explicitly_trusted)
+        && pinned != supplied.trim()
+    {
+        return Err(anyhow!(
+            "this Infra binary has a pinned update key; a different key cannot override it"
+        ));
+    }
+    let public_key = pinned.map(str::to_owned)
+        .or(explicitly_trusted)
+        .ok_or_else(|| anyhow!(
+            "updates require an Ed25519 release trust key (set --trusted-update-key or compile with INFRA_RELEASE_PUBLIC_KEY_B64); refusing unsigned update"
+        ))?;
     ensure_no_args(&args)?;
 
     let config =
@@ -300,14 +317,46 @@ async fn update_command(state_dir: &Path, mut args: Vec<String>) -> anyhow::Resu
         .timeout(Duration::from_secs(90))
         .build()?;
 
+    // Signature is checked before any staged executable is written.
+    let manifest_bytes = client
+        .get(format!("{base}/infra-release.json"))
+        .send()
+        .await?
+        .error_for_status()?
+        .bytes()
+        .await?;
+    let manifest_signature = client
+        .get(format!("{base}/infra-release.json.sig"))
+        .send()
+        .await?
+        .error_for_status()?
+        .text()
+        .await?;
+    let manifest =
+        release_verify::verify_manifest(&manifest_bytes, &manifest_signature, &public_key)?;
+    if version != "latest" && manifest.version != version {
+        return Err(anyhow!(
+            "signed release version {} does not match requested {version}",
+            manifest.version
+        ));
+    }
+
     let staged_cli = install_dir.join(format!(".infra.update.{}{}", std::process::id(), extension));
     let staged_agent = install_dir.join(format!(
         ".infra-agent.update.{}{}",
         std::process::id(),
         extension
     ));
-    download_verified_release_asset(&client, &base, "infra", &asset, extension, &staged_cli)
-        .await?;
+    download_verified_release_asset(
+        &client,
+        &base,
+        "infra",
+        &asset,
+        extension,
+        &staged_cli,
+        &manifest,
+    )
+    .await?;
     if let Err(error) = download_verified_release_asset(
         &client,
         &base,
@@ -315,6 +364,7 @@ async fn update_command(state_dir: &Path, mut args: Vec<String>) -> anyhow::Resu
         &asset,
         extension,
         &staged_agent,
+        &manifest,
     )
     .await
     {
@@ -623,6 +673,7 @@ async fn download_verified_release_asset(
     asset: &str,
     extension: &str,
     destination: &Path,
+    manifest: &release_verify::ReleaseManifest,
 ) -> anyhow::Result<()> {
     let name = format!("{binary}-{asset}{extension}");
     let bytes = client
@@ -632,23 +683,12 @@ async fn download_verified_release_asset(
         .error_for_status()?
         .bytes()
         .await?;
-    let sidecar = client
-        .get(format!("{base}/{name}.sha256"))
-        .send()
-        .await?
-        .error_for_status()?
-        .text()
-        .await?;
-    let expected = sidecar
-        .split_whitespace()
-        .next()
-        .ok_or_else(|| anyhow!("empty SHA-256 sidecar for {name}"))?
-        .to_ascii_lowercase();
-    if expected.len() != 64 || !expected.chars().all(|ch| ch.is_ascii_hexdigit()) {
-        return Err(anyhow!("invalid SHA-256 sidecar for {name}"));
-    }
+    let expected = manifest
+        .assets
+        .get(&name)
+        .ok_or_else(|| anyhow!("asset {name} is missing from the signed release manifest"))?;
     let actual = format!("{:x}", Sha256::digest(&bytes));
-    if actual != expected {
+    if actual != *expected {
         return Err(anyhow!(
             "SHA-256 mismatch for {name}: expected {expected}, got {actual}"
         ));
@@ -1193,7 +1233,7 @@ fn yes_no(value: bool) -> &'static str {
 fn print_help() {
     println!(
         "Infra device CLI\n\n\
-Usage:\n  infra status [--json] [--state-dir PATH]\n  infra doctor [--json] [--state-dir PATH]\n  infra install --gateway WS_URL [--code CODE] [--name NAME] [--agent PATH] [--no-startup] [--state-dir PATH]\n  infra repair [--state-dir PATH]\n  infra reconnect [--state-dir PATH]\n  infra update [--version TAG] [--repo OWNER/REPO] [--base-url URL] [--state-dir PATH]\n  infra uninstall [--remove-state] [--state-dir PATH]\n"
+Usage:\n  infra status [--json] [--state-dir PATH]\n  infra doctor [--json] [--state-dir PATH]\n  infra install --gateway WS_URL [--code CODE] [--name NAME] [--agent PATH] [--no-startup] [--state-dir PATH]\n  infra repair [--state-dir PATH]\n  infra reconnect [--state-dir PATH]\n  infra update [--version TAG] [--repo OWNER/REPO] [--base-url URL] [--trusted-update-key BASE64] [--state-dir PATH]\n  infra uninstall [--remove-state] [--state-dir PATH]\n"
     );
 }
 

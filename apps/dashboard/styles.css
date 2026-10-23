@@ -212,3 +212,6 @@ input:focus,select:focus{transform:translateY(-1px)}
   *,*::before,*::after{scroll-behavior:auto!important;animation-duration:.001ms!important;animation-iteration-count:1!important;transition-duration:.001ms!important;transition-delay:0s!important}
   .view.active,.device-pane:not(.hidden),.signin-card,.signin-visual>*,dialog[open] .dialog-card,#login-error:not(:empty){animation:none!important}
 }
+
+/* A reconnection is different from a device that has been offline for hours. */
+.status.reconnecting{color:#976c16}.status.reconnecting:before{background:#c18d23}

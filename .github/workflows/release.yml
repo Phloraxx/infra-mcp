@@ -38,7 +38,16 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@1.99.0
       - uses: Swatinem/rust-cache@v2
+      - name: Ensure a release trust key is provisioned
+        if: startsWith(github.ref, 'refs/tags/v')
+        shell: pwsh
+        env:
+          INFRA_RELEASE_PUBLIC_KEY_B64: ${{ vars.INFRA_RELEASE_PUBLIC_KEY_B64 }}
+        run: |
+          if ([string]::IsNullOrWhiteSpace($env:INFRA_RELEASE_PUBLIC_KEY_B64)) { throw "Release key missing: set repository variable INFRA_RELEASE_PUBLIC_KEY_B64" }
       - run: cargo build --release -p infra-agent -p infra-cli
+        env:
+          INFRA_RELEASE_PUBLIC_KEY_B64: ${{ vars.INFRA_RELEASE_PUBLIC_KEY_B64 }}
       - name: Package binaries and checksums
         shell: pwsh
         run: |
@@ -66,11 +75,22 @@ jobs:
     permissions:
       contents: write
     steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
       - uses: actions/download-artifact@v4
         with:
           pattern: infra-*
           path: release
           merge-multiple: true
+      - name: Install manifest signing dependency
+        run: python3 -m pip install --disable-pip-version-check cryptography
+      - name: Sign checksummed release manifest
+        env:
+          INFRA_RELEASE_SIGNING_KEY_B64: ${{ secrets.INFRA_RELEASE_SIGNING_KEY_B64 }}
+          INFRA_RELEASE_PUBLIC_KEY_B64: ${{ vars.INFRA_RELEASE_PUBLIC_KEY_B64 }}
+        run: python3 scripts/sign-release.py --directory release --version "$GITHUB_REF_NAME"
       - name: Publish GitHub release
         env:
           GH_TOKEN: ${{ github.token }}
