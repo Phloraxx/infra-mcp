@@ -1,8 +1,8 @@
-const state={devices:[],sessions:[],activity:[],platform:'unix',enrollment:null,device:null,tab:'overview',attachment:null,file:null,routeVersion:0,authEpoch:0,authenticated:false,loginMethod:'password',events:null};
+const state={devices:[],sessions:[],activity:[],platform:'unix',enrollment:null,device:null,tab:'overview',attachment:null,file:null,routeVersion:0,authEpoch:0,authenticated:false,loginMethod:'password',events:null,streamHealthy:false,refreshPromise:null,refreshPending:false,refreshTimer:null,lastRefresh:0};
 const $=s=>document.querySelector(s);const $$=s=>[...document.querySelectorAll(s)];
 const esc=s=>String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 async function jsonFetch(url,options={}){const response=await fetch(url,{...options,credentials:'same-origin',headers:{'Content-Type':'application/json','X-Infra-CSRF':'1',...(options.headers||{})}});if(response.status===401){clearPrivateViews();showSignedOut();const error=new Error('Your session ended. Sign in again.');error.status=401;throw error;}if(!response.ok){const text=await response.text();let message=text;try{message=JSON.parse(text).error||text;}catch{}throw new Error(message||`HTTP ${response.status}`);}return response.status===204?null:response.json();}
-function showSignedOut(){state.authenticated=false;state.events?.close();state.events=null;$('#app-shell').classList.add('hidden');$('#signin').classList.remove('hidden');$('#login-submit').disabled=false;$('#login-submit').textContent='Sign in';}
+function showSignedOut(){state.authenticated=false;state.events?.close();state.events=null;state.streamHealthy=false;clearTimeout(state.refreshTimer);state.refreshTimer=null;$('#app-shell').classList.add('hidden');$('#signin').classList.remove('hidden');$('#login-submit').disabled=false;$('#login-submit').textContent='Sign in';}
 function showSignedIn(){state.authenticated=true;$('#signin').classList.add('hidden');$('#app-shell').classList.remove('hidden');}
 async function authStatus(){
   try{const response=await fetch('/api/auth/session',{credentials:'same-origin'});if(!response.ok)throw new Error('Authentication status unavailable');const v=await response.json();state.loginMethod=v.login_method||'password';$('#username-label').classList.toggle('hidden',state.loginMethod!=='password');$('#login-username').required=state.loginMethod==='password';$('#password-label').textContent=state.loginMethod==='password'?'Password':'Admin credential';$('#password-change').classList.toggle('hidden',state.loginMethod!=='password');$('#auth-state').textContent=v.authenticated?'Signed in':'Signed out';if(v.authenticated)showSignedIn();else showSignedOut();return !!v.authenticated;}
@@ -53,11 +53,63 @@ function render(){
   const sessions=state.sessions.filter(activeSession);renderSessionList();
   $('#overview-sessions').innerHTML=sessions.length?sessions.slice(0,6).map(sessionRow).join(''):'<div class="empty">No active work. Persistent sessions will appear here.</div>';
   $('#activity-list').innerHTML=state.activity.length?state.activity.map(activityRow).join(''):'<div class="empty">No operational activity recorded yet.</div>';
-  const attention=[];state.devices.filter(d=>!d.revoked&&!d.online).forEach(d=>attention.push(`<div class="attention-row"><div class="session-title">${esc(d.device_name)} is offline</div><div class="session-meta">Last seen ${relative(d.last_seen_unix_ms)}. Infra will reconnect automatically when its agent is reachable.</div></div>`));
+  const attention=[];state.devices.filter(d=>!d.revoked&&!d.online).forEach(d=>attention.push(`<div class="attention-row"><div class="session-title">${esc(d.device_name)} is offline</div><div class="session-meta">Last seen ${relative(d.last_seen_unix_ms)}. ${d.platform==='android'?'Open Infra Phone and check its connection and battery restrictions.':'The agent should reconnect automatically. If it stays offline, run infra doctor --json on that device.'}</div></div>`));
   $('#attention').innerHTML=attention.join('');$('#attention-section').classList.toggle('hidden',attention.length===0);renderDevice();
 }
-async function refresh(){if(!state.authenticated)return;const epoch=state.authEpoch;try{const [devices,sessions,activity]=await Promise.all([jsonFetch('/api/devices'),jsonFetch('/api/sessions'),jsonFetch('/api/activity')]);if(epoch!==state.authEpoch)return;state.devices=devices;state.sessions=sessions;state.activity=activity;$('#gateway-dot').classList.add('online');$('#gateway-label').textContent='Gateway online';render();if(location.hash.startsWith('#session/')&&!state.attachment)route();}catch(error){$('#gateway-dot').classList.remove('online');if(error.status===401){$('#gateway-label').textContent='Sign in required';$('#auth-state').textContent='Signed out';showSignedOut();}else{$('#gateway-label').textContent='Gateway unavailable';console.error(error);}}}
-function connectEvents(){if(!state.authenticated||state.events)return;const events=new EventSource('/api/events');state.events=events;events.onmessage=()=>refresh();events.onerror=()=>{$('#gateway-dot').classList.remove('online');setTimeout(()=>refresh(),1500);};}
+// Merge bursts of SSE notifications and periodic fallbacks into a single in-flight
+// snapshot request. Never allow an older authenticated request to overwrite newer state.
+async function refresh(){
+  if(!state.authenticated)return;
+  if(state.refreshPromise){state.refreshPending=true;return state.refreshPromise;}
+  const epoch=state.authEpoch;
+  const pending=(async()=>{
+    try{
+      const {devices,sessions,activity}=await jsonFetch('/api/overview');
+      if(epoch!==state.authEpoch)return;
+      state.devices=devices;state.sessions=sessions;state.activity=activity;
+      state.lastRefresh=Date.now();
+      $('#gateway-dot').classList.add('online');
+      $('#gateway-label').textContent='Gateway online';
+      render();
+      if(location.hash.startsWith('#session/')&&!state.attachment)route();
+    }catch(error){
+      if(epoch!==state.authEpoch)return;
+      $('#gateway-dot').classList.remove('online');
+      if(error.status===401){
+        $('#gateway-label').textContent='Sign in required';
+        $('#auth-state').textContent='Signed out';showSignedOut();
+      }else{
+        $('#gateway-label').textContent='Gateway unavailable';
+        console.error(error);
+      }
+    }
+  })();
+  state.refreshPromise=pending;
+  try{await pending;}
+  finally{
+    if(state.refreshPromise===pending)state.refreshPromise=null;
+    if(state.refreshPending&&state.authenticated){
+      state.refreshPending=false;
+      scheduleRefresh();
+    }
+  }
+}
+function scheduleRefresh(){
+  if(!state.authenticated||state.refreshTimer)return;
+  state.refreshTimer=setTimeout(()=>{state.refreshTimer=null;refresh();},125);
+}
+function connectEvents(){
+  if(!state.authenticated||state.events)return;
+  const events=new EventSource('/api/events');
+  state.events=events;
+  events.onopen=()=>{state.streamHealthy=true;scheduleRefresh();};
+  events.onmessage=scheduleRefresh;
+  events.onerror=()=>{
+    state.streamHealthy=false;
+    // EventSource reconnects itself; periodic polling remains the backup.
+    scheduleRefresh();
+  };
+}
 $('#add-device').addEventListener('click',()=>{$('#enroll-start').classList.remove('hidden');$('#enroll-result').classList.add('hidden');$('#enroll-dialog').showModal();});
 $('#create-enrollment').addEventListener('click',async()=>{const button=$('#create-enrollment');button.disabled=true;button.textContent='Creating…';try{state.enrollment=await jsonFetch('/api/enrollments',{method:'POST',body:JSON.stringify({ttl_seconds:300})});$('#enrollment-code').textContent=state.enrollment.code;$('#enrollment-expiry').textContent=`Expires ${new Date(state.enrollment.expires_at_unix_ms).toLocaleTimeString()}`;$('#enroll-start').classList.add('hidden');$('#enroll-result').classList.remove('hidden');updateInstallCommand();}catch(error){alert(error.message);}finally{button.disabled=false;button.textContent='Create enrollment code';}});
 function gatewayWs(){const url=new URL(location.href);url.protocol=url.protocol==='https:'?'wss:':'ws:';url.pathname='/agent';url.search='';url.hash='';return url.toString();}
@@ -112,11 +164,11 @@ function renderDevice(){
   const status=d.revoked?'revoked':d.online?'online':'offline';
   $('#device-summary').innerHTML=`<div class="device-hero-head"><div class="device-hero-avatar ${d.online&&!d.revoked?'online':''}">${platformMark(d.platform)}</div><div class="device-hero-copy"><span class="eyebrow">DEVICE</span><h2>${esc(d.device_name)}</h2><p>${esc(d.platform)} · ${esc(d.arch)} · Infra ${esc(d.agent_version)}</p></div><span class="status ${status}">${status}</span></div><div class="device-metrics"><div class="device-metric"><span>Last seen</span><strong>${relative(d.last_seen_unix_ms)}</strong></div><div class="device-metric"><span>Terminals</span><strong>${d.active_terminals||0}</strong></div><div class="device-metric"><span>Jobs</span><strong>${d.active_jobs||0}</strong></div><div class="device-metric"><span>Transfers</span><strong>${d.active_transfers||0}</strong></div><div class="device-metric"><span>Device ID</span><code>${esc(d.device_id)}</code></div></div>${d.online?'':'<p class="small muted" style="margin-top:12px">Controls will return automatically when this agent reconnects. Session state shown here is the last reported state.</p>'}`;
   const caps=new Set(d.capabilities||[]);
-  const defs=[['Shell','exec','>_'],['Files','files','F'],['Terminal','terminal','T'],['Jobs','jobs','J'],['Transfers','transfer','↕'],['System','system','S'],['Network','network','N'],['Git','git','G']];
-  $('#device-capabilities').innerHTML=defs.map(([name,cap,icon])=>{const advertised=caps.has(cap),availableNow=advertised&&d.online;return `<div class="capability-card ${availableNow?'available':''}"><div class="cap-icon">${icon}</div><strong>${name}</strong><p>${advertised?(d.online?'Available':'Device offline'):'Not advertised'}</p></div>`;}).join('');
+  const defs=[['Shell','exec','>_'],['Files','files','F'],['Terminal','terminal','T'],['Jobs','jobs','J'],['Transfers','transfer','↕'],['System','system','S'],['Network','network','N'],['Services','services','S'],['Docker','containers','D'],['Git','git','G'],['Desktop','desktop','▣']];
+  $('#device-capabilities').innerHTML=defs.map(([name,cap,icon])=>{const advertised=caps.has(cap),availableNow=advertised&&d.online;return `<div class="capability-card ${availableNow?'available':''}"><div class="cap-icon">${icon}</div><strong>${name}</strong><p>${advertised?(d.online?(cap==='desktop'?'Permission check needed':'Available'):'Device offline'):'Not advertised'}</p></div>`;}).join('');
   $$('#device-tabs .tab').forEach(t=>t.classList.toggle('active',t.dataset.deviceTab===state.tab));
   $$('.device-pane').forEach(p=>p.classList.toggle('hidden',p.id!==`device-${state.tab}`));
-  $('#terminal-open button').disabled=!available();$('#device-status').disabled=!available();$$('#files-browse button').forEach(b=>b.disabled=!available());
+  $('#terminal-open button').disabled=!available();$('#device-status').disabled=!available();$('#device-permissions').classList.toggle('hidden',!caps.has('desktop'));$('#device-permissions').disabled=!available();$$('#files-browse button').forEach(b=>b.disabled=!available());
   if(!$('#terminal-command').value||$('#terminal-command').dataset.device!==d.device_id){$('#terminal-command').value=d.platform==='windows'?'powershell.exe -NoLogo':d.platform==='macos'||d.platform==='darwin'?'/bin/zsh -l':'/bin/sh -i';$('#terminal-command').dataset.device=d.device_id;}
   const sessions=state.sessions.filter(s=>s.device_id===d.device_id);
   $('#device-sessions').innerHTML=sessions.length?sessions.map(sessionRow).join(''):'<div class="empty">No sessions on this device.</div>';
@@ -139,6 +191,15 @@ $('#device-status').addEventListener('click',()=>deviceAction($('#device-status'
   if(version!==state.routeVersion)return;
   $('#device-status-output').textContent=`Agent responded in ${Math.round(performance.now()-start)} ms\nPID: ${result.pid}\nProtocol: ${result.protocol}`;$('#device-status-output').classList.remove('hidden');
 }));
+$('#device-permissions').addEventListener('click',()=>deviceAction($('#device-permissions'),async version=>{
+  const result=await operation(state.device,{op:'desktop',action:{action:'permissions'}});
+  if(version!==state.routeVersion)return;
+  const checks=Object.entries(result).filter(([,v])=>v&&typeof v==='object'&&'granted'in v);
+  const lines=checks.map(([name,value])=>`${name.replaceAll('_',' ')}: ${value.granted?'Granted':'Needs permission'}`);
+  if(result.ready===false)lines.push('Grant missing permissions locally in your OS privacy/security settings, then check again.');
+  $('#device-status-output').textContent=lines.join('\n')||JSON.stringify(result,null,2);
+  $('#device-status-output').classList.remove('hidden');
+}));
 $('#terminal-open').addEventListener('submit',event=>{
   event.preventDefault();const button=$('#terminal-open button'),device=state.device;
   deviceAction(button,async version=>{
@@ -148,7 +209,7 @@ $('#terminal-open').addEventListener('submit',event=>{
 });
 
 function clearPrivateViews(){
-  state.authEpoch++;state.devices=[];state.sessions=[];state.activity=[];state.file=null;state.enrollment=null;detachSession();
+  state.authEpoch++;state.refreshPending=false;state.devices=[];state.sessions=[];state.activity=[];state.file=null;state.enrollment=null;detachSession();
   ['#file-content','#files-list','#session-output','#device-status-output','#enrollment-code','#install-command'].forEach(s=>$(s).replaceChildren());
   $('#file-preview').classList.add('hidden');$('#enroll-dialog').close();render();
 }
@@ -247,4 +308,4 @@ async function previewFile(file){
 $('#file-close').addEventListener('click',()=>{state.file=null;$('#file-preview').classList.add('hidden');$('#file-content').textContent='';});
 $('#file-next').addEventListener('click',()=>{if(state.file)previewFile(state.file);});
 async function bootstrap(){if(await authStatus()){await refresh();route();connectEvents();}}
-bootstrap();setInterval(refresh,15000);
+bootstrap();setInterval(()=>{if(!state.streamHealthy||Date.now()-state.lastRefresh>60000)refresh();},15000);

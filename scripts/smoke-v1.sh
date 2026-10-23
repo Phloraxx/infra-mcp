@@ -103,6 +103,22 @@ PYA
 RESULT="$(mcp_request "$CALL")"
 python3 -c 'import json,sys; r=json.load(sys.stdin); text=json.dumps(r); assert "infra-smoke-ok" in text and "ok" in text, text' <<<"$RESULT"
 
+# MCP routing must accept a unique friendly name, and distinguish missing devices.
+NAME_CALL="$(python3 - <<'PYNAME'
+import json
+print(json.dumps({"jsonrpc":"2.0","id":12,"method":"tools/call","params":{"name":"exec","arguments":{"device":"Infra Smoke Device","command":"printf infra-name-ok"}}}))
+PYNAME
+)"
+NAME_RESULT="$(mcp_request "$NAME_CALL")"
+python3 -c 'import json,sys; response=json.load(sys.stdin); assert "infra-name-ok" in json.dumps(response), response' <<<"$NAME_RESULT"
+UNKNOWN_CALL="$(python3 - <<'PYUNKNOWN'
+import json
+print(json.dumps({"jsonrpc":"2.0","id":13,"method":"tools/call","params":{"name":"exec","arguments":{"device":"no-such-infra-device","command":"echo unexpected"}}}))
+PYUNKNOWN
+)"
+UNKNOWN_RESULT="$(mcp_request "$UNKNOWN_CALL")"
+python3 -c 'import json,sys; response=json.load(sys.stdin); assert "device_not_found" in json.dumps(response), response' <<<"$UNKNOWN_RESULT"
+
 SYSTEM_CALL="$(python3 - "$DEVICE_ID" <<'PYB'
 import json,sys
 print(json.dumps({"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"system","arguments":{"device":sys.argv[1],"action":"summary"}}}))

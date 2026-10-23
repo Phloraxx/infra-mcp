@@ -412,33 +412,45 @@ async fn run_connection(
         };
         let frame = frame?;
         match frame {
-            Message::Text(text) => match serde_json::from_str::<GatewayToAgent>(text.as_str()) {
-                Ok(GatewayToAgent::Request(request)) => {
-                    let permit = permits.clone().acquire_owned().await?;
-                    let out = out_tx.clone();
-                    let context = context.clone();
-                    tokio::spawn(async move {
-                        let response = dispatch(request, context.clone()).await;
-                        drop(permit);
-                        let _ = out.send(AgentToGateway::Response(response)).await;
-                        // Refresh durable-work state after every operation. A later heartbeat
-                        // refresh covers short worker-finalization races after close/cancel.
-                        let _ = out
+            Message::Text(text) => {
+                match serde_json::from_str::<GatewayToAgent>(text.as_str()) {
+                    Ok(GatewayToAgent::Request(request)) => {
+                        // Never await a worker permit in the WebSocket receive loop: when
+                        // all slots are busy, that would block Ping/Pong for up to a whole
+                        // command timeout and cause an unnecessary device disconnect.
+                        if let Ok(permit) = permits.clone().try_acquire_owned() {
+                            let out = out_tx.clone();
+                            let context = context.clone();
+                            tokio::spawn(async move {
+                                let response = dispatch(request, context.clone()).await;
+                                drop(permit);
+                                let _ = out.send(AgentToGateway::Response(response)).await;
+                                // Reconcile newly finished workers after each operation.
+                                let _ = out
+                                    .send(AgentToGateway::Reconcile(reconcile_snapshot(&context)))
+                                    .await;
+                            });
+                        } else {
+                            out_tx.send(AgentToGateway::Response(AgentResponse {
+                            id: request.id,
+                            result: OperationResult::Failed {
+                                error: "agent_busy: concurrent request limit reached; retry later".into(),
+                            },
+                        })).await?;
+                        }
+                    }
+                    Ok(GatewayToAgent::Ping) => {
+                        out_tx.send(AgentToGateway::Pong).await?;
+                        out_tx
                             .send(AgentToGateway::Reconcile(reconcile_snapshot(&context)))
-                            .await;
-                    });
+                            .await?;
+                    }
+                    Ok(GatewayToAgent::HelloAck(_)) | Ok(GatewayToAgent::AuthChallenge(_)) => {
+                        warn!("unexpected handshake frame ignored")
+                    }
+                    Err(err) => warn!(%err, "invalid gateway frame"),
                 }
-                Ok(GatewayToAgent::Ping) => {
-                    out_tx.send(AgentToGateway::Pong).await?;
-                    out_tx
-                        .send(AgentToGateway::Reconcile(reconcile_snapshot(&context)))
-                        .await?;
-                }
-                Ok(GatewayToAgent::HelloAck(_)) | Ok(GatewayToAgent::AuthChallenge(_)) => {
-                    warn!("unexpected handshake frame ignored")
-                }
-                Err(err) => warn!(%err, "invalid gateway frame"),
-            },
+            }
             Message::Ping(_) => {}
             Message::Close(_) => break,
             _ => {}

@@ -265,3 +265,22 @@ After owner completed the phone-side setup, Infra `devices` confirmed Android v0
 - **Not yet checked**: denial outside SenseGuide with an actually active five-minute lease and untrusted app in foreground; expiry at five minutes, screen-off/Doze/battery kill, Wi-Fi/mobile transition, fresh reboot and foreground-service relaunch. Do not claim the user-enabled Accessibility service is appropriate outside a controlled testing session. Manually disable it when not needed.
 
 No generic shell, ADB-equivalent privileged control, background recording, silent APK install or unapproved application tapping was enabled.
+
+## 2026-10-23 — Infra UX/reliability patch (feature branch)
+
+- Gateway tool requests now accept a registered device UUID or unique friendly name (exact-first, then case-insensitive); unknown, ambiguous, revoked and disconnected devices return distinct messages. Device operation activity uses the resolved canonical UUID.
+- Dashboard uses a single authenticated `/api/overview` response and coalesced SSE updates, with periodic fallback when events are interrupted. A new explicit permission check exposes the read-only desktop permission diagnosis, without polling potentially permission-triggering OS APIs in the background.
+- Agent receive loop rejects saturation with `agent_busy` instead of blocking incoming heartbeat traffic while waiting for a request permit. It still never replays ambiguous commands.
+- Isolated Rust workspace tests, strict clippy, formatting, Chromium browser regression, MCP smoke and native installer/dashboard smoke passed on the Oracle Linux ARM64 host. The smoke test includes a successful friendly-name call and explicit unknown-name error.
+- Mac native `infra doctor` reports healthy with Keychain identity and launchd startup; the production gateway has also logged intermittent Mac timeouts. The overload fix is preventative; it is **not** proof of the cause of those timeouts.
+
+### Still required before production cutover
+
+1. Reproduce and diagnose Mac sleep/wake, network-switch and concurrent-command disconnects on actual hardware; add corresponding acceptance tests.
+2. Add trusted cryptographic release metadata/signature verification with a reviewed key management and recovery plan. SHA-256 sidecars alone do not establish publisher authenticity.
+3. Build a safe, resumable cross-device copy operation on top of existing transfer primitives (not a new transport), including partial-failure cleanup and progress.
+4. Finish user-driven diagnostic/repair UX for offline devices, richer backend health/permission signals and explicit agent compatibility/update status.
+5. Prove Windows, Linux reboot and Android lifecycle acceptance before any decommissioning of legacy services.
+6. Verify MCP 2026-07-28 transport interoperability against the currently connected client before changing the working rmcp transport. That revision removes protocol-level sessions and changes request metadata, so migration must be negotiated and tested.
+
+These patches were developed in an isolated worktree. They do **not** imply that the live gateway or enrolled agents were updated.

@@ -11,7 +11,7 @@ const jobId = '00000000-0000-4000-8000-000000000002';
 const transferId = '00000000-0000-4000-8000-000000000003';
 const badName = '<img src=x onerror="window.xss=1">';
 const devices = [
-  {device_id:'online',device_name:badName,platform:'linux',arch:'aarch64',agent_version:'test',online:true,capabilities:['exec','files','terminal','jobs','transfer'],active_terminals:1,last_seen_unix_ms:Date.now()},
+  {device_id:'online',device_name:badName,platform:'linux',arch:'aarch64',agent_version:'test',online:true,capabilities:['exec','files','terminal','jobs','transfer','desktop'],active_terminals:1,last_seen_unix_ms:Date.now()},
   {device_id:'offline',device_name:'Rose',platform:'windows',arch:'x86_64',agent_version:'test',online:false,capabilities:['terminal'],last_seen_unix_ms:Date.now()-90000}
 ];
 let sessions = [
@@ -31,6 +31,7 @@ const server=http.createServer(async(req,res)=>{
   if(req.url.startsWith('/api/')){
     if(!authenticated)return send({error:'Authentication required'},401);
     if(req.url==='/api/events'){res.writeHead(200,{'Content-Type':'text/event-stream'});res.write(': connected\n\n');streams.add(res);res.on('close',()=>streams.delete(res));return;}
+    if(req.url==='/api/overview')return send({devices,sessions,activity:[]});
     if(req.url==='/api/devices')return send(devices);
     if(req.url==='/api/sessions')return send(sessions);
     if(req.url==='/api/activity')return send([]);
@@ -39,6 +40,7 @@ const server=http.createServer(async(req,res)=>{
       const op=JSON.parse(body);operations.push(op);const a=op.action;
       const ok=value=>send({status:'ok',body:value});
       if(op.op==='status')return ok({pid:100,protocol:1});
+      if(op.op==='desktop'&&a.action==='permissions')return ok({accessibility:{granted:false},screen_recording:{granted:true},ready:false});
       if(op.op==='terminal'){
         if(a.action==='read'){
           if(failRead)return send({error:'network unavailable'},503);
@@ -96,6 +98,8 @@ const server=http.createServer(async(req,res)=>{
     assert.equal(await page.locator('#device-summary img').count(),0);
     await page.locator('#device-status').click();await page.locator('#device-status-output').waitFor();
     assert.match(await page.locator('#device-status-output').textContent(),/PID: 100/);
+    await page.locator('#device-permissions').click();
+    await page.waitForFunction(()=>document.querySelector('#device-status-output').textContent.includes('Needs permission'));
     await page.locator('[data-device-tab="files"]').click();await page.locator('#files-browse button').first().click();
     await page.locator('[data-file-path]').waitFor();await page.locator('[data-file-path]').click();await page.locator('#file-preview:not(.hidden)').waitFor();
     assert.equal(await page.locator('#file-content').textContent(),'<script>window.xss=2</script>');assert.equal(await page.evaluate(()=>window.xss),undefined);

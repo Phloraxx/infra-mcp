@@ -257,7 +257,14 @@ struct OAuthTokenForm {
 
 #[derive(Debug)]
 enum DispatchError {
-    Offline,
+    NotFound(String),
+    Ambiguous {
+        selector: String,
+        matches: Vec<String>,
+    },
+    Revoked(String),
+    Offline(String),
+    Storage(String),
     ConnectionClosed,
     ResponseClosed,
 }
@@ -514,10 +521,12 @@ impl InfraMcp {
         &self,
         Parameters(input): Parameters<McpExecInput>,
     ) -> Result<McpJson<McpExecOutput>, String> {
-        let device_id = input.device.clone();
+        let device_id = resolve_device(&self.state, &input.device)
+            .await
+            .map_err(dispatch_error)?;
         let response = dispatch_to_device(
             &self.state,
-            input.device,
+            device_id.clone(),
             AgentOperation::Exec {
                 command: input.command,
                 cwd: input.cwd,
@@ -1069,6 +1078,7 @@ fn build_app(state: AppState) -> Router {
         middleware::from_fn_with_state(state.clone(), require_mcp_auth),
     );
     let protected_api = Router::new()
+        .route("/api/overview", get(overview_http))
         .route("/api/devices", get(list_devices_http))
         .route("/api/sessions", get(list_sessions_http))
         .route("/api/activity", get(list_activity_http))
@@ -1699,6 +1709,9 @@ async fn dashboard_operation(
     let supported = matches!(
         &operation,
         AgentOperation::Status
+            | AgentOperation::Desktop(DesktopRequest {
+                action: DesktopAction::Permissions
+            })
             | AgentOperation::Terminal(_)
             | AgentOperation::Jobs(JobRequest {
                 action: JobAction::List | JobAction::Read { .. } | JobAction::Cancel { .. }
@@ -1779,6 +1792,25 @@ async fn health(State(state): State<AppState>) -> Json<Health<'static>> {
         protocol: PROTOCOL_VERSION,
         gateway_epoch: state.gateway_epoch,
     })
+}
+// Single bounded snapshot avoids three independent HTTP round trips on each UI refresh.
+async fn overview_http(State(state): State<AppState>) -> Response {
+    let devices = device_views(&state).await;
+    let sessions = dashboard_sessions(&state).await;
+    let activity = state.store.list_activity(100);
+    match (devices, sessions, activity) {
+        (Ok(devices), Ok(sessions), Ok(activity)) => Json(serde_json::json!({
+            "devices": devices,
+            "sessions": sessions,
+            "activity": activity,
+        }))
+        .into_response(),
+        _ => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({"error":"overview snapshot unavailable"})),
+        )
+            .into_response(),
+    }
 }
 async fn list_devices_http(State(state): State<AppState>) -> Response {
     match device_views(&state).await {
@@ -2245,6 +2277,9 @@ async fn tool_operation(
     timeout_ms: u64,
 ) -> Result<McpJson<serde_json::Value>, String> {
     let action = operation_label(&operation);
+    let device = resolve_device(state, &device)
+        .await
+        .map_err(dispatch_error)?;
     let response = dispatch_to_device(state, device.clone(), operation, timeout_ms)
         .await
         .map_err(dispatch_error)?;
@@ -2367,26 +2402,96 @@ fn required<T>(value: Option<T>, name: &str) -> Result<T, String> {
 fn parse_uuid(value: Option<String>, name: &str) -> Result<Uuid, String> {
     Uuid::parse_str(&required(value, name)?).map_err(|_| format!("{name} must be a UUID"))
 }
+/// Accept stable IDs or unique human-friendly names. Never mistake an unknown name for
+/// an offline device. Name matching is case-insensitive only after exact matching.
+fn select_device<'a>(
+    records: &'a [DeviceRecord],
+    selector: &str,
+) -> Result<&'a DeviceRecord, DispatchError> {
+    let key = selector.trim();
+    if key.is_empty() {
+        return Err(DispatchError::NotFound(selector.to_owned()));
+    }
+    if let Some(record) = records.iter().find(|d| d.device_id == key) {
+        return if record.revoked {
+            Err(DispatchError::Revoked(record.device_name.clone()))
+        } else {
+            Ok(record)
+        };
+    }
+    let exact: Vec<_> = records.iter().filter(|d| d.device_name == key).collect();
+    let matches: Vec<_> = if exact.is_empty() {
+        records
+            .iter()
+            .filter(|d| d.device_name.eq_ignore_ascii_case(key))
+            .collect()
+    } else {
+        exact
+    };
+    match matches.as_slice() {
+        [record] if record.revoked => Err(DispatchError::Revoked(record.device_name.clone())),
+        [record] => Ok(record),
+        [] => Err(DispatchError::NotFound(selector.to_owned())),
+        _ => Err(DispatchError::Ambiguous {
+            selector: selector.to_owned(),
+            matches: matches
+                .iter()
+                .map(|d| format!("{} ({})", d.device_name, d.device_id))
+                .collect(),
+        }),
+    }
+}
+
+async fn resolve_device(state: &AppState, selector: &str) -> Result<String, DispatchError> {
+    // Common paths need no registry lookup; the direct online UUID is canonical.
+    if state.devices.read().await.contains_key(selector) {
+        return Ok(selector.to_owned());
+    }
+    let records = state
+        .store
+        .list_devices()
+        .map_err(|err| DispatchError::Storage(err.to_string()))?;
+    Ok(select_device(&records, selector)?.device_id.clone())
+}
+
 fn dispatch_error(error: DispatchError) -> String {
     match error {
-        DispatchError::Offline => "device is not online".into(),
-        DispatchError::ConnectionClosed => "device connection closed".into(),
-        DispatchError::ResponseClosed => "agent response channel closed".into(),
+        DispatchError::NotFound(name) => format!(
+            "device_not_found: no enrolled device matches '{name}'; use devices to see valid names"
+        ),
+        DispatchError::Ambiguous { selector, matches } => format!(
+            "ambiguous_device: '{selector}' matches {}; select a device ID",
+            matches.join(", ")
+        ),
+        DispatchError::Revoked(name) => {
+            format!("device_revoked: '{name}' has been revoked and must be re-enrolled")
+        }
+        DispatchError::Offline(name) => format!(
+            "device_offline: '{name}' is enrolled but is not connected; it will reconnect when reachable"
+        ),
+        DispatchError::Storage(error) => format!("device_registry_error: {error}"),
+        DispatchError::ConnectionClosed => {
+            "device_connection_closed: device disconnected while sending the request".into()
+        }
+        DispatchError::ResponseClosed => {
+            "device_response_closed: agent response channel closed".into()
+        }
     }
 }
 
 async fn dispatch_to_device(
     state: &AppState,
-    device_id: String,
+    selector: String,
     operation: AgentOperation,
     timeout_ms: u64,
 ) -> Result<AgentResponse, DispatchError> {
+    let device_id = resolve_device(state, &selector).await?;
     let (tx, retire) = {
         let devices = state.devices.read().await;
         devices
             .get(&device_id)
             .map(|d| (d.tx.clone(), d.retire.clone()))
-            .ok_or(DispatchError::Offline)?
+            .ok_or_else(|| DispatchError::Offline(selector.clone()))?
     };
     let id = Uuid::new_v4();
     let request = GatewayToAgent::Request(AgentRequest { id, operation });
@@ -2405,9 +2510,7 @@ async fn dispatch_to_device(
         }
         Err(_) => {
             state.pending.lock().await.remove(&id);
-            // A connection that accepted a request but failed to answer within its bounded
-            // deadline is no longer trustworthy as an "online" control path. Retire it so
-            // the agent reconnects with a fresh generation; never replay the operation.
+            // An unanswered command might have run. Disconnect instead of replaying it.
             let _ = retire.try_send(());
             Ok(AgentResponse {
                 id,
@@ -2666,6 +2769,69 @@ mod tests {
     use tempfile::TempDir;
     use tokio_tungstenite::{connect_async, tungstenite::Message as ClientMessage};
     const TEST_TOKEN: &str = "developmenttoken123456";
+
+    fn test_device(id: &str, name: &str) -> DeviceRecord {
+        DeviceRecord {
+            device_id: id.to_owned(),
+            device_name: name.to_owned(),
+            public_key: None,
+            platform: "linux".into(),
+            arch: "aarch64".into(),
+            agent_version: "test".into(),
+            boot_id: "boot-test".into(),
+            capabilities: vec!["exec".into()],
+            metadata: serde_json::json!({}),
+            paired_at_unix_ms: 1,
+            last_seen_unix_ms: 1,
+            revoked: false,
+            reconcile: None,
+        }
+    }
+
+    #[test]
+    fn friendly_names_and_ids_resolve_without_confusing_offline_and_unknown() {
+        let records = vec![
+            test_device("vm-id", "oracle-vm"),
+            test_device("mac-id", "BigMac"),
+        ];
+        assert_eq!(
+            select_device(&records, "oracle-vm").unwrap().device_id,
+            "vm-id"
+        );
+        assert_eq!(
+            select_device(&records, "BIGMAC").unwrap().device_id,
+            "mac-id"
+        );
+        assert_eq!(select_device(&records, "vm-id").unwrap().device_id, "vm-id");
+        assert!(matches!(
+            select_device(&records, "unknown"),
+            Err(DispatchError::NotFound(_))
+        ));
+        assert!(matches!(
+            select_device(&records, " "),
+            Err(DispatchError::NotFound(_))
+        ));
+    }
+
+    #[test]
+    fn duplicate_names_require_an_unambiguous_device_id() {
+        let records = vec![test_device("a-id", "Laptop"), test_device("b-id", "Laptop")];
+        assert!(matches!(
+            select_device(&records, "Laptop"),
+            Err(DispatchError::Ambiguous { .. })
+        ));
+        assert_eq!(select_device(&records, "b-id").unwrap().device_id, "b-id");
+    }
+
+    #[test]
+    fn revoked_devices_do_not_route() {
+        let mut record = test_device("bad-id", "RevokedMac");
+        record.revoked = true;
+        assert!(matches!(
+            select_device(&[record], "RevokedMac"),
+            Err(DispatchError::Revoked(_))
+        ));
+    }
     async fn spawn_test_gateway() -> (TempDir, AppState, SocketAddr, tokio::task::JoinHandle<()>) {
         let dir = tempfile::tempdir().unwrap();
         let store = Store::open(dir.path().join("infra.db")).unwrap();
