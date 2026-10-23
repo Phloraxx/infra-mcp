@@ -61,7 +61,7 @@ External references checked October 2026:
 - Cloudflare WSS support and forced edge restarts: https://developers.cloudflare.com/network/websockets/
 - Cloudflare Tunnel publish/origin routing: https://developers.cloudflare.com/cloudflare-one/networks/connectors/cloudflare-tunnel/get-started/create-remote-tunnel/
 - MCP 2026-07-28 HTTP changes: https://github.com/modelcontextprotocol/modelcontextprotocol/blob/main/docs/specification/2026-07-28/basic/transports/streamable-http.mdx
-- MCP durable Tasks opt-in: https://tasks.extensions.modelcontextprotocol.io/specification/2026-07-28/tasks
+- MCP Tasks extension and version compatibility: https://github.com/modelcontextprotocol/modelcontextprotocol/blob/main/docs/specification/2026-07-28/changelog.mdx
 - Android foreground-service constraints: https://developer.android.com/develop/background-work/services/fgs/changes
 - FCM priority limitations: https://firebase.google.com/docs/cloud-messaging/customize-messages/setting-message-priority
 

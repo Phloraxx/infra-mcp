@@ -108,7 +108,7 @@ Files: breadcrumb navigation, search, preview/read range, user-approved upload/d
 - Every tool response: clear `status`, `device`, `operation`, `request_id`, bounded useful data, `next_action` on failures, and `resume_token`/ID for long work. Use `outcome_unknown` for ambiguity, not a generic "error".
 - Add accurate MCP tool risk annotations only when the **entire** operation is read-only/idempotent. Never label a mixed read/write family read-only. See https://blog.modelcontextprotocol.io/posts/2026-03-16-tool-annotations/.
 - Prefer one task-level action over model-orchestrated 50-step loops: bounded command, status/log summary, cross-device copy. Avoid adding an unrestricted "do everything" tool.
-- Keep stable order and concise descriptions for better tools/list caching and selection. Evaluate 2026-07-28 stateless MCP and Tasks extension only after the connected ChatGPT client supports them; the extension requires client opt-in: https://tasks.extensions.modelcontextprotocol.io/specification/2026-07-28/tasks.
+- Keep stable order and concise descriptions for better tools/list caching and selection. Evaluate 2026-07-28 stateless MCP and Tasks extension only after a client-compatibility test. The 2026-07-28 revision allows server-initiated task handles; don't assume legacy opt-in semantics or that the current ChatGPT client supports the extension: https://github.com/modelcontextprotocol/modelcontextprotocol/blob/main/docs/specification/2026-07-28/changelog.mdx.
 
 ## 4. Speed — measure before changing transport
 
