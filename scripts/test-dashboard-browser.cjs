@@ -76,7 +76,7 @@ const server=http.createServer(async(req,res)=>{
     }
     return send({error:'not found'},404);
   }
-  const routes={'/assets/logo.png':'assets/logo.png','/favicon.ico':'assets/favicon.ico','/favicon.png':'assets/favicon.png','/apple-touch-icon.png':'assets/apple-touch-icon.png','/':'index.html','/app.js':'app.js','/styles.css':'styles.css','/vendor/xterm.js':'vendor/xterm.js','/vendor/xterm.css':'vendor/xterm.css'};
+  const routes={'/logo.png':'assets/logo.png','/assets/logo.png':'assets/logo.png','/favicon.ico':'assets/favicon.ico','/favicon.png':'assets/favicon.png','/apple-touch-icon.png':'assets/apple-touch-icon.png','/':'index.html','/app.js':'app.js','/styles.css':'styles.css','/vendor/xterm.js':'vendor/xterm.js','/vendor/xterm.css':'vendor/xterm.css'};
   const name=routes[req.url];if(!name){res.writeHead(404);res.end();return;}
   const type=name.endsWith('.js')?'text/javascript':name.endsWith('.css')?'text/css':name.endsWith('.png')?'image/png':name.endsWith('.ico')?'image/x-icon':'text/html';
   res.writeHead(200,{'Content-Type':type,'Content-Security-Policy':"default-src 'self'; connect-src 'self'; img-src 'self' data:; style-src 'self' 'unsafe-inline'; script-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'"});res.end(fs.readFileSync(path.join(root,name)));
@@ -90,6 +90,11 @@ const server=http.createServer(async(req,res)=>{
     page.on('pageerror',e=>errors.push(e.message));
     page.on('console',msg=>{if(msg.type()==='error'&&msg.text().includes('Content Security Policy'))errors.push(msg.text());});
     await page.goto(base);await page.locator('#login-submit:not([disabled])').waitFor();
+    assert(await page.locator('.signin-showcase-brand img.brand-mark').evaluate(img=>img.complete&&img.naturalWidth>0),'Infra logo did not load');
+    assert.equal(await page.locator('.signin-showcase-brand img.brand-mark').getAttribute('src'),'/logo.png');
+    assert.equal(await page.locator('.signin-main .brand-mark').count(),1);
+
+
     const darkMetrics=await page.evaluate(()=>{
       const rgb=selector=>{
         const value=getComputedStyle(document.querySelector(selector)).backgroundColor;
@@ -232,10 +237,14 @@ const server=http.createServer(async(req,res)=>{
     await page.setViewportSize({width:390,height:844});await page.goto(base);await page.locator('#overview-devices [data-device="online"]').waitFor();
     await page.locator('#overview-devices [data-device="online"]').click();
     if(process.env.INFRA_QA_SCREENSHOT){await page.waitForTimeout(300);await page.screenshot({path:process.env.INFRA_QA_SCREENSHOT,fullPage:true});}
+    await page.waitForFunction(()=>document.documentElement.scrollWidth<=innerWidth+1,{timeout:4000});
     assert(await page.evaluate(()=>document.documentElement.scrollWidth<=window.innerWidth),JSON.stringify(await page.evaluate(()=>[...document.querySelectorAll('body *')].filter(e=>e.getBoundingClientRect().right>innerWidth+1).map(e=>[e.tagName,e.id,e.className,e.getBoundingClientRect().right]).slice(0,15))));
     if(process.env.INFRA_QA_SCREENSHOT)await page.screenshot({path:process.env.INFRA_QA_SCREENSHOT,fullPage:true});
     // Global responsive gate, including tiny phones and dark OS preference.
     for(const width of [320,390,768,1280]){
+      const navNames=await page.locator('.sidebar button.nav').evaluateAll(nodes=>nodes.map(node=>node.getAttribute('aria-label')));
+      assert.deepEqual(navNames,['Overview','Devices','Sessions','Activity','Settings']);
+
       await page.setViewportSize({width,height:810});
       await page.goto(base+'/#overview');
       await page.locator('#overview-devices .device-row').first().waitFor();

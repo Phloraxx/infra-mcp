@@ -14,35 +14,42 @@
 </head>
 <body>
   <section id="signin" class="signin" aria-label="Sign in">
-    <div class="signin-card">
-      <div class="signin-brand"><span class="brand-monogram" aria-hidden="true">i<span>.</span></span><span>infra</span></div>
-      <span class="signin-kicker">Your private workspace</span>
-      <h1>Good to have you back.</h1>
-      <p class="signin-subtitle">Sign in to your devices and ongoing work.</p>
-      <form id="login-form">
-        <label id="username-label">Username<input id="login-username" autocomplete="username" maxlength="128" placeholder="Username" required></label>
-        <label><span id="password-label">Password</span><input id="login-password" type="password" autocomplete="current-password" maxlength="1024" placeholder="Password" required></label>
-        <p id="login-error" class="error" role="alert"></p>
-        <button id="login-submit" class="primary wide" disabled>Checking session…</button>
-      </form>
-      <p class="signin-footnote"><span id="signin-lock" aria-hidden="true">●</span> Only you can access this workspace.</p>
+    <div class="signin-showcase">
+      <div class="signin-showcase-brand"><img class="brand-mark" src="/logo.png" alt="" width="38" height="38"><strong>infra</strong></div>
+      <div class="signin-showcase-message"><span class="brand-caption">YOUR PRIVATE CONTROL PLANE</span><h1>One place.<br>Every device.</h1><p>Quietly connected. Ready whenever you are.</p></div>
+      <div class="signin-showcase-bottom"><span class="showcase-link"><span class="showcase-link-dot"></span> SECURE BY DESIGN</span><span>PERSONAL INFRASTRUCTURE</span></div>
     </div>
-    <div class="signin-bottom">Infra <span>Private by design</span></div>
+    <div class="signin-main">
+      <div class="signin-card">
+        <div class="signin-mobile-brand"><img class="brand-mark" src="/logo.png" alt="" width="34" height="34"><strong>infra</strong></div>
+        <span class="signin-kicker">WELCOME BACK</span>
+        <h2>Sign in to Infra<span class="heading-dot">.</span></h2>
+        <p class="signin-subtitle">Your workspace is waiting.</p>
+        <form id="login-form">
+          <label id="username-label">Username<input id="login-username" autocomplete="username" maxlength="128" placeholder="Enter your username" required></label>
+          <label><span id="password-label">Password</span><input id="login-password" type="password" autocomplete="current-password" maxlength="1024" placeholder="Enter your password" required></label>
+          <p id="login-error" class="error" role="alert"></p>
+          <button id="login-submit" class="primary wide" disabled>Checking session…</button>
+        </form>
+        <p class="signin-footnote"><span id="signin-lock" aria-hidden="true"></span> Private, authenticated access only.</p>
+      </div>
+      <div class="signin-bottom">INFRA <span>ACCESS IS RESTRICTED</span></div>
+    </div>
   </section>
 
   <div id="app-shell" class="shell hidden">
     <aside class="sidebar">
-      <div class="brand"><span class="brand-monogram" aria-hidden="true">i<span>.</span></span><span>infra</span></div>
-      <p class="nav-label">Workspace</p>
+      <div class="brand"><img class="brand-mark" src="/logo.png" alt="" width="34" height="34"><span class="brand-wordmark">infra</span><span class="brand-workspace">PRIVATE</span></div>
+      <p class="nav-label">WORKSPACE</p>
       <nav class="primary-nav">
-        <button class="nav active" data-view="overview"><span class="nav-icon"><svg viewBox="0 0 20 20"><path d="M3 3h5v5H3zM12 3h5v5h-5zM3 12h5v5H3zM12 12h5v5h-5z"/></svg></span><span>Overview</span></button>
-        <button class="nav" data-view="devices"><span class="nav-icon"><svg viewBox="0 0 20 20"><rect x="2.5" y="3" width="15" height="10.5" rx="2"/><path d="M7 17h6M10 13.5V17"/></svg></span><span>Devices</span></button>
-        <button class="nav" data-view="sessions"><span class="nav-icon"><svg viewBox="0 0 20 20"><path d="m4 5 4 4-4 4M10 14h6"/></svg></span><span>Sessions</span></button>
-        <button class="nav" data-view="activity"><span class="nav-icon"><svg viewBox="0 0 20 20"><path d="M10 3a7 7 0 1 0 7 7M10 6v4l3 2"/></svg></span><span>Activity</span></button>
+        <button class="nav active" data-view="overview" aria-label="Overview" title="Overview"><span class="nav-icon"><svg viewBox="0 0 20 20"><path d="M3 3h5v5H3zM12 3h5v5h-5zM3 12h5v5H3zM12 12h5v5h-5z"/></svg></span><span>Overview</span></button>
+        <button class="nav" data-view="devices" aria-label="Devices" title="Devices"><span class="nav-icon"><svg viewBox="0 0 20 20"><rect x="2.5" y="3" width="15" height="10.5" rx="2"/><path d="M7 17h6M10 13.5V17"/></svg></span><span>Devices</span></button>
+        <button class="nav" data-view="sessions" aria-label="Sessions" title="Sessions"><span class="nav-icon"><svg viewBox="0 0 20 20"><path d="m4 5 4 4-4 4M10 14h6"/></svg></span><span>Sessions</span></button>
+        <button class="nav" data-view="activity" aria-label="Activity" title="Activity"><span class="nav-icon"><svg viewBox="0 0 20 20"><path d="M10 3a7 7 0 1 0 7 7M10 6v4l3 2"/></svg></span><span>Activity</span></button>
       </nav>
       <div class="nav-divider"></div>
       <nav>
-        <button class="nav" data-view="settings"><span class="nav-icon"><svg viewBox="0 0 20 20"><circle cx="10" cy="10" r="2.5"/><path d="M10 2.7v2M10 15.3v2M2.7 10h2M15.3 10h2M4.85 4.85l1.4 1.4M13.75 13.75l1.4 1.4M15.15 4.85l-1.4 1.4M6.25 13.75l-1.4 1.4"/></svg></span><span>Settings</span></button>
+        <button class="nav" data-view="settings" aria-label="Settings" title="Settings"><span class="nav-icon"><svg viewBox="0 0 20 20"><circle cx="10" cy="10" r="2.5"/><path d="M10 2.7v2M10 15.3v2M2.7 10h2M15.3 10h2M4.85 4.85l1.4 1.4M13.75 13.75l1.4 1.4M15.15 4.85l-1.4 1.4M6.25 13.75l-1.4 1.4"/></svg></span><span>Settings</span></button>
       </nav>
       <div class="sidebar-foot">
         <span id="gateway-dot" class="dot"></span>
@@ -52,23 +59,23 @@
 
     <main>
       <header class="topbar">
-        <div class="title-block"><span id="breadcrumb-view" class="page-kicker">Workspace</span><h1 id="view-title">Overview</h1><p id="view-subtitle">Your devices and active work.</p></div>
-        <div class="topbar-actions"><button id="add-device" class="primary"><span class="button-plus">+</span> Add device</button></div>
+        <div class="title-block"><span id="breadcrumb-view" class="page-kicker">Your workspace</span><h1 id="view-title">Overview</h1><p id="view-subtitle">Your devices and active work.</p></div>
+        <div class="topbar-actions"><button id="add-device" class="primary" aria-label="Add device"><span class="button-plus">+</span> Add device</button></div>
       </header>
 
       <section id="overview" class="view active">
-        <div class="overview-intro"><span class="overview-greeting">Everything in one place</span><p>A simple view of what’s connected and what’s running.</p></div>
+        <div class="overview-intro"><div><span class="overview-greeting">At a glance</span><p>Real-time status of your personal network.</p></div><span class="overview-availability" id="overview-availability"><span class="availability-dot"></span> Checking connections</span></div>
         <div id="summary" class="summary-grid"></div>
         <section id="attention-section" class="attention-panel hidden">
           <div class="attention-content"><div class="section-head"><div><h2>Needs attention</h2><p>Devices that may need a connection check.</p></div></div><div id="attention"></div></div>
         </section>
         <div class="overview-stack">
           <section class="panel overview-devices-panel">
-            <div class="section-head"><div><h2>Devices</h2><p>Your connected computers and their status.</p></div><button class="text-button" data-view-target="devices">View all <span>→</span></button></div>
+            <div class="section-head"><div><h2>Your devices</h2><p>Your machines, ready when you are.</p></div><button class="text-button" data-view-target="devices">View all <span>→</span></button></div>
             <div id="overview-devices" class="device-list"></div>
           </section>
           <section class="panel overview-sessions-panel">
-            <div class="section-head"><div><h2>Recent work</h2><p>Terminals, jobs and transfers that stay available.</p></div><button class="text-button" data-view-target="sessions">All sessions <span>→</span></button></div>
+            <div class="section-head"><div><h2>Active work</h2><p>Sessions that continue in the background.</p></div><button class="text-button" data-view-target="sessions">All sessions <span>→</span></button></div>
             <div id="overview-sessions" class="compact-session-list"></div>
           </section>
         </div>
