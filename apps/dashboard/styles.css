@@ -351,3 +351,11 @@ dialog::backdrop{background:#080d0ac7;backdrop-filter:blur(3px)}
   #add-device .button-plus .ui-icon{width:20px;height:20px}
   .device-avatar .ui-icon{width:17px;height:17px}
 }
+
+/* Two-step owner pairing is the primary Add device journey. */
+.quick-install{padding-bottom:19px;margin-bottom:20px;border-bottom:1px solid var(--line)}
+.quick-install h3{font-size:14px;margin-bottom:7px}
+.quick-install>p{font-size:12px;line-height:1.6;margin:8px 0 13px}
+.quick-install .command-wrap{margin-top:11px}
+.quick-install .command-wrap pre{white-space:pre-wrap;overflow-wrap:anywhere;max-height:160px}
+#copy-quick-install{margin-top:10px}

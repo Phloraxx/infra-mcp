@@ -50,12 +50,25 @@ try {
     } catch {}
   }
   if (-not $Started) { throw "Test gateway did not start" }
+  # Download the same PowerShell source as a local file, never as nullable
+  # WebResponse.Content passed to a script evaluator.
+  $DownloadedInstaller = Join-Path $TempRoot "downloaded infra installer.ps1"
+  Invoke-WebRequest -UseBasicParsing -Uri "$Base/install.ps1" -OutFile $DownloadedInstaller -ErrorAction Stop
+  if ((Get-Item -LiteralPath $DownloadedInstaller).Length -lt 200) {
+    throw "Short installer URL returned an empty or invalid download"
+  }
+  if (-not ((Get-Content -LiteralPath $DownloadedInstaller -Raw) -match 'Stage-InfraBinary')) {
+    throw "Short installer URL did not serve the native Infra installer"
+  }
 
   $Headers = @{ Authorization = "Bearer $Admin"; "X-Infra-CSRF" = "1" }
   $Enroll = Invoke-RestMethod -Method Post -Uri "$Base/api/enrollments" -Headers $Headers -ContentType "application/json" -Body '{"ttl_seconds":120}'
   if ([string]::IsNullOrWhiteSpace($Enroll.code)) { throw "Enrollment code missing" }
 
-  & (Join-Path $Root "scripts\install.ps1") -Gateway "ws://127.0.0.1:$Port/agent" -Code $Enroll.code -Name "Windows Install Smoke" -InstallDir $Install -StateDir $State -SourceDir (Join-Path $Root "target\release") -NoStartup
+  # Mirror the dashboard bootstrap: the downloaded .ps1 runs through an isolated
+  # process-scoped execution policy, not WebResponse.Content or global policy.
+  & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $DownloadedInstaller -Gateway "ws://127.0.0.1:$Port/agent" -Code $Enroll.code -Name "Windows Install Smoke" -InstallDir $Install -StateDir $State -SourceDir (Join-Path $Root "target\release") -NoStartup
+  if ($LASTEXITCODE -ne 0) { throw "Downloaded Windows bootstrap exited $LASTEXITCODE" }
   if (-not (Test-Path -LiteralPath (Join-Path $Install "infra-agent.exe"))) { throw "Agent missing" }
   if (-not (Test-Path -LiteralPath (Join-Path $State "identity.json"))) { throw "Enrollment identity missing" }
   $StatusText = & (Join-Path $Install "infra.exe") status --json --state-dir $State
