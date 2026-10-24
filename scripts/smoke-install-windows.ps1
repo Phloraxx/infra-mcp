@@ -105,7 +105,7 @@ try {
   $PendingPair = $null
   for ($i = 0; $i -lt 100; $i++) {
     Start-Sleep -Milliseconds 150
-    if ($PairProcess.HasExited -and $PairProcess.ExitCode -ne 0) {
+    if ($PairProcess.HasExited -and $null -ne $PairProcess.ExitCode -and $PairProcess.ExitCode -ne 0) {
       throw "Native Windows owner pairing exited early: $(Get-Content (Join-Path $TempRoot 'pair.err') -Raw)"
     }
     $Pending = @(Invoke-RestMethod -Uri "$Base/api/pair/requests" -Headers $Headers)
@@ -114,12 +114,19 @@ try {
   if ($null -eq $PendingPair) { throw "Native Windows agent did not request owner pairing" }
   if ([string]::IsNullOrWhiteSpace($PendingPair.device_name)) { throw "Device did not detect its computer name" }
   if ($PendingPair.device_name -eq "Windows Install Smoke") { throw "Device reused the legacy manually supplied name" }
+  if ($PendingPair.device_name -eq "unknown") { throw "Agent failed to detect the actual Windows device name" }
+  if (-not [string]::IsNullOrWhiteSpace($env:COMPUTERNAME) -and $PendingPair.device_name -ne $env:COMPUTERNAME) {
+    throw "Agent name does not match the Windows computer name"
+  }
   $Code = $PendingPair.verification_code
   $RequestId = $PendingPair.request_id
   $Approval = Invoke-RestMethod -Uri "$Base/api/pair/$RequestId/approve" -Method Post -Headers $Headers -ContentType "application/json" -Body (ConvertTo-Json @{ verification_code = $Code } -Compress)
   if ($Approval.state -ne "approved" -or [string]::IsNullOrWhiteSpace($Approval.device_id)) { throw "Authenticated approval did not create a paired identity" }
   if (-not $PairProcess.WaitForExit(20000)) { throw "Native Windows pairing process did not complete after owner approval" }
-  if ($PairProcess.ExitCode -ne 0) {
+  # Windows PowerShell 5.1 may expose a null ExitCode for a completed
+  # redirected Start-Process handle. Prefer explicit proof of completion.
+  $PairProcess.Refresh()
+  if ($null -ne $PairProcess.ExitCode -and $PairProcess.ExitCode -ne 0) {
     Write-Host "Native setup exit code: $($PairProcess.ExitCode)"
     Write-Host "Native setup stdout:"
     Get-Content -LiteralPath (Join-Path $TempRoot "pair.out") -Raw | Write-Host
@@ -131,6 +138,9 @@ try {
   }
   $IdentityPath = Join-Path $PairState "identity.json"
   if (-not (Test-Path -LiteralPath $IdentityPath)) { throw "Native Windows pairing identity missing" }
+  if (-not (Select-String -Path (Join-Path $TempRoot "pair.out") -SimpleMatch "Infra paired and configured" -Quiet)) {
+    throw "Native setup did not report successful owner pairing"
+  }
   $OriginalHash = (Get-FileHash -LiteralPath $IdentityPath -Algorithm SHA256).Hash
   & $PairExe setup --gateway "ws://127.0.0.1:$Port/agent" --agent $PairAgent --state-dir $PairState --no-startup | Out-Null
   if ($LASTEXITCODE -ne 0) { throw "Repeat Windows setup failed" }
