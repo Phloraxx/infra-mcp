@@ -142,6 +142,27 @@ try {
       (Test-Path -LiteralPath $ExistingCli) -and (Test-Path -LiteralPath $ExistingAgent) -and
       ((& $ExistingCli help 2>&1 | Out-String) -match 'infra setup')) {
     Write-Host "Infra is already installed. Checking pairing and startup..."
+    # Idempotency: do not restart a correctly configured, healthy agent.
+    # On Windows /Run on an already-running scheduled task may do nothing;
+    # waiting for a newer generation would then fail after 35 seconds.
+    $CurrentStatus = $null
+    try {
+      $StatusJson = & $ExistingCli status --json --state-dir $StateDir 2>$null
+      if ($LASTEXITCODE -eq 0 -and -not [string]::IsNullOrWhiteSpace(($StatusJson | Out-String))) {
+        $CurrentStatus = $StatusJson | Out-String | ConvertFrom-Json -ErrorAction Stop
+      }
+    } catch {
+      Write-Host "Infra status unavailable; attempting native startup repair."
+    }
+    $GatewayMatches = [string]::IsNullOrWhiteSpace($Gateway) -or
+      ($null -ne $CurrentStatus -and $null -ne $CurrentStatus.config -and
+       $CurrentStatus.config.gateway_url -eq $Gateway)
+    if ($null -ne $CurrentStatus -and $CurrentStatus.configured -and $CurrentStatus.enrolled -and
+        $CurrentStatus.process_alive -and $CurrentStatus.startup.installed -and
+        $CurrentStatus.runtime.state -eq "online" -and $GatewayMatches) {
+      Write-Host "Infra is already paired, running and connected; nothing to repair."
+      return
+    }
     $RepairArgs = @("setup", "--agent", $ExistingAgent, "--state-dir", $StateDir)
     if (-not [string]::IsNullOrWhiteSpace($Gateway)) { $RepairArgs += @("--gateway", $Gateway) }
     if ($NoStartup) { $RepairArgs += "--no-startup" }
