@@ -61,6 +61,26 @@ try {
     throw "Short installer URL did not serve the native Infra installer"
   }
 
+  # The short dashboard command must stop before execution when the HTTP
+  # response fails (even if the target path contains a stale installer).
+  $StaleInstaller = Join-Path $TempRoot "must-not-execute.ps1"
+  $UnexpectedExecution = Join-Path $TempRoot "stale-was-executed.txt"
+  Set-Content -LiteralPath $StaleInstaller -Value "Set-Content -LiteralPath '$UnexpectedExecution' -Value bad"
+  $RejectedBadDownload = $false
+  try {
+    & {
+      $ErrorActionPreference='Stop'
+      $p=$StaleInstaller
+      iwr "$Base/not-a-real-installer.ps1" -UseBasicParsing -OutFile $p
+      & powershell.exe -NoProfile -EP Bypass -File $p
+    }
+  } catch {
+    $RejectedBadDownload = $true
+  }
+  if (-not $RejectedBadDownload -or (Test-Path -LiteralPath $UnexpectedExecution)) {
+    throw "Windows bootstrap did not reject a bad download before executing an old file"
+  }
+
   $Headers = @{ Authorization = "Bearer $Admin"; "X-Infra-CSRF" = "1" }
   $Enroll = Invoke-RestMethod -Method Post -Uri "$Base/api/enrollments" -Headers $Headers -ContentType "application/json" -Body '{"ttl_seconds":120}'
   if ([string]::IsNullOrWhiteSpace($Enroll.code)) { throw "Enrollment code missing" }

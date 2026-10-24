@@ -176,7 +176,7 @@
           <button type="button" class="tab" data-quick-platform="windows">Windows</button>
         </div>
         <div class="command-wrap"><pre id="quick-install-command"></pre><button id="copy-quick-install" class="secondary" type="button">Copy install command</button></div>
-        <p class="muted small">One command, no extra runtime. This test installer runs a script from this server; use it only on machines where you trust this Infra domain. For restricted machines, download and inspect the script first.</p>
+        <p class="muted small">One command, no extra runtime. Windows downloads to a local file first, then runs it; it will not evaluate an empty web response. This test installer requires trust in the Infra domain. For restricted machines, use a signed package when available.</p>
       </section>
       <section id="pair-approval" class="pair-approval" aria-label="Approve a computer">
         <h3>2. Approve this computer</h3>
