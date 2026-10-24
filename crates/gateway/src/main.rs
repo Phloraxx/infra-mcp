@@ -1174,6 +1174,8 @@ fn build_app(state: AppState) -> Router {
         .route("/apple-touch-icon.png", get(dashboard_touch_icon))
         .route("/downloads/install.sh", get(download_install_sh))
         .route("/downloads/install.ps1", get(download_install_ps1))
+        .route("/install.sh", get(download_install_sh))
+        .route("/install.ps1", get(download_install_ps1))
         .route("/healthz", get(health))
         .route(
             "/.well-known/oauth-protected-resource",

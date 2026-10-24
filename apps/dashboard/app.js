@@ -189,6 +189,39 @@ function connectEvents(){
     scheduleRefresh();
   };
 }
+// Download to a local file so PowerShell reports HTTP failures and empty bodies
+// instead of attempting to evaluate null content.
+function powershellInstallerCommand(url, args=''){
+  return "& { $ErrorActionPreference='Stop'; $f=Join-Path $env:TEMP ('infra-'+[guid]::NewGuid().ToString('N')+'.ps1'); try { Invoke-WebRequest -UseBasicParsing -Uri "+
+    psQuote(url)+" -OutFile $f -ErrorAction Stop; if ((Get-Item -LiteralPath $f).Length -lt 200) { throw 'Infra installer download was empty' }; & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $f"+
+    args+"; if ($LASTEXITCODE -ne 0) { throw 'Infra setup failed (exit '+$LASTEXITCODE+')' } } finally { Remove-Item -LiteralPath $f -Force -ErrorAction SilentlyContinue } }";
+}
+// The primary onboarding command is independent of legacy enrollment codes.
+function updateQuickInstall(){
+  const base=location.origin;
+  // Never pipe a web response into Invoke-Expression. A missing/empty response
+  // otherwise fails as a meaningless null-argument exception. Put the payload
+  // on disk and terminate the whole block if downloading fails.
+  // Only the downloaded file runs with process-scoped execution-policy bypass.
+  const windows=`&{$ErrorActionPreference='Stop';$p="$env:TEMP\\infra.ps1";iwr `+
+    psQuote(base+'/install.ps1')+` -UseBasicParsing -OutFile $p;powershell.exe -NoProfile -EP Bypass -File $p}`;
+  $('#quick-install-command').textContent=state.platform==='windows'
+    ? windows
+    : 'curl -fsSL '+shellQuote(base+'/install.sh')+' | sh';
+}
+$$('[data-quick-platform]').forEach(tab=>tab.addEventListener('click',()=>{
+  state.platform=tab.dataset.quickPlatform;
+  $$('[data-quick-platform]').forEach(t=>t.classList.toggle('active',t===tab));
+  updateQuickInstall();
+}));
+$('#copy-quick-install').addEventListener('click',async()=>{
+  try{
+    await navigator.clipboard.writeText($('#quick-install-command').textContent);
+    $('#copy-quick-install').textContent='Copied';
+    setTimeout(()=>$('#copy-quick-install').textContent='Copy install command',1200);
+  }catch(error){$('#pair-error').textContent='Clipboard unavailable. Select and copy the command above.';}
+});
+updateQuickInstall();
 let pairPollTimer=null;
 async function refreshPendingPairs(){
   if(!$('#enroll-dialog').open||!state.authenticated)return;
@@ -232,7 +265,7 @@ $('#add-device').addEventListener('click',()=>{
 });
 $('#create-enrollment').addEventListener('click',async()=>{const button=$('#create-enrollment');button.disabled=true;button.textContent='Creating…';try{state.enrollment=await jsonFetch('/api/enrollments',{method:'POST',body:JSON.stringify({ttl_seconds:300})});$('#enrollment-code').textContent=state.enrollment.code;$('#enrollment-expiry').textContent=`Expires ${new Date(state.enrollment.expires_at_unix_ms).toLocaleTimeString()}`;$('#enroll-start').classList.add('hidden');$('#enroll-result').classList.remove('hidden');updateInstallCommand();}catch(error){alert(error.message);}finally{button.disabled=false;button.textContent='Create enrollment code';}});
 function gatewayWs(){const url=new URL(location.href);url.protocol=url.protocol==='https:'?'wss:':'ws:';url.pathname='/agent';url.search='';url.hash='';return url.toString();}
-function updateInstallCommand(){if(!state.enrollment)return;const code=state.enrollment.code;const name=$('#device-name').value.trim();const nameArg=name?` --name ${shellQuote(name)}`:'';if(state.platform==='unix'){const script=`${location.origin}/downloads/install.sh`;$('#install-command').textContent=`curl -fsSL ${shellQuote(script)} | sh -s -- --gateway ${shellQuote(gatewayWs())} --code ${shellQuote(code)}${nameArg}`;}else{const script=`${location.origin}/downloads/install.ps1`;const psName=name?` -Name ${psQuote(name)}`:'';$('#install-command').textContent=`& ([scriptblock]::Create((Invoke-WebRequest -UseBasicParsing -Uri ${psQuote(script)}).Content)) -Gateway ${psQuote(gatewayWs())} -Code ${psQuote(code)}${psName}`;}}
+function updateInstallCommand(){if(!state.enrollment)return;const code=state.enrollment.code;const name=$('#device-name').value.trim();const nameArg=name?` --name ${shellQuote(name)}`:'';if(state.platform==='unix'){const script=`${location.origin}/downloads/install.sh`;$('#install-command').textContent=`curl -fsSL ${shellQuote(script)} | sh -s -- --gateway ${shellQuote(gatewayWs())} --code ${shellQuote(code)}${nameArg}`;}else{const script=`${location.origin}/downloads/install.ps1`;const psName=name?` -Name ${psQuote(name)}`:'';$('#install-command').textContent=powershellInstallerCommand(script,` -Gateway ${psQuote(gatewayWs())} -Code ${psQuote(code)}${psName}`);}}
 function shellQuote(s){return `'${String(s).replaceAll("'","'\\''")}'`; }function psQuote(s){return `'${String(s).replaceAll("'","''")}'`;}
 $$('.tab[data-platform]').forEach(tab=>tab.addEventListener('click',()=>{state.platform=tab.dataset.platform;$$('.tab').forEach(t=>t.classList.toggle('active',t===tab));updateInstallCommand();}));$('#device-name').addEventListener('input',updateInstallCommand);$('#copy-command').addEventListener('click',async()=>{await navigator.clipboard.writeText($('#install-command').textContent);$('#copy-command').textContent='Copied';setTimeout(()=>$('#copy-command').textContent='Copy',1200);});
 $('#device-rename').addEventListener('click',()=>{

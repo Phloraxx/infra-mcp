@@ -1,8 +1,8 @@
 param(
-  [Parameter(Mandatory=$true)][string]$Gateway,
+  [string]$Gateway = "",
   [string]$Code = "",
   [string]$Name = "",
-  [string]$Version = "latest",
+  [string]$Version = "v0.1.0-rc.1", # Published test tag; GitHub latest excludes prereleases.
   [string]$InstallDir = "$env:LOCALAPPDATA\Infra\bin",
   [string]$StateDir = "$env:USERPROFILE\.infra-mcp-v1",
   [string]$SourceDir = "",
@@ -70,29 +70,72 @@ function Stage-InfraBinary([string]$Name) {
 
 function Activate-InfraBinary([string]$Name, [string]$Staged) {
   $Destination = Join-Path $InstallDir "$Name.exe"
+  # Repair/re-run of this same release must not try to overwrite a running
+  # Windows executable; that raises access-denied and can damage a healthy setup.
+  if (Test-Path -LiteralPath $Destination -PathType Leaf) {
+    $InstalledHash = (Get-FileHash -LiteralPath $Destination -Algorithm SHA256).Hash
+    $StagedHash = (Get-FileHash -LiteralPath $Staged -Algorithm SHA256).Hash
+    if ($InstalledHash -eq $StagedHash) {
+      Write-Host "Infra $Name is already installed; leaving the existing binary intact."
+      return
+    }
+  }
   $TempDestination = "$Destination.$([guid]::NewGuid().ToString('N')).tmp"
   try {
     Copy-Item -LiteralPath $Staged -Destination $TempDestination
-    Move-Item -LiteralPath $TempDestination -Destination $Destination -Force
+    try { Move-Item -LiteralPath $TempDestination -Destination $Destination -Force }
+    catch {
+      throw "Cannot replace $Name while it is running or locked. Stop the Infra Agent task for a version upgrade, then retry. ($($_.Exception.Message))"
+    }
   } finally {
     Remove-Item -LiteralPath $TempDestination -Force -ErrorAction SilentlyContinue
   }
 }
 
 try {
-  Write-Host "Infra · preparing verified native binaries"
+  Write-Host "Infra · downloading native binaries"
+  # Reuse existing config on repair instead of replacing an enrolled endpoint.
+  if ([string]::IsNullOrWhiteSpace($Gateway) -and -not (Test-Path -LiteralPath (Join-Path $StateDir "config.json"))) {
+    $Gateway = "wss://infra.drbijoy.in/agent"
+  }
+  # A repair reuses running binaries instead of trying to replace locked Windows EXEs.
+  $ExistingCli = Join-Path $InstallDir "infra.exe"
+  $ExistingAgent = Join-Path $InstallDir "infra-agent.exe"
+  if ([string]::IsNullOrWhiteSpace($Code) -and [string]::IsNullOrWhiteSpace($SourceDir) -and
+      (Test-Path -LiteralPath $ExistingCli) -and (Test-Path -LiteralPath $ExistingAgent) -and
+      ((& $ExistingCli help 2>&1 | Out-String) -match 'infra setup')) {
+    Write-Host "Infra is already installed. Checking pairing and startup..."
+    $RepairArgs = @("setup", "--agent", $ExistingAgent, "--state-dir", $StateDir)
+    if (-not [string]::IsNullOrWhiteSpace($Gateway)) { $RepairArgs += @("--gateway", $Gateway) }
+    if ($NoStartup) { $RepairArgs += "--no-startup" }
+    & $ExistingCli @RepairArgs
+    if ($LASTEXITCODE -ne 0) { throw "Existing Infra setup needs repair. Run $ExistingCli doctor." }
+    return
+  }
   $CliStage = Stage-InfraBinary "infra"
   $AgentStage = Stage-InfraBinary "infra-agent"
   New-Item -ItemType Directory -Force -Path $InstallDir, $StateDir | Out-Null
-  Activate-InfraBinary "infra-agent" $AgentStage
-  Activate-InfraBinary "infra" $CliStage
+  # A re-run must not destroy a previous working installation.
+  # Stage and keep rollback copies of BOTH binaries before invoking setup.
+  $BackupCli = Join-Path $TempDir "previous-infra.exe"
+  $BackupAgent = Join-Path $TempDir "previous-infra-agent.exe"
+  $CliPath = Join-Path $InstallDir "infra.exe"
+  $AgentPath = Join-Path $InstallDir "infra-agent.exe"
+  $HadCli = Test-Path -LiteralPath $CliPath
+  $HadAgent = Test-Path -LiteralPath $AgentPath
+  if ($HadCli) { Copy-Item -LiteralPath $CliPath -Destination $BackupCli }
+  if ($HadAgent) { Copy-Item -LiteralPath $AgentPath -Destination $BackupAgent }
+  try {
+    Activate-InfraBinary "infra-agent" $AgentStage
+    Activate-InfraBinary "infra" $CliStage
 
   $Cli = Join-Path $InstallDir "infra.exe"
   $Agent = Join-Path $InstallDir "infra-agent.exe"
   # No enrollment code means device-initiated, owner-approved pairing.
   # Older devices can still provide -Code explicitly for legacy enrollment.
   $CommandName = if ([string]::IsNullOrWhiteSpace($Code)) { "setup" } else { "install" }
-  $Arguments = @($CommandName, "--gateway", $Gateway, "--agent", $Agent, "--state-dir", $StateDir)
+  $Arguments = @($CommandName, "--agent", $Agent, "--state-dir", $StateDir)
+  if (-not [string]::IsNullOrWhiteSpace($Gateway)) { $Arguments += @("--gateway", $Gateway) }
   if (-not [string]::IsNullOrWhiteSpace($Code)) { $Arguments += @("--code", $Code) }
   if (-not [string]::IsNullOrWhiteSpace($Name) -and $CommandName -eq "install") { $Arguments += @("--name", $Name) }
   if ($NoStartup) { $Arguments += "--no-startup" }
@@ -106,6 +149,19 @@ try {
   Write-Host "  Agent: $Agent"
   Write-Host "  State: $StateDir"
   Write-Host "Run: $Cli doctor"
+  } catch {
+    # Windows will not replace a running/locked executable. Fail with the
+    # existing installation intact whenever the OS allows restoration.
+    foreach ($item in @(@($CliPath,$BackupCli,$HadCli),@($AgentPath,$BackupAgent,$HadAgent))) {
+      $dest = [string]$item[0]; $backup = [string]$item[1]; $existed = [bool]$item[2]
+      if (Test-Path -LiteralPath $backup) {
+        Copy-Item -LiteralPath $backup -Destination $dest -Force -ErrorAction Stop
+      }
+      # If this was a first install, keep the verified native binaries.
+      # Pairing may merely have timed out: retry should not download again.
+    }
+    throw "Infra setup did not finish; previous versions were preserved and new-device pairing can be resumed. $($_.Exception.Message)"
+  }
 }
 finally {
   Remove-Item -Recurse -Force $TempDir -ErrorAction SilentlyContinue

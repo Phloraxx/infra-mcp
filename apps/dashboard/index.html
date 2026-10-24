@@ -175,8 +175,18 @@
   <dialog id="enroll-dialog">
     <form method="dialog" class="dialog-card">
       <div class="dialog-head"><div><h2>Add a device</h2><p>Start Infra on your computer, then confirm its pairing request here. Your computer holds its own signing key.</p></div><button value="cancel" class="icon-button" aria-label="Close"></button></div>
+      <section id="quick-install" class="quick-install" aria-label="Install Infra">
+        <h3>1. Install Infra on your computer</h3>
+        <p class="muted small">Copy one command into your computer's terminal. No device name, account token, or enrollment code required.</p>
+        <div class="tabs platform-tabs">
+          <button type="button" class="tab active" data-quick-platform="unix">macOS / Linux</button>
+          <button type="button" class="tab" data-quick-platform="windows">Windows</button>
+        </div>
+        <div class="command-wrap"><pre id="quick-install-command"></pre><button id="copy-quick-install" class="secondary" type="button">Copy install command</button></div>
+        <p class="muted small">One command, no extra runtime. Windows downloads to a local file first, then runs it; it will not evaluate an empty web response. This test installer requires trust in the Infra domain. For restricted machines, use a signed package when available.</p>
+      </section>
       <section id="pair-approval" class="pair-approval" aria-label="Approve a computer">
-        <h3>Approve a computer</h3>
+        <h3>2. Approve this computer</h3>
         <p class="muted small">Your computer will appear below with a six-digit code. Check the code on both screens before allowing access.</p>
         <div id="pending-pairs" aria-live="polite"><p class="muted small">Checking for computers…</p></div>
         <p id="pair-result" class="small" role="status"></p>
