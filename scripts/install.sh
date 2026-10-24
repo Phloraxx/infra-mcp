@@ -44,10 +44,6 @@ while [ "$#" -gt 0 ]; do
 done
 
 [ -n "$GATEWAY" ] || { echo "--gateway is required" >&2; exit 2; }
-if [ ! -f "$STATE_DIR/identity.json" ]; then
-  [ -n "$CODE" ] || { echo "--code is required for a device that is not already enrolled" >&2; exit 2; }
-fi
-
 case "$(uname -s)" in
   Linux) PLATFORM=linux ;;
   Darwin) PLATFORM=macos ;;
@@ -93,12 +89,12 @@ verify_sha256() {
   [ "$actual" = "$expected" ] || { echo "SHA-256 verification failed for $file" >&2; exit 1; }
 }
 
-install_binary() {
+stage_binary() {
   name=$1
-  destination="$INSTALL_DIR/$name"
+  staged="$TMP_DIR/$name"
   if [ -n "$SOURCE_DIR" ]; then
     [ -f "$SOURCE_DIR/$name" ] || { echo "Missing development binary $SOURCE_DIR/$name" >&2; exit 1; }
-    cp "$SOURCE_DIR/$name" "$destination.tmp"
+    cp "$SOURCE_DIR/$name" "$staged"
   else
     asset="$name-$PLATFORM-$ARCH"
     if [ "$VERSION" = latest ]; then
@@ -109,19 +105,31 @@ install_binary() {
     download "$base/$asset" "$TMP_DIR/$asset"
     download "$base/$asset.sha256" "$TMP_DIR/$asset.sha256"
     verify_sha256 "$TMP_DIR/$asset" "$TMP_DIR/$asset.sha256"
-    cp "$TMP_DIR/$asset" "$destination.tmp"
+    cp "$TMP_DIR/$asset" "$staged"
   fi
-  chmod 755 "$destination.tmp"
-  mv "$destination.tmp" "$destination"
+  chmod 755 "$staged"
 }
 
-printf '%s\n' "Infra · installing native binaries"
-install_binary infra
-install_binary infra-agent
+printf '%s\\n' "Infra · preparing verified native binaries"
+stage_binary infra
+stage_binary infra-agent
+# Both must exist before an existing installation is changed.
+[ -s "$TMP_DIR/infra" ] && [ -s "$TMP_DIR/infra-agent" ] || {
+  echo "Infra binaries are missing or empty; the previous install is unchanged" >&2
+  exit 1
+}
+cp "$TMP_DIR/infra" "$INSTALL_DIR/infra.tmp"
+cp "$TMP_DIR/infra-agent" "$INSTALL_DIR/infra-agent.tmp"
+mv "$INSTALL_DIR/infra-agent.tmp" "$INSTALL_DIR/infra-agent"
+mv "$INSTALL_DIR/infra.tmp" "$INSTALL_DIR/infra"
 
-set -- install --gateway "$GATEWAY" --agent "$INSTALL_DIR/infra-agent" --state-dir "$STATE_DIR"
+if [ -n "$CODE" ]; then
+  set -- install --gateway "$GATEWAY" --agent "$INSTALL_DIR/infra-agent" --state-dir "$STATE_DIR"
+else
+  set -- setup --gateway "$GATEWAY" --agent "$INSTALL_DIR/infra-agent" --state-dir "$STATE_DIR"
+fi
 [ -n "$CODE" ] && set -- "$@" --code "$CODE"
-[ -n "$NAME" ] && set -- "$@" --name "$NAME"
+[ -n "$NAME" ] && [ -n "$CODE" ] && set -- "$@" --name "$NAME"
 [ "$NO_STARTUP" -eq 1 ] && set -- "$@" --no-startup
 "$INSTALL_DIR/infra" "$@"
 

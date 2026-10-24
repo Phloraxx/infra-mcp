@@ -30,6 +30,10 @@ const server=http.createServer(async(req,res)=>{
   }
   if(req.url.startsWith('/api/')){
     if(!authenticated)return send({error:'Authentication required'},401);
+    if(req.url==='/api/devices/online/rename'&&req.method==='POST'){let body='';for await(const chunk of req)body+=chunk;devices[0].device_name=JSON.parse(body).name||badName;return send({ok:true});}
+    if(req.url==='/api/pair/requests'&&req.method==='GET')return send([{request_id:'00000000-0000-4000-8000-000000000004',device_name:'Windows Test PC',platform:'windows',arch:'x86_64',verification_code:'482731'}]);
+    if(req.url==='/api/pair/00000000-0000-4000-8000-000000000004/approve'&&req.method==='POST')return send({state:'approved',device_id:'paired-fixture'});
+    if(req.url==='/api/pair/00000000-0000-4000-8000-000000000004/reject'&&req.method==='POST')return send({ok:true});
     if(req.url==='/api/enrollments'&&req.method==='POST')return send({code:'fixture-5-minute-code',expires_at_unix_ms:Date.now()+300000});
     if(req.url==='/api/events'){res.writeHead(200,{'Content-Type':'text/event-stream'});res.write(': connected\n\n');streams.add(res);res.on('close',()=>streams.delete(res));return;}
     if(req.url==='/api/overview')return send({devices,sessions,activity:[]});
@@ -93,6 +97,11 @@ const server=http.createServer(async(req,res)=>{
     await page.locator('#login-password').fill('fixture-password-123');await page.locator('#login-submit').click();
     await page.locator('#overview-devices [data-device="online"]').waitFor();
     await page.locator('#add-device').click();
+    await page.waitForFunction(()=>document.querySelector('#pending-pairs').textContent.includes('Windows Test PC'));
+    assert.match(await page.locator('#pending-pairs').textContent(),/482731/);
+    await page.locator('#pending-pairs [data-pair-action="approve"]').click();
+    await page.waitForFunction(()=>document.querySelector('#pair-result').textContent.includes('Approved'));
+    await page.locator('.legacy-enrollment summary').click();
     await page.locator('#create-enrollment').click();
     await page.waitForFunction(()=>document.querySelector('#enrollment-code').textContent.includes('fixture-5-minute-code'));
     await page.locator('[data-platform="windows"]').click();
@@ -105,8 +114,14 @@ const server=http.createServer(async(req,res)=>{
     await page.waitForFunction(()=>document.querySelector('#device-detail').classList.contains('active'));
     assert.equal(await page.locator('#view-title').textContent(),badName);
     assert.equal(await page.locator('#device-summary img').count(),0);
+    await page.locator('#device-rename').click();
+    await page.locator('#device-rename-name').fill('Developer Mac');
+    await page.locator('#device-rename-form button[type="submit"]').click();
+    await page.waitForFunction(()=>document.querySelector('#device-rename-form').classList.contains('hidden'));
+    assert.equal(await page.locator('#view-title').textContent(),'Developer Mac');
     await page.locator('#device-status').click();await page.locator('#device-status-output').waitFor();
     assert.match(await page.locator('#device-status-output').textContent(),/PID: 100/);
+    devices[0].device_name=badName;
     await page.locator('#device-permissions').click();
     await page.waitForFunction(()=>document.querySelector('#device-status-output').textContent.includes('Needs permission'));
     await page.locator('[data-device-tab="files"]').click();await page.locator('#files-browse button').first().click();

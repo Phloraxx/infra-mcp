@@ -317,3 +317,18 @@ These patches were developed in an isolated worktree. They do **not** imply that
 - Windows installer preflights and verifies both assets before mutating destination; reports missing release assets explicitly, retains safe `-UseBasicParsing` download mode, and isolates staging files. Dashboard generated Windows command now explicitly downloads scripts with basic parsing.
 - Added Windows PowerShell 5.1 CI fixture covering no-partial-install preflight, native local-source install, isolated one-time enrollment, paths with spaces and signed handshake.
 - This does not establish the referenced separate Windows session's unseen error; actual physical Windows, release-signing and restart acceptance remain open. See [WINDOWS_INSTALL_ACCEPTANCE.md](WINDOWS_INSTALL_ACCEPTANCE.md).
+
+## 2026-10-24 — Native setup and owner-approved pairing candidate
+
+First implementation slice in the isolated feature worktree (not deployed):
+
+- SQLite pairing v4 stores durable requests, verification code, expiry, key, and approved device ID, with idempotent retries and bounded pending requests.
+- Signed public pairing request and status APIs and owner-authenticated, CSRF-protected approval/reject/list endpoints. Approval does not mark the device online.
+- Native agent pairing-only mode reuses the existing pending Ed25519 key, shows the OS hostname and verification code, and saves an identity after approval.
+- Native CLI setup mode pairs if needed, retains existing device identity and name overrides, registers user-level startup, and requires actual online status before printing Connected.
+- Dashboard adds pending owner approval plus rename functionality. The alias is stored separately from the device hostname; legacy code-based enrollment remains available.
+- Bootstrap wrappers support no-code pairing, and Windows Scheduled Task launching now checks execution errors.
+- Linux end-to-end smoke tested owner authentication, signed pairing, rejection of wrong codes/signatures, setup retry with stable identity, and a real signed agent connection.
+- Local Rust workspace tests, strict lint, legacy/password/pairing smokes and Chromium browser fixture passed.
+
+Remaining release gates: authenticated published binaries, verified short production bootstrap command, atomic cross-version update/rollback, initial browser handoff, Windows user-login and reboot tests, public no-VPN WSS staging, OAuth dirty-worktree reconciliation, Android parity. Existing services and identities were not changed.

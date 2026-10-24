@@ -1,6 +1,7 @@
 mod auth;
 mod copy;
 mod oauth;
+mod pairing;
 mod store;
 
 use anyhow::Context;
@@ -185,6 +186,33 @@ struct EnrollInput {
 struct EnrollOutput {
     device_id: String,
     device_name: String,
+}
+#[derive(Debug, Deserialize)]
+struct PairRequestInput {
+    request_id: String,
+    device_name: String,
+    public_key: String,
+    platform: String,
+    arch: String,
+    agent_version: String,
+    signature: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct PairStatusInput {
+    request_id: String,
+    public_key: String,
+    signature: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct ApprovePairInput {
+    verification_code: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct RenameDeviceInput {
+    name: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -1118,6 +1146,10 @@ fn build_app(state: AppState) -> Router {
         .route("/api/activity", get(list_activity_http))
         .route("/api/events", get(dashboard_events))
         .route("/api/enrollments", post(create_enrollment))
+        .route("/api/pair/requests", get(list_pending_pairs))
+        .route("/api/pair/{request_id}/approve", post(approve_pair))
+        .route("/api/pair/{request_id}/reject", post(reject_pair))
+        .route("/api/devices/{device_id}/rename", post(rename_device))
         .route("/api/auth/password", post(change_browser_password))
         .route("/api/devices/{device_id}/revoke", post(revoke_device))
         .route(
@@ -1164,6 +1196,8 @@ fn build_app(state: AppState) -> Router {
                 .delete(browser_logout),
         )
         .route("/enroll", post(enroll))
+        .route("/pair/request", post(request_pair))
+        .route("/pair/status", post(pair_status))
         .route("/agent", get(agent_upgrade))
         .layer(middleware::from_fn_with_state(
             state.clone(),
@@ -1810,7 +1844,10 @@ async fn dashboard_sessions(state: &AppState) -> Result<Vec<DashboardSession>, S
                 boot_id: item.boot_id.clone(),
                 started_at_unix_ms: item.started_at_unix_ms,
                 device_id: record.device_id.clone(),
-                device_name: record.device_name.clone(),
+                device_name: record
+                    .display_name
+                    .clone()
+                    .unwrap_or_else(|| record.device_name.clone()),
                 device_online: live.is_some(),
             });
         }
@@ -1927,6 +1964,171 @@ async fn enroll(State(state): State<AppState>, Json(input): Json<EnrollInput>) -
             (StatusCode::CONFLICT, "enrollment code already used").into_response()
         }
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+    }
+}
+
+// Proof of possession for an untrusted candidate key. Approval grants trust.
+fn verify_pair_signature(key: &str, signature: &str, message: &[u8]) -> Option<[u8; 32]> {
+    let bytes = URL_SAFE_NO_PAD.decode(key).ok()?;
+    let key_bytes: [u8; 32] = bytes.try_into().ok()?;
+    let verifying = VerifyingKey::from_bytes(&key_bytes).ok()?;
+    let sig: [u8; 64] = URL_SAFE_NO_PAD.decode(signature).ok()?.try_into().ok()?;
+    verifying
+        .verify_strict(message, &Signature::from_bytes(&sig))
+        .ok()?;
+    Some(key_bytes)
+}
+
+fn pair_field_valid(field: &str, maximum: usize) -> bool {
+    !field.trim().is_empty() && field.len() <= maximum && !field.contains(['\r', '\n', '\0'])
+}
+
+fn pair_request_message(input: &PairRequestInput) -> String {
+    format!(
+        "infra-pair-request-v1\n{}\n{}\n{}\n{}\n{}\n{}",
+        input.request_id,
+        input.public_key,
+        input.device_name,
+        input.platform,
+        input.arch,
+        input.agent_version,
+    )
+}
+
+async fn request_pair(
+    State(state): State<AppState>,
+    Json(input): Json<PairRequestInput>,
+) -> Response {
+    if Uuid::parse_str(&input.request_id).is_err()
+        || !pair_field_valid(&input.device_name, 120)
+        || !pair_field_valid(&input.platform, 32)
+        || !pair_field_valid(&input.arch, 32)
+        || !pair_field_valid(&input.agent_version, 64)
+    {
+        return (StatusCode::BAD_REQUEST, "invalid pairing request").into_response();
+    }
+    let Some(key) = verify_pair_signature(
+        &input.public_key,
+        &input.signature,
+        pair_request_message(&input).as_bytes(),
+    ) else {
+        return (StatusCode::UNAUTHORIZED, "invalid pairing key proof").into_response();
+    };
+    match state.store.request_pair(
+        &input.request_id,
+        &key,
+        &input.device_name,
+        &input.platform,
+        &input.arch,
+        &input.agent_version,
+    ) {
+        Ok(record) => {
+            state.emit("pair_requested", None);
+            Json(record).into_response()
+        }
+        Err(StoreError::PairCapacity) => (
+            StatusCode::TOO_MANY_REQUESTS,
+            "pairing is busy; try again later",
+        )
+            .into_response(),
+        Err(StoreError::PairConflict) => {
+            (StatusCode::CONFLICT, "pairing identity conflict").into_response()
+        }
+        Err(_) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+    }
+}
+
+async fn pair_status(
+    State(state): State<AppState>,
+    Json(input): Json<PairStatusInput>,
+) -> Response {
+    if Uuid::parse_str(&input.request_id).is_err() {
+        return StatusCode::BAD_REQUEST.into_response();
+    }
+    let message = format!("infra-pair-status-v1\n{}", input.request_id);
+    let Some(key) = verify_pair_signature(&input.public_key, &input.signature, message.as_bytes())
+    else {
+        return StatusCode::UNAUTHORIZED.into_response();
+    };
+    match state.store.pair_status(&input.request_id, &key) {
+        Ok(record) => Json(record).into_response(),
+        Err(StoreError::PairInvalid) => StatusCode::NOT_FOUND.into_response(),
+        Err(_) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+    }
+}
+
+async fn list_pending_pairs(State(state): State<AppState>) -> Response {
+    match state.store.pending_pairs() {
+        Ok(records) => Json(records).into_response(),
+        Err(_) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+    }
+}
+
+async fn approve_pair(
+    State(state): State<AppState>,
+    Path(request_id): Path<String>,
+    Json(input): Json<ApprovePairInput>,
+) -> Response {
+    if Uuid::parse_str(&request_id).is_err()
+        || input.verification_code.len() != 6
+        || !input.verification_code.bytes().all(|b| b.is_ascii_digit())
+    {
+        return StatusCode::BAD_REQUEST.into_response();
+    }
+    match state
+        .store
+        .approve_pair(&request_id, &input.verification_code)
+    {
+        Ok(record) => {
+            let _ = state.store.record_activity(
+                record.device_id.as_deref(),
+                "pair.approve",
+                "ok",
+                Some(&request_id),
+            );
+            state.emit("pair_approved", record.device_id.clone());
+            Json(record).into_response()
+        }
+        Err(StoreError::PairInvalid) => StatusCode::NOT_FOUND.into_response(),
+        Err(StoreError::PairMismatch) => StatusCode::FORBIDDEN.into_response(),
+        Err(StoreError::PairExpired) => StatusCode::GONE.into_response(),
+        Err(StoreError::PairConflict) => StatusCode::CONFLICT.into_response(),
+        Err(_) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+    }
+}
+
+async fn reject_pair(State(state): State<AppState>, Path(request_id): Path<String>) -> Response {
+    if Uuid::parse_str(&request_id).is_err() {
+        return StatusCode::BAD_REQUEST.into_response();
+    }
+    match state.store.reject_pair(&request_id) {
+        Ok(true) => {
+            state.emit("pair_rejected", None);
+            Json(serde_json::json!({"ok":true})).into_response()
+        }
+        Ok(false) => StatusCode::NOT_FOUND.into_response(),
+        Err(_) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+    }
+}
+
+async fn rename_device(
+    State(state): State<AppState>,
+    Path(device_id): Path<String>,
+    Json(input): Json<RenameDeviceInput>,
+) -> Response {
+    match state
+        .store
+        .set_device_alias(&device_id, input.name.as_deref())
+    {
+        Ok(true) => {
+            state.emit("device_renamed", Some(device_id.clone()));
+            Json(serde_json::json!({"ok":true,"device_id":device_id})).into_response()
+        }
+        Ok(false) => StatusCode::NOT_FOUND.into_response(),
+        Err(StoreError::PairInvalid) => {
+            (StatusCode::BAD_REQUEST, "invalid display name").into_response()
+        }
+        Err(_) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
     }
 }
 
@@ -2285,7 +2487,7 @@ fn device_view(record: DeviceRecord, live: Option<&DeviceConnection>) -> McpDevi
         .unwrap_or(0);
     McpDeviceView {
         device_id: record.device_id,
-        device_name: record.device_name,
+        device_name: record.display_name.unwrap_or(record.device_name),
         agent_version: live
             .map(|d| d.hello.agent_version.clone())
             .unwrap_or(record.agent_version),
@@ -2464,11 +2666,19 @@ fn select_device<'a>(
             Ok(record)
         };
     }
-    let exact: Vec<_> = records.iter().filter(|d| d.device_name == key).collect();
+    let exact: Vec<_> = records
+        .iter()
+        .filter(|d| d.device_name == key || d.display_name.as_deref() == Some(key))
+        .collect();
     let matches: Vec<_> = if exact.is_empty() {
         records
             .iter()
-            .filter(|d| d.device_name.eq_ignore_ascii_case(key))
+            .filter(|d| {
+                d.device_name.eq_ignore_ascii_case(key)
+                    || d.display_name
+                        .as_deref()
+                        .is_some_and(|name| name.eq_ignore_ascii_case(key))
+            })
             .collect()
     } else {
         exact
@@ -2825,6 +3035,7 @@ mod tests {
         DeviceRecord {
             device_id: id.to_owned(),
             device_name: name.to_owned(),
+            display_name: None,
             public_key: None,
             platform: "linux".into(),
             arch: "aarch64".into(),

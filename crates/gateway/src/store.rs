@@ -27,12 +27,23 @@ pub enum StoreError {
     EnrollmentExpired,
     #[error("enrollment code was already consumed")]
     EnrollmentConsumed,
+    #[error("pairing request does not exist")]
+    PairInvalid,
+    #[error("pairing approval code does not match")]
+    PairMismatch,
+    #[error("pairing request has expired")]
+    PairExpired,
+    #[error("pairing request conflicts with a different identity")]
+    PairConflict,
+    #[error("too many pending pairing requests")]
+    PairCapacity,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DeviceRecord {
     pub device_id: String,
     pub device_name: String,
+    pub display_name: Option<String>,
     pub public_key: Option<Vec<u8>>,
     pub platform: String,
     pub arch: String,
@@ -88,7 +99,7 @@ impl Store {
         Ok(store)
     }
 
-    fn connection(&self) -> Result<Connection, StoreError> {
+    pub(super) fn connection(&self) -> Result<Connection, StoreError> {
         let conn = Connection::open(&self.path)?;
         conn.pragma_update(None, "foreign_keys", "ON")?;
         conn.busy_timeout(std::time::Duration::from_secs(3))?;
@@ -158,6 +169,32 @@ impl Store {
                 "ALTER TABLE devices ADD COLUMN last_disconnect_reason TEXT;
                  ALTER TABLE devices ADD COLUMN last_disconnect_at_ms INTEGER;
                  PRAGMA user_version=3;",
+            )?;
+        }
+        if version < 4 {
+            conn.execute_batch(
+                "CREATE TABLE IF NOT EXISTS pair_requests (
+                    request_id TEXT PRIMARY KEY,
+                    code TEXT NOT NULL,
+                    public_key BLOB NOT NULL,
+                    device_name TEXT NOT NULL,
+                    platform TEXT NOT NULL,
+                    arch TEXT NOT NULL,
+                    agent_version TEXT NOT NULL,
+                    created_at_ms INTEGER NOT NULL,
+                    expires_at_ms INTEGER NOT NULL,
+                    approved_at_ms INTEGER,
+                    device_id TEXT,
+                    FOREIGN KEY(device_id) REFERENCES devices(device_id)
+                 );
+                 CREATE INDEX IF NOT EXISTS pair_requests_expires_idx ON pair_requests(expires_at_ms);
+                 PRAGMA user_version=4;",
+            )?;
+        }
+        if version < 5 {
+            conn.execute_batch(
+                "ALTER TABLE devices ADD COLUMN display_name TEXT;
+                 PRAGMA user_version=5;",
             )?;
         }
         Ok(())
@@ -275,7 +312,7 @@ impl Store {
         conn.query_row(
             r#"SELECT device_id, device_name, public_key, platform, arch, agent_version,
                boot_id, capabilities_json, metadata_json, paired_at_ms, last_seen_ms,
-               revoked, reconcile_json, last_disconnect_reason, last_disconnect_at_ms FROM devices WHERE device_id=?1"#,
+               revoked, reconcile_json, last_disconnect_reason, last_disconnect_at_ms, display_name FROM devices WHERE device_id=?1"#,
             params![device_id],
             decode_device,
         )
@@ -288,11 +325,27 @@ impl Store {
         let mut stmt = conn.prepare(
             r#"SELECT device_id, device_name, public_key, platform, arch, agent_version,
                boot_id, capabilities_json, metadata_json, paired_at_ms, last_seen_ms,
-               revoked, reconcile_json, last_disconnect_reason, last_disconnect_at_ms FROM devices ORDER BY device_name COLLATE NOCASE"#,
+               revoked, reconcile_json, last_disconnect_reason, last_disconnect_at_ms, display_name FROM devices ORDER BY COALESCE(display_name, device_name) COLLATE NOCASE"#,
         )?;
         let rows = stmt.query_map([], decode_device)?;
         rows.collect::<Result<Vec<_>, _>>()
             .map_err(StoreError::from)
+    }
+
+    pub fn set_device_alias(
+        &self,
+        device_id: &str,
+        name: Option<&str>,
+    ) -> Result<bool, StoreError> {
+        let name = name.map(str::trim).filter(|value| !value.is_empty());
+        if name.is_some_and(|value| value.len() > 120 || value.contains(['\n', '\r', '\0'])) {
+            return Err(StoreError::PairInvalid);
+        }
+        let conn = self.connection()?;
+        Ok(conn.execute(
+            "UPDATE devices SET display_name=?2 WHERE device_id=?1 AND revoked=0",
+            params![device_id, name],
+        )? > 0)
     }
 
     pub fn record_connect(
@@ -415,6 +468,7 @@ fn decode_device(row: &rusqlite::Row<'_>) -> rusqlite::Result<DeviceRecord> {
     Ok(DeviceRecord {
         device_id: row.get(0)?,
         device_name: row.get(1)?,
+        display_name: row.get(15)?,
         public_key: row.get(2)?,
         platform: row.get(3)?,
         arch: row.get(4)?,
@@ -450,6 +504,44 @@ pub fn now_ms() -> u64 {
 mod tests {
     use super::*;
     use tempfile::tempdir;
+
+    #[test]
+    fn display_alias_survives_database_reopen_and_does_not_change_signed_name() {
+        let dir = tempdir().unwrap();
+        let db = dir.path().join("db");
+        let store = Store::open(&db).unwrap();
+        let enroll = store.create_enrollment(60_000).unwrap();
+        let device = store
+            .consume_enrollment(
+                &enroll.code,
+                "one",
+                "DESKTOP-123",
+                &[22u8; 32],
+                "windows",
+                "x86_64",
+                "test",
+            )
+            .unwrap();
+        assert!(
+            store
+                .set_device_alias(&device.device_id, Some("Work PC"))
+                .unwrap()
+        );
+        drop(store);
+        let reopened = Store::open(&db).unwrap();
+        let record = reopened.get_device(&device.device_id).unwrap().unwrap();
+        assert_eq!(record.device_name, "DESKTOP-123");
+        assert_eq!(record.display_name.as_deref(), Some("Work PC"));
+        assert!(reopened.set_device_alias(&device.device_id, None).unwrap());
+        assert_eq!(
+            reopened
+                .get_device(&device.device_id)
+                .unwrap()
+                .unwrap()
+                .display_name,
+            None
+        );
+    }
 
     #[test]
     fn enrollment_is_single_use_but_idempotent_for_same_request() {

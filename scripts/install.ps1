@@ -12,10 +12,6 @@ param(
 $ErrorActionPreference = "Stop"
 $Repo = "Phloraxx/infra-mcp"
 
-if (-not (Test-Path "$StateDir\identity.json") -and [string]::IsNullOrWhiteSpace($Code)) {
-  throw "-Code is required for a device that is not already enrolled"
-}
-
 $Arch = switch ([System.Runtime.InteropServices.RuntimeInformation]::OSArchitecture.ToString()) {
   "X64" { "x86_64" }
   "Arm64" { "aarch64" }
@@ -93,13 +89,16 @@ try {
 
   $Cli = Join-Path $InstallDir "infra.exe"
   $Agent = Join-Path $InstallDir "infra-agent.exe"
-  $Arguments = @("install", "--gateway", $Gateway, "--agent", $Agent, "--state-dir", $StateDir)
+  # No enrollment code means device-initiated, owner-approved pairing.
+  # Older devices can still provide -Code explicitly for legacy enrollment.
+  $CommandName = if ([string]::IsNullOrWhiteSpace($Code)) { "setup" } else { "install" }
+  $Arguments = @($CommandName, "--gateway", $Gateway, "--agent", $Agent, "--state-dir", $StateDir)
   if (-not [string]::IsNullOrWhiteSpace($Code)) { $Arguments += @("--code", $Code) }
-  if (-not [string]::IsNullOrWhiteSpace($Name)) { $Arguments += @("--name", $Name) }
+  if (-not [string]::IsNullOrWhiteSpace($Name) -and $CommandName -eq "install") { $Arguments += @("--name", $Name) }
   if ($NoStartup) { $Arguments += "--no-startup" }
 
   & $Cli @Arguments
-  if ($LASTEXITCODE -ne 0) { throw "Infra CLI installation failed with exit code $LASTEXITCODE" }
+  if ($LASTEXITCODE -ne 0) { throw "Infra $CommandName did not complete (exit code $LASTEXITCODE). Your existing identity was preserved. Run Infra setup again or Infra doctor to diagnose." }
 
   Write-Host ""
   Write-Host "Installed:"

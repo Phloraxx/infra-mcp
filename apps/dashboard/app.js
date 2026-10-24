@@ -122,12 +122,75 @@ function connectEvents(){
     scheduleRefresh();
   };
 }
-$('#add-device').addEventListener('click',()=>{$('#enroll-start').classList.remove('hidden');$('#enroll-result').classList.add('hidden');$('#enroll-dialog').showModal();});
+let pairPollTimer=null;
+async function refreshPendingPairs(){
+  if(!$('#enroll-dialog').open||!state.authenticated)return;
+  try{
+    const pairs=await jsonFetch('/api/pair/requests');
+    if(!$('#enroll-dialog').open)return;
+    $('#pair-error').textContent='';
+    $('#pending-pairs').innerHTML=pairs.length?pairs.map(pair=>
+      '<div class="pending-pair">'+
+      '<div class="pending-pair-head"><strong>'+esc(pair.device_name)+'</strong><span class="muted small">'+esc(pair.platform)+' · '+esc(pair.arch)+'</span></div>'+
+      '<div class="pending-code">Compare: <strong>'+esc(pair.verification_code)+'</strong></div>'+
+      '<div class="row-actions"><button type="button" class="primary" data-pair-action="approve" data-pair-id="'+esc(pair.request_id)+'" data-pair-code="'+esc(pair.verification_code)+'">Approve this computer</button>'+
+      '<button type="button" class="secondary" data-pair-action="reject" data-pair-id="'+esc(pair.request_id)+'">Reject</button></div></div>'
+    ).join(''):'<p class="muted small">No computers are requesting approval yet.</p>';
+  }catch(error){$('#pair-error').textContent=error.message;}
+}
+$('#enroll-dialog').addEventListener('close',()=>{clearInterval(pairPollTimer);pairPollTimer=null;});
+$('#pending-pairs').addEventListener('click',async event=>{
+  const button=event.target.closest('button[data-pair-action]');
+  if(!button)return;
+  const id=button.dataset.pairId,action=button.dataset.pairAction;
+  button.disabled=true;$('#pair-error').textContent='';
+  try{
+    if(action==='approve'){
+      await jsonFetch('/api/pair/'+encodeURIComponent(id)+'/approve',{method:'POST',body:JSON.stringify({verification_code:button.dataset.pairCode})});
+      $('#pair-result').textContent='Approved. Waiting for this computer to connect…';
+    }else{
+      await jsonFetch('/api/pair/'+encodeURIComponent(id)+'/reject',{method:'POST'});
+      $('#pair-result').textContent='Pairing request rejected.';
+    }
+    await refreshPendingPairs();scheduleRefresh();
+  }catch(error){$('#pair-error').textContent=error.message;button.disabled=false;}
+});
+$('#add-device').addEventListener('click',()=>{
+  $('#enroll-start').classList.remove('hidden');$('#enroll-result').classList.add('hidden');
+  $('#pair-result').textContent='';$('#pair-error').textContent='';
+  $('#enroll-dialog').showModal();
+  refreshPendingPairs();
+  clearInterval(pairPollTimer);
+  pairPollTimer=setInterval(refreshPendingPairs,2500);
+});
 $('#create-enrollment').addEventListener('click',async()=>{const button=$('#create-enrollment');button.disabled=true;button.textContent='Creating…';try{state.enrollment=await jsonFetch('/api/enrollments',{method:'POST',body:JSON.stringify({ttl_seconds:300})});$('#enrollment-code').textContent=state.enrollment.code;$('#enrollment-expiry').textContent=`Expires ${new Date(state.enrollment.expires_at_unix_ms).toLocaleTimeString()}`;$('#enroll-start').classList.add('hidden');$('#enroll-result').classList.remove('hidden');updateInstallCommand();}catch(error){alert(error.message);}finally{button.disabled=false;button.textContent='Create enrollment code';}});
 function gatewayWs(){const url=new URL(location.href);url.protocol=url.protocol==='https:'?'wss:':'ws:';url.pathname='/agent';url.search='';url.hash='';return url.toString();}
 function updateInstallCommand(){if(!state.enrollment)return;const code=state.enrollment.code;const name=$('#device-name').value.trim();const nameArg=name?` --name ${shellQuote(name)}`:'';if(state.platform==='unix'){const script=`${location.origin}/downloads/install.sh`;$('#install-command').textContent=`curl -fsSL ${shellQuote(script)} | sh -s -- --gateway ${shellQuote(gatewayWs())} --code ${shellQuote(code)}${nameArg}`;}else{const script=`${location.origin}/downloads/install.ps1`;const psName=name?` -Name ${psQuote(name)}`:'';$('#install-command').textContent=`& ([scriptblock]::Create((Invoke-WebRequest -UseBasicParsing -Uri ${psQuote(script)}).Content)) -Gateway ${psQuote(gatewayWs())} -Code ${psQuote(code)}${psName}`;}}
 function shellQuote(s){return `'${String(s).replaceAll("'","'\\''")}'`; }function psQuote(s){return `'${String(s).replaceAll("'","''")}'`;}
 $$('.tab[data-platform]').forEach(tab=>tab.addEventListener('click',()=>{state.platform=tab.dataset.platform;$$('.tab').forEach(t=>t.classList.toggle('active',t===tab));updateInstallCommand();}));$('#device-name').addEventListener('input',updateInstallCommand);$('#copy-command').addEventListener('click',async()=>{await navigator.clipboard.writeText($('#install-command').textContent);$('#copy-command').textContent='Copied';setTimeout(()=>$('#copy-command').textContent='Copy',1200);});
+$('#device-rename').addEventListener('click',()=>{
+  const device=currentDevice();
+  if(!device)return;
+  $('#device-rename-name').value=device.device_name;
+  $('#device-rename-error').textContent='';
+  $('#device-rename-form').classList.remove('hidden');
+  $('#device-rename-name').focus();
+});
+$('#device-rename-cancel').addEventListener('click',()=>$('#device-rename-form').classList.add('hidden'));
+$('#device-rename-form').addEventListener('submit',async event=>{
+  event.preventDefault();
+  const device=currentDevice();
+  if(!device)return;
+  const button=$('#device-rename-form button[type="submit"]');
+  button.disabled=true;$('#device-rename-error').textContent='';
+  try{
+    await jsonFetch('/api/devices/'+encodeURIComponent(device.device_id)+'/rename',{
+      method:'POST',body:JSON.stringify({name:$('#device-rename-name').value.trim()||null})
+    });
+    $('#device-rename-form').classList.add('hidden');await refresh();
+  }catch(error){$('#device-rename-error').textContent=error.message;}
+  finally{button.disabled=false;}
+});
 $('#logout-session').addEventListener('click',async()=>{try{await fetch('/api/auth/session',{method:'DELETE',credentials:'same-origin',headers:{'X-Infra-CSRF':'1'}});}finally{clearPrivateViews();$('#login-password').value='';$('#password-change').reset();showSignedOut();}});
 
 function currentDevice(id=state.device){return state.devices.find(d=>d.device_id===id);}

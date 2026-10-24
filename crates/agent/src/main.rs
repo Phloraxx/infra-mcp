@@ -61,6 +61,7 @@ struct AgentContext {
 struct StartupArgs {
     state_dir: PathBuf,
     enroll_only: bool,
+    pair_only: bool,
 }
 
 #[tokio::main]
@@ -109,6 +110,19 @@ async fn main() -> anyhow::Result<()> {
         })
         .unwrap_or_else(|| platform.hostname.clone());
     update_runtime(&state_dir, "starting", None, None, None, None);
+
+    if startup.pair_only {
+        identity::pair_with_owner(
+            &state_dir,
+            &gateway_url,
+            &platform.hostname,
+            platform.platform,
+            platform.arch,
+            env!("CARGO_PKG_VERSION"),
+        )
+        .await?;
+        return Ok(());
+    }
 
     let enrollment_code = std::env::var("INFRA_ENROLLMENT_CODE").ok();
     let device_identity = match identity::load_or_enroll(
@@ -200,6 +214,7 @@ async fn main() -> anyhow::Result<()> {
 fn parse_startup_args(args: &[String]) -> anyhow::Result<StartupArgs> {
     let mut state_dir = identity::default_state_dir();
     let mut enroll_only = false;
+    let mut pair_only = false;
     let mut index = 0;
     while index < args.len() {
         match args[index].as_str() {
@@ -211,6 +226,7 @@ fn parse_startup_args(args: &[String]) -> anyhow::Result<StartupArgs> {
                 state_dir = PathBuf::from(value);
             }
             "--enroll-only" => enroll_only = true,
+            "--pair-only" => pair_only = true,
             other => return Err(anyhow!("unknown agent argument {other:?}")),
         }
         index += 1;
@@ -218,6 +234,7 @@ fn parse_startup_args(args: &[String]) -> anyhow::Result<StartupArgs> {
     Ok(StartupArgs {
         state_dir,
         enroll_only,
+        pair_only,
     })
 }
 

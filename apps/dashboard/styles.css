@@ -215,3 +215,18 @@ input:focus,select:focus{transform:translateY(-1px)}
 
 /* A reconnection is different from a device that has been offline for hours. */
 .status.reconnecting{color:#976c16}.status.reconnecting:before{background:#c18d23}
+
+.pair-approval{padding-bottom:16px;margin-bottom:16px;border-bottom:1px solid var(--border)}
+.pair-approval h3{font-size:14px;margin:0 0 7px}
+.pair-approval>p{margin-bottom:11px}
+.pending-pair{padding:13px;margin:11px 0;border:1px solid var(--border);border-radius:12px;background:var(--surface-2)}
+.pending-pair-head{display:flex;align-items:center;justify-content:space-between;gap:8px;flex-wrap:wrap}
+.pending-code{margin:10px 0;font-size:12px;color:var(--muted)}
+.pending-code strong{font:700 21px "SFMono-Regular",Menlo,monospace;letter-spacing:.09em;color:var(--ink);margin-left:5px}
+.pending-pair .row-actions{display:flex;gap:8px;flex-wrap:wrap}
+.legacy-enrollment summary{cursor:pointer;font-size:12px;font-weight:650;padding:6px 0}
+.legacy-enrollment>p{margin:6px 0 12px}
+
+.rename-form{display:grid;gap:9px;padding:12px;border-radius:12px;border:1px solid var(--border);margin:0 0 15px}
+.rename-form label{font-size:12px;display:grid;gap:5px}
+.rename-form .row-actions{display:flex;gap:9px;flex-wrap:wrap}

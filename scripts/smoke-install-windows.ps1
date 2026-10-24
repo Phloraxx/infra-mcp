@@ -61,11 +61,14 @@ try {
   $Status = $StatusText | ConvertFrom-Json
   if (-not $Status.configured -or -not $Status.enrolled) { throw "Native Windows enrollment/config failed" }
 
-  $AgentProcess = Start-Process -FilePath (Join-Path $Install "infra-agent.exe") -ArgumentList @("--state-dir", ('"' + $State + '"')) -PassThru -NoNewWindow -RedirectStandardOutput (Join-Path $TempRoot "agent.out") -RedirectStandardError (Join-Path $TempRoot "agent.err")
+  # Validate the real Windows scheduled startup, not only a manually launched
+  # process: the user task must be registered, started and signed online.
+  & (Join-Path $Install "infra.exe") repair --state-dir $State
+  if ($LASTEXITCODE -ne 0) { throw "Windows Scheduled Task startup repair failed" }
   $Online = $false
   for ($i = 0; $i -lt 70; $i++) {
     Start-Sleep -Milliseconds 150
-    if ($AgentProcess.HasExited) { throw "Windows native agent exited unexpectedly" }
+    if (-not (Get-ScheduledTask -TaskName "Infra MCP Agent" -ErrorAction SilentlyContinue)) { throw "Windows startup task disappeared" }
     $Devices = Invoke-RestMethod -Uri "$Base/api/devices" -Headers $Headers
     if (@($Devices | Where-Object { $_.device_name -eq "Windows Install Smoke" -and $_.online }).Count -eq 1) {
       $Online = $true
@@ -73,9 +76,12 @@ try {
     }
   }
   if (-not $Online) { throw "Windows signed agent never came online" }
-  Write-Host "Windows bootstrap smoke PASS: both-binary preflight, spaces in paths, source install, signed enrollment, CLI status and live agent handshake"
+  Write-Host "Windows bootstrap smoke PASS: verified preflight, spaces in paths, signed enrollment, Scheduled Task launch, CLI status and live agent handshake"
 }
 finally {
+  if (Test-Path -LiteralPath (Join-Path $Install "infra.exe")) {
+    & (Join-Path $Install "infra.exe") uninstall --state-dir $State 2>$null | Out-Null
+  }
   if ($null -ne $AgentProcess -and -not $AgentProcess.HasExited) { Stop-Process -Id $AgentProcess.Id -Force -ErrorAction SilentlyContinue }
   if ($null -ne $GatewayProcess -and -not $GatewayProcess.HasExited) { Stop-Process -Id $GatewayProcess.Id -Force -ErrorAction SilentlyContinue }
   Remove-Item -LiteralPath $TempRoot -Recurse -Force -ErrorAction SilentlyContinue

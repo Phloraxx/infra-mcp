@@ -128,7 +128,12 @@
         </nav>
 
         <div id="device-overview" class="device-pane panel panel-large">
-          <div class="section-head"><div><span class="eyebrow">CONTROL SURFACE</span><h2>Capabilities</h2><p>What this agent currently advertises.</p></div><div class="row-actions"><button id="device-status" class="secondary">Check agent</button><button id="device-permissions" class="secondary hidden">Check permissions</button></div></div>
+          <div class="section-head"><div><span class="eyebrow">CONTROL SURFACE</span><h2>Capabilities</h2><p>What this agent currently advertises.</p></div><div class="row-actions"><button id="device-status" class="secondary">Check agent</button><button id="device-rename" class="secondary">Rename</button><button id="device-permissions" class="secondary hidden">Check permissions</button></div></div>
+          <form id="device-rename-form" class="rename-form hidden">
+            <label>Device display name<input id="device-rename-name" maxlength="120" autocomplete="off" placeholder="Use computer name"></label>
+            <div class="row-actions"><button class="primary" type="submit">Save name</button><button id="device-rename-cancel" type="button" class="secondary">Cancel</button></div>
+            <p id="device-rename-error" class="error" role="alert"></p>
+          </form>
           <div id="device-capabilities" class="capability-grid"></div>
           <pre id="device-status-output" class="status-output hidden"></pre>
         </div>
@@ -188,6 +193,16 @@
   <dialog id="enroll-dialog">
     <form method="dialog" class="dialog-card">
       <div class="dialog-head"><div><span class="eyebrow">ENROLLMENT</span><h2>Add a device</h2><p>Generate a one-time code. The new device creates and keeps its own long-lived key.</p></div><button value="cancel" class="icon-button" aria-label="Close">×</button></div>
+      <section id="pair-approval" class="pair-approval" aria-label="Approve a computer">
+        <h3>Approve a computer</h3>
+        <p class="muted small">Start Infra setup on the computer. Its detected name and verification code will appear here. Approve only if this code matches the one shown on your computer.</p>
+        <div id="pending-pairs" aria-live="polite"><p class="muted small">Checking for computers…</p></div>
+        <p id="pair-result" class="small" role="status"></p>
+        <p id="pair-error" class="error" role="alert"></p>
+      </section>
+      <details class="legacy-enrollment">
+        <summary>Manual enrollment (older devices)</summary>
+        <p class="muted small">Use only for an older Infra agent requiring an enrollment code.</p>
       <div id="enroll-start" class="enroll-start">
         <label>Friendly name <input id="device-name" placeholder="Optional — defaults to hostname"></label>
         <button id="create-enrollment" type="button" class="primary wide">Create enrollment code</button>
@@ -198,6 +213,7 @@
         <div class="command-wrap"><pre id="install-command"></pre><button id="copy-command" type="button" class="secondary">Copy</button></div>
         <p class="muted small">The code expires automatically and can enroll only one device.</p>
       </div>
+      </details>
     </form>
   </dialog>
 

@@ -94,6 +94,7 @@ async fn run() -> anyhow::Result<ExitCode> {
             })
         }
         "install" => install_command(&state_dir, args).await,
+        "setup" => setup_command(&state_dir, args).await,
         "repair" => {
             ensure_no_args(&args)?;
             let previous_runtime = read_runtime(&state_dir).ok().flatten();
@@ -165,6 +166,84 @@ async fn run() -> anyhow::Result<ExitCode> {
         }
         other => Err(anyhow!("unknown command {other:?}; run `infra help`")),
     }
+}
+
+// The native setup command is the single lifecycle entry point. The thin
+// platform scripts will eventually download/verify binaries and invoke it.
+async fn setup_command(state_dir: &Path, mut args: Vec<String>) -> anyhow::Result<ExitCode> {
+    let supplied_gateway =
+        take_option(&mut args, "--gateway").or_else(|| std::env::var("INFRA_GATEWAY_URL").ok());
+    let agent = take_option(&mut args, "--agent")
+        .map(PathBuf::from)
+        .unwrap_or(startup::sibling_agent_binary()?);
+    let no_startup = take_flag(&mut args, "--no-startup");
+    ensure_no_args(&args)?;
+    if !agent.is_file() {
+        return Err(anyhow!(
+            "Infra device agent was not installed at {}; download both verified binaries first",
+            agent.display()
+        ));
+    }
+    let previous = read_config(state_dir)?;
+    let gateway = match (supplied_gateway, previous.as_ref()) {
+        (Some(next), Some(config))
+            if next != config.gateway_url && identity_path(state_dir).exists() =>
+        {
+            return Err(anyhow!(
+                "This computer is already paired to a different gateway. Setup will not silently move its identity. Use the explicit gateway migration flow."
+            ));
+        }
+        (Some(url), _) => url,
+        (None, Some(config)) => config.gateway_url.clone(),
+        (None, None) => {
+            return Err(anyhow!(
+                "Infra control endpoint is not configured. Start setup from the dashboard's verified installer or supply --gateway for development."
+            ));
+        }
+    };
+    // Repair must preserve an intentional name override on older installs.
+    // Brand-new installs leave it unset so the agent detects its OS hostname.
+    let previous_name = previous
+        .as_ref()
+        .and_then(|config| config.device_name.clone());
+    let next_config = LocalConfig::new(gateway.clone(), previous_name)?;
+    if !identity_path(state_dir).is_file() {
+        println!("Infra setup — pairing this computer using its system name.");
+        let status = Command::new(&agent)
+            .args(["--pair-only", "--state-dir"])
+            .arg(state_dir)
+            .env("INFRA_GATEWAY_URL", &gateway)
+            .status()
+            .with_context(|| "start signed pairing agent")?;
+        if !status.success() {
+            return Err(anyhow!(
+                "Pairing was not completed. Your pending device identity is safe; run the same Infra setup command to retry."
+            ));
+        }
+    }
+    if previous.as_ref() != Some(&next_config) {
+        // Preserve the old configuration until pairing succeeds. New setup does
+        // not replace a healthy existing gateway or any signing key.
+        write_config(state_dir, &next_config)?;
+    }
+    if no_startup {
+        println!("Infra paired and configured; automatic startup skipped.");
+        return Ok(ExitCode::SUCCESS);
+    }
+    let previous_runtime = read_runtime(state_dir).ok().flatten();
+    startup::install(&agent, state_dir)
+        .context("Infra paired, but automatic startup needs repair; run infra doctor")?;
+    let runtime = wait_for_online_reconnect(
+        state_dir,
+        previous_runtime.as_ref(),
+        Duration::from_secs(35),
+    ).await.context("Infra is installed and paired, but the agent did not confirm an online connection. Run infra doctor.")?;
+    println!(
+        "Infra connected: {} (signed connection generation {}).",
+        runtime.device_name.as_deref().unwrap_or("this computer"),
+        runtime.connection_generation.unwrap_or_default(),
+    );
+    Ok(ExitCode::SUCCESS)
 }
 
 async fn install_command(state_dir: &Path, mut args: Vec<String>) -> anyhow::Result<ExitCode> {
@@ -1233,7 +1312,7 @@ fn yes_no(value: bool) -> &'static str {
 fn print_help() {
     println!(
         "Infra device CLI\n\n\
-Usage:\n  infra status [--json] [--state-dir PATH]\n  infra doctor [--json] [--state-dir PATH]\n  infra install --gateway WS_URL [--code CODE] [--name NAME] [--agent PATH] [--no-startup] [--state-dir PATH]\n  infra repair [--state-dir PATH]\n  infra reconnect [--state-dir PATH]\n  infra update [--version TAG] [--repo OWNER/REPO] [--base-url URL] [--trusted-update-key BASE64] [--state-dir PATH]\n  infra uninstall [--remove-state] [--state-dir PATH]\n"
+Usage:\n  infra status [--json] [--state-dir PATH]\n  infra doctor [--json] [--state-dir PATH]\n  infra setup [--gateway WS_URL] [--agent PATH] [--no-startup] [--state-dir PATH]\n  infra install --gateway WS_URL [--code CODE] [--name NAME] [--agent PATH] [--no-startup] [--state-dir PATH]\n  infra repair [--state-dir PATH]\n  infra reconnect [--state-dir PATH]\n  infra update [--version TAG] [--repo OWNER/REPO] [--base-url URL] [--trusted-update-key BASE64] [--state-dir PATH]\n  infra uninstall [--remove-state] [--state-dir PATH]\n"
     );
 }
 

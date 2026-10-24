@@ -91,9 +91,8 @@ pub fn install(agent: &Path, state_dir: &Path) -> anyhow::Result<()> {
         &command,
         "/F",
     ]))?;
-    let _ = Command::new("schtasks")
-        .args(["/Run", "/TN", WINDOWS_TASK])
-        .status();
+    // A created task is not proof that the scheduler launched it.
+    command_ok(Command::new("schtasks").args(["/Run", "/TN", WINDOWS_TASK]))?;
     Ok(())
 }
 
