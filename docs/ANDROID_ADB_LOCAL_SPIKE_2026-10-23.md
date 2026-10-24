@@ -45,3 +45,16 @@ The v0.3.1 APK was built on the Mac, integrity-verified through Infra transfer t
 - https://github.com/tytydraco/ladb
 - https://developer.android.com/privacy-and-security/keystore
 - https://developer.android.com/privacy-and-security/local-network-permission
+
+## 2026-10-24: APK footprint experiment (build-verified, phone not yet tested)
+
+A non-debuggable, R8-minified **development** APK on the same dev application ID `com.phloraxx.infraphone.dev` and versionCode 5 built successfully using the Mac's existing debug signing identity. It retains the debug source-set pairing UI, but because Android Gradle sets `BuildConfig.DEBUG=false` for a non-debuggable build, the local-only lab gating explicitly checks `BuildConfig.BUILD_TYPE == "debug"` and package suffix `.dev`.
+
+Measured build APKs:
+- Unminified P1 development APK: 9,982,785 bytes.
+- R8-minified development APK: approximately 1.79 MB (verify current exact bytes before deployment).
+- Android manifest still lists non-exported `AdbProbeActivity`, preserved `MainActivity` and outbound gateway service.
+- Retains the SPAKE2 JNI class name with a targeted R8 keep rule. BouncyCastle's unused algorithms are stripped rather than including the full provider.
+- `:app:testDebugUnitTest :app:assembleDebug` succeeded locally; signer fingerprint matched the installed debug APK's previously verified Mac key.
+
+**Tradeoffs and release gates:** the development build is now non-debuggable (`run-as`/Java debugger unavailable). Its previous debug-only cleartext enrollment fallback is disabled by `BuildConfig.DEBUG`, but existing signed HTTPS/WSS enrollment should work. Runtime Keystore, Ed25519 signed reconnection, SPAKE2 native pairing and APK installation have **not** yet been verified with the minified binary on the actual Motorola. Do not treat an R8 build pass as runtime proof; preserve the existing installed v0.3.1 until a rollback path and owner approval are ready.

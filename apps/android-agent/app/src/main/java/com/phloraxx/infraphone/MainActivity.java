@@ -112,7 +112,7 @@ public class MainActivity extends Activity {
         labelIn(advanced,"Signed transfers, owner-approved Infra Phone updates, SenseGuide APK review and optional SenseGuide-only Accessibility controls. Installations are never silent.",13,0xffA8B9D4,false);
         button(advanced,"Open developer controls",0xff3365E8,()->
             startActivity(new Intent(this,DevToolsActivity.class)));
-        if(BuildConfig.DEBUG)button(advanced,"Local ADB pairing lab (experimental)",0xff293C5E,()->
+        if("debug".equals(BuildConfig.BUILD_TYPE))button(advanced,"Local ADB pairing lab (experimental)",0xff293C5E,()->
             startActivity(new Intent().setClassName(this,"com.phloraxx.infraphone.AdbProbeActivity")));
         CheckBox reboot=new CheckBox(this);
         reboot.setText("Reconnect signed gateway after phone reboot (opt-in)");
