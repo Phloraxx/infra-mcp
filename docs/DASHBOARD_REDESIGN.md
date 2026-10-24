@@ -1,6 +1,6 @@
 # Infra Fieldwork — visual redesign
 
-**Status:** Implemented on the feature branch for review, not deployed to the public gateway.
+**Status (2026-10-24):** Deployed to infra.drbijoy.in following isolated staging and signed-agent reconnection.
 
 The previous generic SaaS card stack is replaced with a **personal operations workspace**. The visual language is quiet, technical and tactile: forest/charcoal navigation, warm mineral surfaces, citron connection signals, editorial typography and fine-lined network geometry.
 
@@ -31,4 +31,6 @@ Preview screenshots use fictional devices and sessions, not production data.
 
 ## Deployment boundary
 
-The live infra.drbijoy.in gateway runs a separate older binary. Publishing the native agent release or pushing GitHub does not deploy the dashboard; the dashboard is compiled into the gateway. A rollout must reconcile the original worktree's uncommitted OAuth changes, validate the live authentication/DB migration, public WSS ingress and rollback, and avoid disconnecting existing enrolled agents. This preview is not a claim that production was updated.
+**Deployed 2026-10-24:** The existing infra.drbijoy.in gateway service now runs build commit 16ef052 (binary SHA-256 `6913b7c0a683c39262b6d7cebe3baf3e22c87f5551610d746faebf31f3676372`). The earlier uncommitted OAuth loopback callback patch was preserved in this commit without modifying the original worktree. A live SQLite backup and isolated v2-to-v5 migration test preserved all three device identities. The old binary was proven compatible with schema v5 before cutover. An independent guardian performed the restart and validated OAuth, owner authentication, public HTTPS dashboard assets, database integrity and reconnection of both previously online agents. No remote work sessions were active. The Android agent was offline before deployment.
+
+Rollback binary, database snapshot, and audit logs are preserved at `~/.local/share/infra-v1-remote-burnin/gateway/staging-20261024-fieldwork/`. Native device binaries were **not** upgraded. Publisher-authenticated first-install bootstrap, physical Windows reboot/rollback, and long-term soak remain independent release gates.

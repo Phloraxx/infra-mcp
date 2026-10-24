@@ -350,3 +350,15 @@ GitHub CI for commit `c24ce32` completed successfully across Windows x64, macOS 
 GitHub prerelease [v0.1.0-rc.1](https://github.com/Phloraxx/infra-mcp/releases/tag/v0.1.0-rc.1) is public and contains 12 native binaries (CLI + agent for Linux, macOS and Windows on x64 and ARM64), 12 SHA-256 sidecars, a signed Ed25519 release manifest and its detached signature. All six build jobs and the release job passed. The manifest's signature was independently checked against the configured public key and its asset names/digests validated. The owner-held private signing seed is stored in macOS Keychain and an encrypted GitHub Actions secret; the nonsecret public key and fingerprint are documented in [RELEASE_PUBLISHER_KEY.md](RELEASE_PUBLISHER_KEY.md).
 
 This is a **developer/testing prerelease**, not a production-ready or OS code-signed installer. The bootstrap scripts currently check GitHub-hosted hashes without independently pinning the publisher. Public no-VPN ingress, physical Windows reboot and atomic update/rollback remain gating items. Tag v0.1.0-rc.1 points to commit 2eb9a14 on the isolated feature branch; original uncommitted OAuth work and all running production agents remain untouched.
+
+## 2026-10-24 — Fieldwork dashboard deployed to infra.drbijoy.in
+
+The live gateway now runs build commit `16ef052`, including the redesigned HTML/CSS/JS and local OAuth loopback callback compatibility. No native device-agent binaries were upgraded or re-enrolled.
+
+A consistent SQLite backup and previous gateway binary were preserved before restart. An isolated staging gateway migrated the copied production database from v2 to v5, preserving all three enrolled device identities. The old gateway was separately tested against v5 to prove binary rollback compatibility.
+
+An independently executing guarded cutover restarted the existing gateway service and checked local readiness, OAuth metadata, browser authentication, protected fleet and pairing APIs, database integrity, public HTTPS asset content and reconnection of the two previously online signed agents. No active terminal, job or transfer sessions were present. Android was already offline before cutover. The error log was clear after deployment.
+
+Live SHA-256: `6913b7c0a683c39262b6d7cebe3baf3e22c87f5551610d746faebf31f3676372`. Rollback resources and guardian audit trail: `~/.local/share/infra-v1-remote-burnin/gateway/staging-20261024-fieldwork/`.
+
+Remaining work: independently authenticated first-install bootstrap, long-running production soak, physical Windows reboot and upgrade rollback, optional no-VPN device access; deploying the website does not update enrolled agents automatically.
