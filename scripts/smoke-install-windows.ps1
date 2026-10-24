@@ -120,7 +120,14 @@ try {
   if ($Approval.state -ne "approved" -or [string]::IsNullOrWhiteSpace($Approval.device_id)) { throw "Authenticated approval did not create a paired identity" }
   if (-not $PairProcess.WaitForExit(20000)) { throw "Native Windows pairing process did not complete after owner approval" }
   if ($PairProcess.ExitCode -ne 0) {
-    throw "Native Windows pairing failed: $(Get-Content (Join-Path $TempRoot 'pair.err') -Raw)"
+    Write-Host "Native setup exit code: $($PairProcess.ExitCode)"
+    Write-Host "Native setup stdout:"
+    Get-Content -LiteralPath (Join-Path $TempRoot "pair.out") -Raw | Write-Host
+    Write-Host "Native setup stderr:"
+    Get-Content -LiteralPath (Join-Path $TempRoot "pair.err") -Raw | Write-Host
+    Write-Host "Identity present: $(Test-Path -LiteralPath (Join-Path $PairState 'identity.json'))"
+    Write-Host "Config present: $(Test-Path -LiteralPath (Join-Path $PairState 'config.json'))"
+    throw "Native Windows owner pairing command failed"
   }
   $IdentityPath = Join-Path $PairState "identity.json"
   if (-not (Test-Path -LiteralPath $IdentityPath)) { throw "Native Windows pairing identity missing" }
