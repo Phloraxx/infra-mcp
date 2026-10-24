@@ -96,8 +96,8 @@ const server=http.createServer(async(req,res)=>{
     await page.waitForFunction(()=>document.querySelector('#login-error').textContent.includes('Incorrect'));assert.equal(await page.locator('#app-shell').isVisible(),false);
     await page.locator('#login-password').fill('fixture-password-123');await page.locator('#login-submit').click();
     await page.locator('#overview-devices [data-device="online"]').waitFor();
-    assert.equal(await page.locator('#topology-nodes .topology-node').count(),2);
-    assert.match(await page.locator('#topology-count').textContent(),/1 \/ 2 CONNECTED/);
+    assert.equal(await page.locator('#overview-devices .device-row').count(),2);
+    assert.match(await page.locator('#summary').textContent(),/Connected/);
     if(process.env.INFRA_QA_OVERVIEW_SCREENSHOT||process.env.INFRA_QA_MOBILE_OVERVIEW_SCREENSHOT){
       // Public design previews use readable sample labels; the functional
       // tests below still exercise the original hostile-name/XSS fixture.
@@ -106,7 +106,7 @@ const server=http.createServer(async(req,res)=>{
       devices[1].device_name='Windows Workstation';
       sessions.forEach(item=>item.device_name='Studio MacBook');
       await page.reload();
-      await page.locator('#topology-nodes .topology-node').first().waitFor();
+      await page.locator('#overview-devices .device-row').first().waitFor();
       await page.waitForTimeout(500);
       if(process.env.INFRA_QA_OVERVIEW_SCREENSHOT)
         await page.screenshot({path:process.env.INFRA_QA_OVERVIEW_SCREENSHOT,fullPage:true});
@@ -210,7 +210,7 @@ const server=http.createServer(async(req,res)=>{
     for(const width of [320,390,768,1280]){
       await page.setViewportSize({width,height:810});
       await page.goto(base+'/#overview');
-      await page.locator('#topology-nodes .topology-node').first().waitFor();
+      await page.locator('#overview-devices .device-row').first().waitFor();
       assert(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth+1),'Overview overflowed at '+width+'px: '+JSON.stringify(await page.evaluate(()=>[...document.querySelectorAll('body *')].filter(e=>e.getBoundingClientRect().right>innerWidth+1).slice(0,16).map(e=>[e.tagName,e.id,e.className,Math.round(e.getBoundingClientRect().right),e.parentElement?.outerHTML.slice(0,260)]))));
       await page.goto(base+'/#devices');
       await page.locator('#all-devices .device-row').first().waitFor();
@@ -218,7 +218,7 @@ const server=http.createServer(async(req,res)=>{
     }
     await page.emulateMedia({colorScheme:'dark'});
     await page.goto(base+'/#overview');
-    await page.locator('#topology-nodes .topology-node').first().waitFor();
+    await page.locator('#overview-devices .device-row').first().waitFor();
     assert.equal(await page.evaluate(()=>getComputedStyle(document.documentElement).colorScheme),'light');
     await page.emulateMedia({colorScheme:'light'});
     await page.setViewportSize({width:1280,height:900});
