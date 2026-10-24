@@ -1,0 +1,144 @@
+name: Windows public installer VM
+
+on:
+  push:
+    branches: [fix/infra-ux-reliability-20261023]
+    paths:
+      - .github/workflows/windows-public-installer-vm.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  fresh-windows-install:
+    name: Fresh Windows Server VM / real release
+    runs-on: windows-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.99.0
+      - name: Build isolated local pairing gateway
+        shell: pwsh
+        run: cargo build -p infra-gateway
+      - name: Run public installer against the real published Windows release
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $RunRoot = Join-Path $env:RUNNER_TEMP ('infra-public-' + [guid]::NewGuid().ToString('N'))
+          New-Item -ItemType Directory -Path $RunRoot -Force | Out-Null
+          $InstallDir = Join-Path $RunRoot 'Installed Infra Binaries'
+          $StateDir = Join-Path $RunRoot 'Agent Profile With Spaces'
+          $InstallerPath = Join-Path $env:TEMP 'infra.ps1'
+          $GatewayProcess = $null
+          $InstallProcess = $null
+          try {
+            Write-Host 'Windows runner:' ([Environment]::OSVersion.VersionString)
+            Write-Host 'PowerShell version:' $PSVersionTable.PSVersion
+            Write-Host 'Fetching actual production bootstrap: https://infra.drbijoy.in/install.ps1'
+            # Matches the dashboard's iwr-to-file step. Never evaluate nullable HTML/content.
+            iwr 'https://infra.drbijoy.in/install.ps1' -UseBasicParsing -OutFile $InstallerPath -ErrorAction Stop
+            $ScriptFile = Get-Item -LiteralPath $InstallerPath -ErrorAction Stop
+            if ($null -eq $ScriptFile -or $ScriptFile.Length -lt 200) {
+              throw 'Production bootstrap script was empty or missing'
+            }
+            $ScriptBody = Get-Content -LiteralPath $InstallerPath -Raw -ErrorAction Stop
+            if ([string]::IsNullOrWhiteSpace($ScriptBody) -or $ScriptBody -notmatch 'Get-InfraExpectedHash') {
+              throw 'Production gateway is serving the wrong or an outdated Windows installer'
+            }
+            $Tokens = $null
+            $ParseErrors = $null
+            $null = [System.Management.Automation.Language.Parser]::ParseFile($InstallerPath, [ref]$Tokens, [ref]$ParseErrors)
+            if (@($ParseErrors).Count -gt 0) { throw ('Downloaded script failed Windows PowerShell 5.1 parsing: ' + $ParseErrors[0]) }
+            Write-Host ('Downloaded real script: ' + $ScriptFile.Length + ' bytes, SHA256=' + (Get-FileHash -LiteralPath $InstallerPath -Algorithm SHA256).Hash)
+
+            $Listener = New-Object Net.Sockets.TcpListener([Net.IPAddress]::Loopback, 0)
+            $Listener.Start()
+            $Port = $Listener.LocalEndpoint.Port
+            $Listener.Stop()
+            $AdminToken = ([guid]::NewGuid().ToString('N') + [guid]::NewGuid().ToString('N'))
+            $env:INFRA_GATEWAY_BIND = '127.0.0.1:' + $Port
+            $env:INFRA_DB_PATH = Join-Path $RunRoot 'gateway.db'
+            $env:INFRA_ADMIN_TOKEN = $AdminToken
+            $env:INFRA_NO_BROWSER = '1'
+            $GatewayProcess = Start-Process -FilePath (Join-Path (Get-Location).Path 'target\debug\infra-gateway.exe') -PassThru -RedirectStandardOutput (Join-Path $RunRoot 'gateway.out') -RedirectStandardError (Join-Path $RunRoot 'gateway.err')
+            $Base = 'http://127.0.0.1:' + $Port
+            $Ready = $false
+            for ($i = 0; $i -lt 80; $i++) {
+              Start-Sleep -Milliseconds 250
+              if ($GatewayProcess.HasExited) { throw 'Isolated pairing gateway exited before health check' }
+              try {
+                $Health = iwr ($Base + '/healthz') -UseBasicParsing -TimeoutSec 2
+                if ($Health.StatusCode -eq 200) { $Ready = $true; break }
+              } catch {}
+            }
+            if (-not $Ready) { throw 'Isolated pairing gateway did not become healthy' }
+
+            # Exact public installer bytes, actual GitHub release binaries, real task startup.
+            # The local -Gateway override is deliberate: production is never enrolled by CI.
+            $PairGateway = 'ws://127.0.0.1:' + $Port + '/agent'
+            $Arguments = '-NoProfile -ExecutionPolicy Bypass -File "' + $InstallerPath + '" -Gateway "' + $PairGateway + '" -InstallDir "' + $InstallDir + '" -StateDir "' + $StateDir + '"'
+            Write-Host 'Launching real release installer; waiting for owner approval on isolated gateway'
+            $InstallProcess = Start-Process -FilePath 'powershell.exe' -ArgumentList $Arguments -PassThru -NoNewWindow -RedirectStandardOutput (Join-Path $RunRoot 'installer.out') -RedirectStandardError (Join-Path $RunRoot 'installer.err')
+            $Headers = @{ Authorization = 'Bearer ' + $AdminToken; 'X-Infra-CSRF' = '1' }
+            $PendingPair = $null
+            for ($i = 0; $i -lt 120; $i++) {
+              Start-Sleep -Milliseconds 500
+              if ($InstallProcess.HasExited) {
+                $Out = if (Test-Path (Join-Path $RunRoot 'installer.out')) { Get-Content (Join-Path $RunRoot 'installer.out') -Raw } else { '' }
+                $Err = if (Test-Path (Join-Path $RunRoot 'installer.err')) { Get-Content (Join-Path $RunRoot 'installer.err') -Raw } else { '' }
+                throw "Installer exited before pairing. stdout=$Out stderr=$Err"
+              }
+              try {
+                $Pairs = @(Invoke-RestMethod -Uri ($Base + '/api/pair/requests') -Headers $Headers -ErrorAction Stop)
+                if ($Pairs.Count -gt 0) { $PendingPair = $Pairs[0]; break }
+              } catch {}
+            }
+            if ($null -eq $PendingPair) { throw 'No pending device pairing appeared after public release download' }
+            if ($PendingPair.device_name -ne $env:COMPUTERNAME) { throw ('Expected OS hostname ' + $env:COMPUTERNAME + ', got ' + $PendingPair.device_name) }
+            Write-Host ('Pair request uses real hostname: ' + $PendingPair.device_name)
+            $ApprovalBody = ConvertTo-Json @{ verification_code = $PendingPair.verification_code } -Compress
+            $Approval = Invoke-RestMethod -Method Post -Uri ($Base + '/api/pair/' + $PendingPair.request_id + '/approve') -Headers $Headers -ContentType 'application/json' -Body $ApprovalBody
+            if ($Approval.state -ne 'approved') { throw 'Owner approval failed' }
+            if (-not $InstallProcess.WaitForExit(120000)) { throw 'Public Windows installer did not complete after owner approval' }
+            $InstallProcess.Refresh()
+            if ($null -ne $InstallProcess.ExitCode -and $InstallProcess.ExitCode -ne 0) {
+              throw ('Public installer exit code ' + $InstallProcess.ExitCode)
+            }
+            $Output = Get-Content (Join-Path $RunRoot 'installer.out') -Raw
+            Write-Host $Output
+            if ($Output -notmatch 'Installed:') { throw 'Installer did not reach a successful completion' }
+            if (-not (Test-Path (Join-Path $InstallDir 'infra.exe'))) { throw 'Real release CLI was not installed' }
+            if (-not (Test-Path (Join-Path $InstallDir 'infra-agent.exe'))) { throw 'Real release agent was not installed' }
+            if (-not (Test-Path (Join-Path $StateDir 'identity.json'))) { throw 'Signed pairing identity missing' }
+            $Task = Get-ScheduledTask -TaskName 'Infra MCP Agent' -ErrorAction SilentlyContinue
+            if ($null -eq $Task) { throw 'Windows Scheduled Task was not registered' }
+            $Online = $false
+            for ($i = 0; $i -lt 60; $i++) {
+              Start-Sleep -Milliseconds 500
+              $Devices = @(Invoke-RestMethod -Uri ($Base + '/api/devices') -Headers $Headers)
+              if (@($Devices | Where-Object { $_.device_id -eq $Approval.device_id -and $_.online }).Count -eq 1) { $Online = $true; break }
+            }
+            if (-not $Online) { throw 'Windows agent was installed but did not connect to test gateway' }
+            Write-Host 'PUBLIC INSTALL PASS: published release, OS hostname, signed owner pairing, task registration and online signed agent'
+            Write-Host 'Retrying same downloaded installer against existing installation'
+            & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $InstallerPath -Gateway $PairGateway -InstallDir $InstallDir -StateDir $StateDir
+            if ($LASTEXITCODE -ne 0) { throw 'Rerunning public installer failed' }
+            Write-Host 'REPEAT INSTALL PASS: existing identity retained and installation repaired'
+          }
+          catch {
+            Write-Host ('VM INSTALL TEST FAILED: ' + $_.Exception.Message)
+            if (Test-Path (Join-Path $RunRoot 'installer.out')) { Get-Content (Join-Path $RunRoot 'installer.out') -Raw | Write-Host }
+            if (Test-Path (Join-Path $RunRoot 'installer.err')) { Get-Content (Join-Path $RunRoot 'installer.err') -Raw | Write-Host }
+            if (Test-Path (Join-Path $RunRoot 'gateway.err')) { Get-Content (Join-Path $RunRoot 'gateway.err') -Tail 40 | Write-Host }
+            throw
+          }
+          finally {
+            if ($null -ne $InstallProcess -and -not $InstallProcess.HasExited) { Stop-Process -Id $InstallProcess.Id -Force -ErrorAction SilentlyContinue }
+            if ($null -ne $GatewayProcess -and -not $GatewayProcess.HasExited) { Stop-Process -Id $GatewayProcess.Id -Force -ErrorAction SilentlyContinue }
+            $AgentTask = Get-ScheduledTask -TaskName 'Infra MCP Agent' -ErrorAction SilentlyContinue
+            if ($null -ne $AgentTask) {
+              Stop-ScheduledTask -TaskName 'Infra MCP Agent' -ErrorAction SilentlyContinue
+              Unregister-ScheduledTask -TaskName 'Infra MCP Agent' -Confirm:$false -ErrorAction SilentlyContinue
+            }
+          }
