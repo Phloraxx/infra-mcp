@@ -6,16 +6,14 @@ import android.content.ClipData;
 import android.content.ClipboardManager;
 import android.content.Context;
 import android.content.Intent;
-import android.graphics.Color;
 import android.os.Bundle;
 import android.provider.Settings;
 import android.text.InputType;
-import android.view.Gravity;
-import android.widget.Button;
 import android.widget.EditText;
 import android.widget.LinearLayout;
-import android.widget.ScrollView;
+import android.widget.Switch;
 import android.widget.TextView;
+import android.widget.Toast;
 
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
@@ -24,196 +22,234 @@ import java.nio.charset.StandardCharsets;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.atomic.AtomicBoolean;
-
 import io.github.muntashirakon.adb.AdbStream;
 
-/**
- * Local-only, owner-operated read-only pairing experiment.
- * No Android shell output or pairing keys ever go through Infra MCP.
- */
+/** Owner-operated, local-only ADB probe. Not connected to the signed MCP dispatcher. */
 public final class AdbProbeActivity extends Activity {
     private final ExecutorService worker=Executors.newSingleThreadExecutor();
     private final AtomicBoolean busy=new AtomicBoolean();
     private volatile LocalAdbClient client;
-    private TextView status;
-    private TextView wirelessStatus;
-    private EditText pairingPort, pairingCode, connectionPort;
+    private LinearLayout root;
+    private TextView status,connectionAction,wirelessLabel;
+    private Switch wirelessSwitch;
+    private EditText pairingPort,pairingCode,connectionPort;
+    private boolean expanded,changingSwitch;
 
     @Override public void onCreate(Bundle state){
         super.onCreate(state);
-        if(!"debug".equals(BuildConfig.BUILD_TYPE) || !getPackageName().endsWith(".dev")){
+        if(!"debug".equals(BuildConfig.BUILD_TYPE)||!getPackageName().endsWith(".dev")){
             finish();return;
         }
-        ScrollView scroll=new ScrollView(this);
-        scroll.setBackgroundColor(Color.rgb(12,18,32));
-        LinearLayout content=new LinearLayout(this);
-        content.setOrientation(LinearLayout.VERTICAL);
-        content.setPadding(32,28,32,36);
-        scroll.addView(content);
-        title(content,"Local ADB experiment",25);
-        title(content,"Debug build only. No remote shell, background ADB, or automatic elevation. " +
-            "Android Wireless debugging must be enabled and paired on this phone.",14);
-        status=title(content,"Not paired. Normal Infra connectivity is unaffected.",14);
-        wirelessStatus=title(content,WirelessDebuggingControl.describe(this),14);
-        title(content,"One-time setup: grant permission from an authorized ADB computer. " +
-            "These buttons control Android's standard Wireless debugging only, " +
-            "not legacy TCP port 5555.",13);
-        button(content,"Copy one-time grant command",()->{
-            ClipboardManager clipboard=(ClipboardManager)getSystemService(Context.CLIPBOARD_SERVICE);
-            clipboard.setPrimaryClip(ClipData.newPlainText("Infra Phone ADB setup",
-                WirelessDebuggingControl.grantCommand(this)));
-            status.setText("Copied. Run this command on your trusted ADB computer, then refresh.");
-        });
-        button(content,"Enable Wireless debugging",()->toggleWirelessDebugging(true));
-        button(content,"Disable Wireless debugging",()->
-            new AlertDialog.Builder(this)
-                .setTitle("Disable Wireless debugging?")
-                .setMessage("This can disconnect active ADB sessions and other tools. " +
-                    "It does not close legacy TCP port 5555.")
-                .setNegativeButton("Cancel",null)
-                .setPositiveButton("Disable",(dialog,which)->toggleWirelessDebugging(false))
-                .show());
-        button(content,"Refresh Wireless debugging status",this::refreshWirelessStatus);
-        button(content,"Open Android Developer options",()->
-            startActivity(new Intent(Settings.ACTION_APPLICATION_DEVELOPMENT_SETTINGS)));
-        pairingPort=field(content,"Pairing port (shown with six-digit code)",false);
-        pairingCode=field(content,"Six-digit pairing code",true);
-        button(content,"Pair locally",()->{
-            final int port=parsePort(pairingPort);
-            final String secret=pairingCode.getText().toString().trim();
-            pairingCode.setText("");
-            if(!secret.matches("[0-9]{6}")){
-                status.setText("Enter the current six-digit code from Wireless debugging.");return;
-            }
-            doWork(()->{
-                if(!getClient().pairLocally(port,secret))
-                    throw new IllegalStateException("Pairing not completed");
-                return "Local ADB pairing completed. Now enter the connection port.";
+        render();
+    }
+    @Override protected void onResume(){
+        super.onResume();
+        refreshWireless();
+    }
+
+    private void render(){
+        root=UiKit.screen(this);
+        UiKit.header(root,"Android access",R.drawable.infra_ic_back,this::finish);
+        UiKit.addText(root,"More control.\nOnly when you need it.",26,UiKit.INK,true);
+        UiKit.gap(root,12);
+        UiKit.addText(root,"Local ADB is experimental. It never grants MCP remote shell access.",
+            14,UiKit.MUTED,false);
+        UiKit.gap(root,30);
+        UiKit.section(root,"LOCAL CONNECTION");
+        LinearLayout card=UiKit.card(root);
+        status=UiKit.addText(card,isConnected()?"● Connected as Android shell":"○ Not connected",
+            17,isConnected()?UiKit.GOOD:UiKit.INK,true);
+        UiKit.gap(card,10);
+        UiKit.addText(card,"Use the existing on-device ADB listener at 127.0.0.1:5555.",
+            13,UiKit.MUTED,false);
+        UiKit.gap(card,22);
+        connectionAction=UiKit.button(card,isConnected()?"Disconnect":"Connect locally",
+            true,()->{
+                if(isConnected())disconnect();
+                else doWork(()->{
+                    LocalAdbClient adb=getClient();
+                    adb.connectLegacyLoopback();
+                    return verify(adb);
+                });
             });
+        UiKit.gap(card,13);
+        UiKit.addText(card,"Port 5555 is not encrypted and may be visible to other devices on your network. "+
+            "Infra won't turn it on automatically.",12,UiKit.SUBTLE,false);
+
+        UiKit.gap(root,18);
+        UiKit.section(root,"ALTERNATIVE");
+        UiKit.row(root,R.drawable.infra_ic_lock,
+            "Secure wireless pairing",expanded?"Hide setup":"Use Android's paired debugging mode",
+            ()->{expanded=!expanded;render();});
+        if(expanded)showWirelessSetup();
+        UiKit.gap(root,24);
+        UiKit.note(root,"Access stays local to this experiment until you explicitly approve an advanced session.");
+    }
+
+    private void showWirelessSetup(){
+        LinearLayout box=UiKit.card(root);
+        wirelessLabel=UiKit.addText(box,"Wireless debugging",15,UiKit.INK,true);
+        UiKit.gap(box,9);
+        wirelessSwitch=new Switch(this);
+        wirelessSwitch.setText("Allow wireless debugging");
+        wirelessSwitch.setTextColor(UiKit.INK);wirelessSwitch.setTextSize(14);
+        wirelessSwitch.setThumbTintList(android.content.res.ColorStateList.valueOf(UiKit.ACCENT));
+        box.addView(wirelessSwitch);
+        wirelessSwitch.setOnCheckedChangeListener((button,enabled)->{
+            if(changingSwitch)return;
+            if(!enabled){
+                new AlertDialog.Builder(this)
+                    .setTitle("Turn off wireless debugging?")
+                    .setMessage("Active secure ADB connections may disconnect. Port 5555 is separate.")
+                    .setNegativeButton("Cancel",(dialog,which)->refreshWireless())
+                    .setPositiveButton("Turn off",(dialog,which)->setWireless(false))
+                    .show();
+            }else setWireless(true);
         });
-        connectionPort=field(content,"Wireless debugging connection port (not the pairing port)",false);
-        button(content,"Connect and verify read-only shell identity",()->{
-            final int port=parsePort(connectionPort);
+        UiKit.gap(box,8);
+        if(!WirelessDebuggingControl.hasPermission(this)){
+            UiKit.addText(box,"One-time setup required from an already authorized ADB computer.",
+                12,UiKit.MUTED,false);
+            UiKit.gap(box,10);
+            UiKit.quietAction(box,"Copy ADB permission command",()->{
+                ((ClipboardManager)getSystemService(Context.CLIPBOARD_SERVICE))
+                    .setPrimaryClip(ClipData.newPlainText("Infra Phone ADB permission",
+                        WirelessDebuggingControl.grantCommand(this)));
+                Toast.makeText(this,"Setup command copied",Toast.LENGTH_SHORT).show();
+            });
+        }
+        UiKit.quietAction(box,"Open Android Developer options",()->
+            startActivity(new Intent(Settings.ACTION_APPLICATION_DEVELOPMENT_SETTINGS)));
+        UiKit.gap(box,14);
+        UiKit.addText(box,"Pair once",16,UiKit.INK,true);
+        UiKit.gap(box,8);
+        UiKit.addText(box,
+            "In Wireless debugging, choose Pair device with pairing code. Enter that port and code here.",
+            13,UiKit.MUTED,false);
+        UiKit.gap(box,13);
+        pairingPort=UiKit.input(box,"Pairing port","");
+        pairingPort.setInputType(InputType.TYPE_CLASS_NUMBER);
+        pairingCode=UiKit.input(box,"Six-digit code","");
+        pairingCode.setInputType(InputType.TYPE_CLASS_NUMBER|InputType.TYPE_NUMBER_VARIATION_PASSWORD);
+        UiKit.button(box,"Pair this phone",false,()->{
+            Integer port=parsePort(pairingPort);
+            String secret=pairingCode.getText().toString().trim();
+            pairingCode.setText("");
+            if(port==null || !secret.matches("[0-9]{6}")){
+                status.setText("Enter a valid pairing port and six-digit code.");return;
+            }
+            doWork(()->getClient().pairLocally(port,secret)
+                ?"Paired. Enter the connection port below.":"Pairing wasn't completed.");
+        });
+        UiKit.gap(box,17);
+        UiKit.addText(box,"Connect securely",16,UiKit.INK,true);
+        UiKit.gap(box,8);
+        connectionPort=UiKit.input(box,"Connection port","");
+        connectionPort.setInputType(InputType.TYPE_CLASS_NUMBER);
+        UiKit.button(box,"Verify secure ADB",false,()->{
+            Integer port=parsePort(connectionPort);
+            if(port==null){status.setText("Enter the separate Wireless debugging connection port.");return;}
             doWork(()->{
+                LocalAdbClient prior=client;
+                if(prior!=null && prior.isConnected()){
+                    prior.close();
+                    client=null;
+                }
                 LocalAdbClient adb=getClient();
                 adb.connectLocally(port);
-                String result=readIdentity(adb);
-                if(!result.contains("uid=2000(shell)"))
-                    throw new IllegalStateException("Connected endpoint did not return Android shell UID");
-                return "Verified on-device ADB shell UID 2000. No MCP commands enabled.";
+                return verify(adb);
             });
         });
-        button(content,"Disconnect ADB client",()->{
-            LocalAdbClient old=client;
-            client=null;
-            if(old!=null)new Thread(()->{
-                try{old.close();}catch(Exception ignored){}
-            },"infra-adb-close").start();
-            status.setText("ADB client disconnected. Android pairing can remain until revoked in Developer options.");
-        });
-        title(content,"Use Android's Wireless debugging pairing and connection ports; " +
-            "legacy network TCP port 5555 is deliberately refused. " +
-            "If this fails, regular Infra and SenseGuide features still work.",13);
-        setContentView(scroll);
+        UiKit.gap(box,7);
+        refreshWireless();
     }
 
-    @Override protected void onResume() {
-        super.onResume();
-        refreshWirelessStatus();
+    private static Integer parsePort(EditText input){
+        try{
+            int n=Integer.parseInt(input.getText().toString().trim());
+            if(n>=1024&&n<=65535&&n!=5555)return n;
+        }catch(NumberFormatException ignored){}
+        return null;
     }
 
-    private void refreshWirelessStatus() {
-        if(wirelessStatus!=null)
-            wirelessStatus.setText(WirelessDebuggingControl.describe(this));
-    }
-
-    private void toggleWirelessDebugging(boolean enabled) {
-        try {
+    private void setWireless(boolean enabled){
+        try{
             WirelessDebuggingControl.setEnabled(this,enabled);
-            status.setText("Wireless debugging setting is now "+
-                (enabled?"on. Android may still require a trusted Wi-Fi network.":
-                         "off. Legacy TCP ADB (if active) is unaffected by this setting."));
-        }catch(Exception e) {
-            status.setText("Wireless debugging change denied: "+e.getMessage());
-        }finally{refreshWirelessStatus();}
+            status.setText(enabled?"Wireless debugging enabled. Pair through Android settings.":
+                                   "Standard wireless debugging disabled.");
+        }catch(Exception e){
+            status.setText("Wireless debugging unavailable. Check permission and Wi-Fi.");
+        }finally{refreshWireless();}
     }
 
-    private synchronized LocalAdbClient getClient()throws Exception {
+    private void refreshWireless(){
+        if(wirelessSwitch!=null){
+            changingSwitch=true;
+            wirelessSwitch.setChecked(WirelessDebuggingControl.isEnabled(this));
+            changingSwitch=false;
+        }
+        if(wirelessLabel!=null)
+            wirelessLabel.setText("Wireless debugging  •  "+
+                (WirelessDebuggingControl.isEnabled(this)?"On":"Off"));
+    }
+
+    private boolean isConnected(){return client!=null && client.isConnected();}
+    private synchronized LocalAdbClient getClient() throws Exception {
         if(client==null)client=new LocalAdbClient();
         return client;
     }
-
+    private void disconnect(){
+        if(busy.get())return;
+        final LocalAdbClient old=client;
+        client=null;
+        status.setText("Disconnected");
+        connectionAction.setText("Connect locally");
+        if(old!=null)worker.execute(()->{
+            try{old.close();}catch(Exception ignored){}
+        });
+    }
+    private static String verify(LocalAdbClient adb) throws Exception {
+        String id=readIdentity(adb);
+        if(!id.contains("uid=2000(shell)"))
+            throw new SecurityException("Not an authorized Android shell session");
+        return "● Connected as Android shell";
+    }
     private static String readIdentity(LocalAdbClient adb)throws Exception {
         try(AdbStream stream=adb.openStream("shell:id");
-            InputStream in=stream.openInputStream()) {
+            InputStream in=stream.openInputStream()){
             ByteArrayOutputStream out=new ByteArrayOutputStream();
             byte[] b=new byte[512];
             int n;
-            while(out.size()<2048) {
-                try {
-                    n=in.read(b);
-                } catch(IOException e) {
-                    // This ADB library throws on remote CLSE rather than returning EOF.
-                    // Accept the close only after receiving some command output.
-                    if(out.size()==0 || !"Stream closed.".equals(e.getMessage()))throw e;
+            while(out.size()<2048){
+                try {n=in.read(b);}
+                catch(IOException e){
+                    if(out.size()==0||!"Stream closed.".equals(e.getMessage()))throw e;
                     break;
                 }
                 if(n<0)break;
                 out.write(b,0,Math.min(n,2048-out.size()));
-                // "id" emits a single newline-terminated line; do not wait for a
-                // second read after it closes its ADB stream.
-                if(new String(out.toByteArray(),StandardCharsets.UTF_8).contains("\n"))
-                    break;
+                if(new String(out.toByteArray(),StandardCharsets.UTF_8).contains("\n"))break;
             }
             return new String(out.toByteArray(),StandardCharsets.UTF_8);
         }
     }
-
-    private interface Operation { String run()throws Exception; }
-
-    private void doWork(Operation task) {
-        if(!busy.compareAndSet(false,true)){
-            status.setText("An ADB operation is already running.");return;
-        }
-        status.setText("Working locally…");
+    private interface Task {String run()throws Exception;}
+    private void doWork(Task task){
+        if(!busy.compareAndSet(false,true))return;
+        status.setText("Connecting…");
         worker.execute(()->{
-            String result;
-            try{result=task.run();}
-            catch(Exception e){result="ADB unavailable: "+e.getClass().getSimpleName()+
-                ". Check Wireless debugging, the correct port, and pairing approval.";}
-            final String message=result;
+            String text;
+            try{text=task.run();}
+            catch(Exception e){text="Connection unavailable. Verify authorization and debugging settings.";}
+            final String outcome=text;
             busy.set(false);
-            runOnUiThread(()->{if(!isFinishing())status.setText(message);});
+            runOnUiThread(()->{
+                if(isFinishing()||isDestroyed())return;
+                status.setText(outcome);
+                connectionAction.setText(isConnected()?"Disconnect":"Connect locally");
+            });
         });
     }
-
-    private static int parsePort(EditText field) {
-        try {
-            int port=Integer.parseInt(field.getText().toString().trim());
-            if(port>=1024 && port<=65535 && port!=5555)return port;
-        }catch(NumberFormatException ignored){}
-        throw new IllegalArgumentException("Use the port currently shown in Android Wireless debugging (not 5555)");
-    }
-
-    private TextView title(LinearLayout parent,String s,int size){
-        TextView v=new TextView(this);
-        v.setText(s);v.setTextSize(size);v.setTextColor(Color.WHITE);
-        v.setPadding(0,10,0,16);parent.addView(v);return v;
-    }
-    private EditText field(LinearLayout parent,String hint,boolean hidden){
-        EditText e=new EditText(this);e.setHint(hint);
-        e.setTextColor(Color.WHITE);e.setHintTextColor(0xff9eacc7);
-        e.setInputType(InputType.TYPE_CLASS_NUMBER|
-            (hidden?InputType.TYPE_NUMBER_VARIATION_PASSWORD:0));
-        e.setSingleLine(true);parent.addView(e);return e;
-    }
-    private void button(LinearLayout parent,String label,Runnable action){
-        Button b=new Button(this);b.setText(label);b.setAllCaps(false);
-        parent.addView(b);b.setOnClickListener(v->{
-            try{action.run();}catch(Exception e){status.setText(e.getMessage());}
-        });
-    }
-
     @Override protected void onDestroy(){
         worker.shutdownNow();
         LocalAdbClient old=client;client=null;

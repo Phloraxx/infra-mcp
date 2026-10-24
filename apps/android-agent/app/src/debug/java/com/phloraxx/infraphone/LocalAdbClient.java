@@ -63,6 +63,12 @@ final class LocalAdbClient extends AbsAdbConnectionManager {
     @Override protected Certificate getCertificate() { return certificate; }
     @Override protected String getDeviceName() { return "Infra Phone (local lab)"; }
 
+    /** Uses an already running legacy local listener; never starts or exposes TCP 5555. */
+    void connectLegacyLoopback() throws Exception {
+        if (!isConnected()) connect("127.0.0.1", 5555);
+        if (!isConnected()) throw new IllegalStateException("Local ADB listener unavailable or not authorized");
+    }
+
     boolean pairLocally(int port, String code) throws Exception {
         checkPort(port);
         if (code == null || !code.matches("[0-9]{6}"))
