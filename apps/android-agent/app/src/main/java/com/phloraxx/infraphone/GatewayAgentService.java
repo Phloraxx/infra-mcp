@@ -106,7 +106,7 @@ public class GatewayAgentService extends Service {
                         if("auth_challenge".equals(type)){
                             JSONObject h=new JSONObject();
                             h.put("protocol",1).put("device_id",identity.deviceId())
-                             .put("device_name",identity.name()).put("agent_version","0.3.1")
+                             .put("device_name",identity.name()).put("agent_version",BuildConfig.VERSION_NAME)
                              .put("platform","android").put("arch",Build.SUPPORTED_ABIS[0])
                              .put("boot_id",boot).put("agent_instance_id",instance)
                              .put("capabilities",new JSONArray().put("status").put("system").put("files").put("transfer").put("exec").put("desktop"));
