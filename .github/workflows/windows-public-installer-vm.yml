@@ -5,6 +5,7 @@ on:
     branches: [fix/infra-ux-reliability-20261023]
     paths:
       - .github/workflows/windows-public-installer-vm.yml
+      - scripts/install.ps1
   workflow_dispatch:
 
 permissions:
@@ -122,9 +123,19 @@ jobs:
             if (-not $Online) { throw 'Windows agent was installed but did not connect to test gateway' }
             Write-Host 'PUBLIC INSTALL PASS: published release, OS hostname, signed owner pairing, task registration and online signed agent'
             Write-Host 'Retrying same downloaded installer against existing installation'
+            $IdentityHashBefore = (Get-FileHash -LiteralPath (Join-Path $StateDir 'identity.json') -Algorithm SHA256).Hash
             & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $InstallerPath -Gateway $PairGateway -InstallDir $InstallDir -StateDir $StateDir
             if ($LASTEXITCODE -ne 0) { throw 'Rerunning public installer failed' }
-            Write-Host 'REPEAT INSTALL PASS: existing identity retained and installation repaired'
+            $IdentityHashAfter = (Get-FileHash -LiteralPath (Join-Path $StateDir 'identity.json') -Algorithm SHA256).Hash
+            if ($IdentityHashBefore -ne $IdentityHashAfter) { throw 'Reinstall unexpectedly replaced the signed device identity' }
+            $StatusJson = & (Join-Path $InstallDir 'infra.exe') status --json --state-dir $StateDir
+            if ($LASTEXITCODE -ne 0) { throw 'CLI failed to report status after repeat install' }
+            $CurrentStatus = ($StatusJson | Out-String | ConvertFrom-Json)
+            if (-not $CurrentStatus.configured -or -not $CurrentStatus.enrolled -or
+                -not $CurrentStatus.process_alive -or $CurrentStatus.runtime.state -ne 'online') {
+              throw 'Repeat install left the agent offline or unconfigured'
+            }
+            Write-Host 'REPEAT INSTALL PASS: existing signing identity retained, online agent untouched'
           }
           catch {
             Write-Host ('VM INSTALL TEST FAILED: ' + $_.Exception.Message)
