@@ -124,6 +124,7 @@ function activeSession(s){return ['running','starting','canceling','uploading','
 function render(){
   const online=state.devices.filter(d=>d.online&&!d.revoked).length,offline=state.devices.filter(d=>!d.online&&!d.revoked).length,revoked=state.devices.filter(d=>d.revoked).length,active=state.sessions.filter(activeSession).length;
   const metrics=[['Connected',online,'online','check'],['Offline',offline,'offline','offline'],['Active sessions',active,'work','terminal'],['Total devices',state.devices.length-revoked,'enrolled','devices']];
+  const indicator=$('#overview-availability');if(indicator){indicator.classList.toggle('has-offline',offline>0);indicator.innerHTML='<span class="availability-dot"></span>'+online+' of '+(state.devices.length-revoked)+' connected';}
   $('#summary').innerHTML=metrics.map(([k,v,c,i])=>`<div class="summary-card ${c}"><div class="metric-top"><span>${k}</span><span class="metric-icon">${icon(i)}</span></div><strong>${v}</strong></div>`).join('');
   const devices=state.devices.length?state.devices.map(deviceRow).join(''):emptyState('No devices enrolled yet.','devices');
   $('#all-devices').innerHTML=devices;applyDeviceSearch();
