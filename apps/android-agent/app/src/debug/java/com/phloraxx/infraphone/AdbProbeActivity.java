@@ -1,6 +1,10 @@
 package com.phloraxx.infraphone;
 
 import android.app.Activity;
+import android.app.AlertDialog;
+import android.content.ClipData;
+import android.content.ClipboardManager;
+import android.content.Context;
 import android.content.Intent;
 import android.graphics.Color;
 import android.os.Bundle;
@@ -32,6 +36,7 @@ public final class AdbProbeActivity extends Activity {
     private final AtomicBoolean busy=new AtomicBoolean();
     private volatile LocalAdbClient client;
     private TextView status;
+    private TextView wirelessStatus;
     private EditText pairingPort, pairingCode, connectionPort;
 
     @Override public void onCreate(Bundle state){
@@ -49,6 +54,26 @@ public final class AdbProbeActivity extends Activity {
         title(content,"Debug build only. No remote shell, background ADB, or automatic elevation. " +
             "Android Wireless debugging must be enabled and paired on this phone.",14);
         status=title(content,"Not paired. Normal Infra connectivity is unaffected.",14);
+        wirelessStatus=title(content,WirelessDebuggingControl.describe(this),14);
+        title(content,"One-time setup: grant permission from an authorized ADB computer. " +
+            "These buttons control Android's standard Wireless debugging only, " +
+            "not legacy TCP port 5555.",13);
+        button(content,"Copy one-time grant command",()->{
+            ClipboardManager clipboard=(ClipboardManager)getSystemService(Context.CLIPBOARD_SERVICE);
+            clipboard.setPrimaryClip(ClipData.newPlainText("Infra Phone ADB setup",
+                WirelessDebuggingControl.grantCommand(this)));
+            status.setText("Copied. Run this command on your trusted ADB computer, then refresh.");
+        });
+        button(content,"Enable Wireless debugging",()->toggleWirelessDebugging(true));
+        button(content,"Disable Wireless debugging",()->
+            new AlertDialog.Builder(this)
+                .setTitle("Disable Wireless debugging?")
+                .setMessage("This can disconnect active ADB sessions and other tools. " +
+                    "It does not close legacy TCP port 5555.")
+                .setNegativeButton("Cancel",null)
+                .setPositiveButton("Disable",(dialog,which)->toggleWirelessDebugging(false))
+                .show());
+        button(content,"Refresh Wireless debugging status",this::refreshWirelessStatus);
         button(content,"Open Android Developer options",()->
             startActivity(new Intent(Settings.ACTION_APPLICATION_DEVELOPMENT_SETTINGS)));
         pairingPort=field(content,"Pairing port (shown with six-digit code)",false);
@@ -90,6 +115,27 @@ public final class AdbProbeActivity extends Activity {
             "legacy network TCP port 5555 is deliberately refused. " +
             "If this fails, regular Infra and SenseGuide features still work.",13);
         setContentView(scroll);
+    }
+
+    @Override protected void onResume() {
+        super.onResume();
+        refreshWirelessStatus();
+    }
+
+    private void refreshWirelessStatus() {
+        if(wirelessStatus!=null)
+            wirelessStatus.setText(WirelessDebuggingControl.describe(this));
+    }
+
+    private void toggleWirelessDebugging(boolean enabled) {
+        try {
+            WirelessDebuggingControl.setEnabled(this,enabled);
+            status.setText("Wireless debugging setting is now "+
+                (enabled?"on. Android may still require a trusted Wi-Fi network.":
+                         "off. Legacy TCP ADB (if active) is unaffected by this setting."));
+        }catch(Exception e) {
+            status.setText("Wireless debugging change denied: "+e.getMessage());
+        }finally{refreshWirelessStatus();}
     }
 
     private synchronized LocalAdbClient getClient()throws Exception {
