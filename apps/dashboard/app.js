@@ -21,7 +21,7 @@ $('#password-change').addEventListener('submit',async event=>{
   try{await jsonFetch('/api/auth/password',{method:'POST',body:JSON.stringify({current_password:current,new_password:next})});$('#password-change').reset();$('#password-result').textContent='Password changed. Other browser sessions are now signed out.';}
   catch(error){$('#password-result').textContent=error.message;}finally{button.disabled=false;}
 });
-function showView(name,title,subtitle){$$('.view').forEach(v=>v.classList.toggle('active',v.id===name));$$('.nav').forEach(v=>v.classList.toggle('active',v.dataset.view===name));$('#view-title').textContent=title;$('#view-subtitle').textContent=subtitle;}
+function showView(name,title,subtitle){$$('.view').forEach(v=>v.classList.toggle('active',v.id===name));$$('.nav').forEach(v=>v.classList.toggle('active',v.dataset.view===name));$('#view-title').textContent=title;$('#view-subtitle').textContent=subtitle;$('#breadcrumb-view').textContent=name==='device-detail'?'DEVICE':name==='session-detail'?'SESSION':name.toUpperCase();}
 function setView(name){location.hash=name;route();}
 $$('.nav').forEach(b=>b.addEventListener('click',()=>setView(b.dataset.view)));
 $$('[data-view-target]').forEach(b=>b.addEventListener('click',()=>setView(b.dataset.viewTarget)));
@@ -55,12 +55,20 @@ function activityRow(a){
   return `<div class="activity-row"><div class="activity-dot ${state}"></div><div><div class="session-title">${esc(a.action)}${a.device_name?` · ${esc(a.device_name)}`:''}</div><div class="session-meta">${relative(a.at_unix_ms)} · ${esc(outcome)}${a.request_id?` · ${esc(a.request_id)}`:''}</div></div></div>`;
 }
 function activeSession(s){return ['running','starting','canceling','uploading','downloading','ready'].includes(s.status);}
+function renderTopology(){
+  // Positions are fixed for visual stability, identities and presence are live.
+  const positions=['node-nw','node-ne','node-sw','node-se'];
+  const nodes=state.devices.filter(d=>!d.revoked).slice(0,4);
+  $('#topology-nodes').innerHTML=nodes.map((d,i)=>'<button type="button" class="topology-node '+positions[i]+' '+(d.online?'is-live':'is-offline')+'" data-device="'+esc(d.device_id)+'" aria-label="Open '+esc(d.device_name)+'"><span class="topology-node-mark">'+platformMark(d.platform)+'</span><span class="topology-node-copy"><strong>'+esc(d.device_name)+'</strong><small>'+(d.online?'CONNECTED':'OFFLINE')+'</small></span><i></i></button>').join('')+(state.devices.length>4?'<span class="topology-overflow">+'+(state.devices.length-4)+' MORE DEVICES</span>':'');
+  $('#topology-count').textContent=state.devices.filter(d=>d.online&&!d.revoked).length+' / '+state.devices.filter(d=>!d.revoked).length+' CONNECTED';
+}
 function render(){
   const online=state.devices.filter(d=>d.online&&!d.revoked).length,offline=state.devices.filter(d=>!d.online&&!d.revoked).length,revoked=state.devices.filter(d=>d.revoked).length,active=state.sessions.filter(activeSession).length;
   const metrics=[['Online',online,'online','●'],['Offline',offline,'offline','○'],['Active work',active,'work','↗'],['Enrolled',state.devices.length-revoked,'enrolled','#']];
+  renderTopology();
   $('#summary').innerHTML=metrics.map(([k,v,c,i])=>`<div class="summary-card ${c}"><div class="metric-top"><span>${k}</span><span class="metric-icon">${i}</span></div><strong>${v}</strong></div>`).join('');
   const devices=state.devices.length?state.devices.map(deviceRow).join(''):'<div class="empty">No devices enrolled yet.</div>';
-  $('#all-devices').innerHTML=devices;
+  $('#all-devices').innerHTML=devices;applyDeviceSearch();
   $('#overview-devices').innerHTML=state.devices.length?state.devices.slice(0,5).map(deviceRow).join(''):'<div class="empty">Add your first device to get started.</div>';
   const sessions=state.sessions.filter(activeSession);renderSessionList();
   $('#overview-sessions').innerHTML=sessions.length?sessions.slice(0,6).map(sessionRow).join(''):'<div class="empty">No active work. Persistent sessions will appear here.</div>';
@@ -226,6 +234,37 @@ document.addEventListener('click',event=>{
 });
 $$('[data-device-tab]').forEach(b=>b.addEventListener('click',()=>navigateDevice(state.device,b.dataset.deviceTab)));
 
+function applyDeviceSearch(){
+  const search=$('#device-search');
+  if(!search)return;
+  const query=search.value.trim().toLocaleLowerCase();
+  const rows=$$('#all-devices .device-row');
+  let found=0;
+  rows.forEach(row=>{
+    const id=row.querySelector('[data-device]')?.dataset.device;
+    const device=state.devices.find(d=>d.device_id===id);
+    const text=[device?.device_name,device?.platform,device?.arch,...(device?.capabilities||[])].join(' ').toLocaleLowerCase();
+    const match=!query||text.includes(query);
+    row.classList.toggle('hidden',!match);
+    if(match)found++;
+  });
+  $('#device-search-empty')?.remove();
+  if(query&&!found){
+    const empty=document.createElement('p');
+    empty.id='device-search-empty';
+    empty.className='empty';
+    empty.textContent='No matching devices. Try another name or platform.';
+    $('#all-devices').append(empty);
+  }
+}
+$('#device-search').addEventListener('input',applyDeviceSearch);
+document.addEventListener('keydown',event=>{
+  if(event.key!=='/'||event.metaKey||event.ctrlKey||event.altKey||event.isComposing||!state.authenticated)return;
+  if(event.target instanceof HTMLInputElement||event.target instanceof HTMLTextAreaElement||event.target.isContentEditable)return;
+  // Never hijack typing in an active xterm session.
+  if(state.attachment?.kind==='terminal')return;
+  event.preventDefault();setView('devices');$('#device-search').focus();
+});
 function renderSessionList(){
   const select=$('#session-device'),chosen=select.value;
   select.innerHTML='<option value="">All devices</option>'+state.devices.map(d=>`<option value="${esc(d.device_id)}">${esc(d.device_name)}</option>`).join('');select.value=chosen;
@@ -303,7 +342,7 @@ function attachSession(device,kind,id,key){
   $('#terminal-tools').classList.toggle('hidden',kind!=='terminal');$('#terminal-screen').classList.toggle('hidden',kind!=='terminal');$('#session-output').classList.toggle('hidden',kind==='terminal');
   $('#session-stop').textContent=kind==='terminal'?'Close terminal':kind==='job'?'Cancel job':'Cancel transfer';$('#session-stop').disabled=!available(device);
   if(kind==='terminal'){
-    a.term=new Terminal({cols:100,rows:28,cursorBlink:true,fontSize:13,scrollback:3000,theme:{background:'#151515',foreground:'#eeeeee'},allowProposedApi:false});
+    a.term=new Terminal({cols:100,rows:28,cursorBlink:true,fontSize:13,scrollback:3000,theme:{background:'#111c19',foreground:'#e8f0e8',cursor:'#ccea79',selectionBackground:'#344d40'},allowProposedApi:false});
     a.term.open($('#terminal-screen'));a.term.onData(data=>queueInput(a,data));a.term.focus();
   }
   readSession(a);

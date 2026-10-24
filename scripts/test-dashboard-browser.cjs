@@ -90,12 +90,38 @@ const server=http.createServer(async(req,res)=>{
     page.on('pageerror',e=>errors.push(e.message));
     page.on('console',msg=>{if(msg.type()==='error'&&msg.text().includes('Content Security Policy'))errors.push(msg.text());});
     await page.goto(base);await page.locator('#login-submit:not([disabled])').waitFor();
-    if(process.env.INFRA_QA_LOGIN_SCREENSHOT)await page.screenshot({path:process.env.INFRA_QA_LOGIN_SCREENSHOT,fullPage:true});
+    if(process.env.INFRA_QA_LOGIN_SCREENSHOT){await page.waitForTimeout(650);await page.screenshot({path:process.env.INFRA_QA_LOGIN_SCREENSHOT,fullPage:true});}
     assert.equal(await page.locator('#app-shell').isVisible(),false);
     await page.locator('#login-username').fill('owner');await page.locator('#login-password').fill('wrong');await page.locator('#login-submit').click();
     await page.waitForFunction(()=>document.querySelector('#login-error').textContent.includes('Incorrect'));assert.equal(await page.locator('#app-shell').isVisible(),false);
     await page.locator('#login-password').fill('fixture-password-123');await page.locator('#login-submit').click();
     await page.locator('#overview-devices [data-device="online"]').waitFor();
+    assert.equal(await page.locator('#topology-nodes .topology-node').count(),2);
+    assert.match(await page.locator('#topology-count').textContent(),/1 \/ 2 CONNECTED/);
+    if(process.env.INFRA_QA_OVERVIEW_SCREENSHOT||process.env.INFRA_QA_MOBILE_OVERVIEW_SCREENSHOT){
+      // Public design previews use readable sample labels; the functional
+      // tests below still exercise the original hostile-name/XSS fixture.
+      const saved=[devices.map(d=>d.device_name),sessions.map(item=>item.device_name)];
+      devices[0].device_name='Studio MacBook';
+      devices[1].device_name='Windows Workstation';
+      sessions.forEach(item=>item.device_name='Studio MacBook');
+      await page.reload();
+      await page.locator('#topology-nodes .topology-node').first().waitFor();
+      await page.waitForTimeout(500);
+      if(process.env.INFRA_QA_OVERVIEW_SCREENSHOT)
+        await page.screenshot({path:process.env.INFRA_QA_OVERVIEW_SCREENSHOT,fullPage:true});
+      if(process.env.INFRA_QA_MOBILE_OVERVIEW_SCREENSHOT){
+        await page.setViewportSize({width:390,height:844});
+        await page.evaluate(()=>scrollTo(0,0));
+        await page.waitForTimeout(200);
+        await page.screenshot({path:process.env.INFRA_QA_MOBILE_OVERVIEW_SCREENSHOT,fullPage:true});
+        await page.setViewportSize({width:1280,height:900});
+      }
+      devices.forEach((d,i)=>d.device_name=saved[0][i]);
+      sessions.forEach((item,i)=>item.device_name=saved[1][i]);
+      await page.reload();
+      await page.locator('#overview-devices [data-device="online"]').waitFor();
+    }
     await page.goto(base+'/#add-device');
     await page.locator('#enroll-dialog[open]').waitFor();
     await page.locator('#enroll-dialog').evaluate(element=>element.close());
@@ -132,6 +158,14 @@ const server=http.createServer(async(req,res)=>{
     await page.locator('[data-device-tab="files"]').click();await page.locator('#files-browse button').first().click();
     await page.locator('[data-file-path]').waitFor();await page.locator('[data-file-path]').click();await page.locator('#file-preview:not(.hidden)').waitFor();
     assert.equal(await page.locator('#file-content').textContent(),'<script>window.xss=2</script>');assert.equal(await page.evaluate(()=>window.xss),undefined);
+    await page.locator('[data-view="devices"]').click();
+    await page.locator('#device-search').fill('no-such-device');
+    assert.equal(await page.locator('#all-devices .device-row:not(.hidden)').count(),0);
+    assert.match(await page.locator('#device-search-empty').textContent(),/No matching devices/);
+    await page.locator('#device-search').fill('windows');
+    assert.equal(await page.locator('#all-devices .device-row:not(.hidden)').count(),1);
+    await page.locator('#device-search').fill('');
+    assert.equal(await page.locator('#all-devices .device-row:not(.hidden)').count(),2);
     await page.locator('[data-view="sessions"]').click();await page.locator('#session-kind').selectOption('job');
     assert.equal(await page.locator('#all-sessions .session-row').count(),1);
     await page.locator('#session-kind').selectOption('transfer');await page.locator('#all-sessions [data-session]').click();
@@ -169,9 +203,25 @@ const server=http.createServer(async(req,res)=>{
     assert(operations.some(o=>o.op==='jobs'&&o.action.action==='cancel'&&o.action.job_id===jobId));
     await page.setViewportSize({width:390,height:844});await page.goto(base);await page.locator('#overview-devices [data-device="online"]').waitFor();
     await page.locator('#overview-devices [data-device="online"]').click();
-    if(process.env.INFRA_QA_SCREENSHOT)await page.screenshot({path:process.env.INFRA_QA_SCREENSHOT,fullPage:true});
+    if(process.env.INFRA_QA_SCREENSHOT){await page.waitForTimeout(300);await page.screenshot({path:process.env.INFRA_QA_SCREENSHOT,fullPage:true});}
     assert(await page.evaluate(()=>document.documentElement.scrollWidth<=window.innerWidth),JSON.stringify(await page.evaluate(()=>[...document.querySelectorAll('body *')].filter(e=>e.getBoundingClientRect().right>innerWidth+1).map(e=>[e.tagName,e.id,e.className,e.getBoundingClientRect().right]).slice(0,15))));
     if(process.env.INFRA_QA_SCREENSHOT)await page.screenshot({path:process.env.INFRA_QA_SCREENSHOT,fullPage:true});
+    // Global responsive gate, including tiny phones and dark OS preference.
+    for(const width of [320,390,768,1280]){
+      await page.setViewportSize({width,height:810});
+      await page.goto(base+'/#overview');
+      await page.locator('#topology-nodes .topology-node').first().waitFor();
+      assert(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth+1),'Overview overflowed at '+width+'px: '+JSON.stringify(await page.evaluate(()=>[...document.querySelectorAll('body *')].filter(e=>e.getBoundingClientRect().right>innerWidth+1).slice(0,16).map(e=>[e.tagName,e.id,e.className,Math.round(e.getBoundingClientRect().right),e.parentElement?.outerHTML.slice(0,260)]))));
+      await page.goto(base+'/#devices');
+      await page.locator('#all-devices .device-row').first().waitFor();
+      assert(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth+1),'Devices inventory overflowed at '+width+'px');
+    }
+    await page.emulateMedia({colorScheme:'dark'});
+    await page.goto(base+'/#overview');
+    await page.locator('#topology-nodes .topology-node').first().waitFor();
+    assert.equal(await page.evaluate(()=>getComputedStyle(document.documentElement).colorScheme),'light');
+    await page.emulateMedia({colorScheme:'light'});
+    await page.setViewportSize({width:1280,height:900});
     await page.locator('[data-view="settings"]').click();await page.locator('#logout-session').click();
     await page.waitForFunction(()=>document.querySelector('#all-devices').textContent.includes('No devices'));
     assert.equal(await page.locator('#app-shell').isVisible(),false);assert.equal(await page.locator('#signin').isVisible(),true);
