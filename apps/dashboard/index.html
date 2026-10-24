@@ -76,7 +76,7 @@
 
       <section id="devices" class="view">
         <section class="panel panel-large">
-          <div class="section-head"><div><h2>All devices</h2><p>Everything connected to your workspace.</p></div><label class="device-search-label"><span class="visually-hidden">Search devices</span><input id="device-search" type="search" autocomplete="off" placeholder="Search by name or platform" aria-label="Search devices"></label></div>
+          <div class="section-head"><div><h2>All devices</h2><p>Everything connected to your workspace.</p></div><label class="device-search-label"><span class="visually-hidden">Search devices</span><span class="search-icon" aria-hidden="true"></span><input id="device-search" type="search" autocomplete="off" placeholder="Search by name or platform" aria-label="Search devices"></label></div>
           <div class="device-table-head"><span>Device</span><span>Capabilities</span><span>Work</span><span>State</span></div>
           <div id="all-devices" class="device-list"></div>
         </section>
@@ -115,7 +115,7 @@
 
         <div id="device-terminal" class="device-pane panel terminal-launch hidden">
           <div class="section-head"><div><h2>Open a terminal</h2><p>Leave the page and return later — the terminal stays alive.</p></div></div>
-          <form id="terminal-open" class="terminal-open-form"><label>Shell or command<input id="terminal-command" required maxlength="32768"></label><label>Working directory<input id="terminal-cwd" placeholder="Default directory"></label><button class="primary">Open terminal <span>↗</span></button></form>
+          <form id="terminal-open" class="terminal-open-form"><label>Shell or command<input id="terminal-command" required maxlength="32768"></label><label>Working directory<input id="terminal-cwd" placeholder="Default directory"></label><button class="primary">Open terminal</button></form>
           <div class="subsection-head"><span>Existing terminals</span></div><div id="device-terminals"></div>
         </div>
 
@@ -167,7 +167,7 @@
 
   <dialog id="enroll-dialog">
     <form method="dialog" class="dialog-card">
-      <div class="dialog-head"><div><h2>Add a device</h2><p>Start Infra on your computer, then confirm its pairing request here. Your computer holds its own signing key.</p></div><button value="cancel" class="icon-button" aria-label="Close">×</button></div>
+      <div class="dialog-head"><div><h2>Add a device</h2><p>Start Infra on your computer, then confirm its pairing request here. Your computer holds its own signing key.</p></div><button value="cancel" class="icon-button" aria-label="Close"></button></div>
       <section id="pair-approval" class="pair-approval" aria-label="Approve a computer">
         <h3>Approve a computer</h3>
         <p class="muted small">Your computer will appear below with a six-digit code. Check the code on both screens before allowing access.</p>

@@ -96,6 +96,9 @@ const server=http.createServer(async(req,res)=>{
     await page.waitForFunction(()=>document.querySelector('#login-error').textContent.includes('Incorrect'));assert.equal(await page.locator('#app-shell').isVisible(),false);
     await page.locator('#login-password').fill('fixture-password-123');await page.locator('#login-submit').click();
     await page.locator('#overview-devices [data-device="online"]').waitFor();
+    assert.equal(await page.locator('#overview-devices .device-avatar svg.ui-icon').count(),2);
+    assert.equal(await page.locator('#summary .metric-icon svg.ui-icon').count(),4);
+    assert.equal(await page.locator('#overview-sessions .session-kind-icon svg.ui-icon').count(),3);
     assert.equal(await page.locator('#overview-devices .device-row').count(),2);
     assert.match(await page.locator('#summary').textContent(),/Connected/);
     if(process.env.INFRA_QA_OVERVIEW_SCREENSHOT||process.env.INFRA_QA_MOBILE_OVERVIEW_SCREENSHOT){
@@ -145,6 +148,8 @@ const server=http.createServer(async(req,res)=>{
     await page.waitForFunction(()=>document.querySelector('#device-detail').classList.contains('active'));
     assert.equal(await page.locator('#view-title').textContent(),badName);
     assert.equal(await page.locator('#device-summary img').count(),0);
+    assert.equal(await page.locator('#device-summary .device-hero-avatar svg.ui-icon').count(),1);
+    assert.equal(await page.locator('#device-capabilities .cap-icon svg.ui-icon').count(),11);
     await page.locator('#device-rename').click();
     await page.locator('#device-rename-name').fill('Developer Mac');
     await page.locator('#device-rename-form button[type="submit"]').click();
@@ -156,7 +161,8 @@ const server=http.createServer(async(req,res)=>{
     await page.locator('#device-permissions').click();
     await page.waitForFunction(()=>document.querySelector('#device-status-output').textContent.includes('Needs permission'));
     await page.locator('[data-device-tab="files"]').click();await page.locator('#files-browse button').first().click();
-    await page.locator('[data-file-path]').waitFor();await page.locator('[data-file-path]').click();await page.locator('#file-preview:not(.hidden)').waitFor();
+    await page.locator('[data-file-path]').waitFor();
+    assert.equal(await page.locator('#files-list [data-file-path] svg.ui-icon').count(),1);await page.locator('[data-file-path]').click();await page.locator('#file-preview:not(.hidden)').waitFor();
     assert.equal(await page.locator('#file-content').textContent(),'<script>window.xss=2</script>');assert.equal(await page.evaluate(()=>window.xss),undefined);
     await page.locator('[data-view="devices"]').click();
     await page.locator('#device-search').fill('no-such-device');

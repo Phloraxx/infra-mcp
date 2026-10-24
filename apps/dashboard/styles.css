@@ -306,3 +306,48 @@ dialog::backdrop{background:#111b17a1;backdrop-filter:blur(3px)}
   .session-workspace-head,.session-foot{padding:15px}
 }
 @media(prefers-reduced-motion:reduce){*,*:before,*:after{scroll-behavior:auto!important;transition:none!important;animation:none!important}}
+
+/* The iconography is locally embedded, consistent and intentionally quiet. */
+.ui-icon{
+  display:inline-block;flex:none;width:18px;height:18px;
+  fill:none;stroke:currentColor;stroke-width:1.7;
+  stroke-linecap:round;stroke-linejoin:round;vertical-align:middle;
+}
+.device-avatar .ui-icon{width:19px;height:19px;stroke-width:1.6}
+.device-hero-avatar .ui-icon{width:25px;height:25px;stroke-width:1.55}
+.session-kind-icon .ui-icon{width:18px;height:18px;stroke-width:1.65}
+.cap-icon .ui-icon{width:17px;height:17px;stroke-width:1.7}
+.summary-card .metric-icon{
+  display:flex;color:#abb5ac;align-items:center;justify-content:center;
+}
+.summary-card .metric-icon .ui-icon{width:17px;height:17px;stroke-width:1.55}
+.summary-card.online .metric-icon{color:#6eab83}
+.summary-card.offline .metric-icon{color:#a7aea8}
+.primary .ui-icon,.secondary .ui-icon,.ghost-button .ui-icon,
+.text-button .ui-icon,.icon-button .ui-icon{
+  width:15px;height:15px;stroke-width:1.85;
+}
+.primary,.secondary,.ghost-button,.text-button,.icon-button{
+  display:inline-flex;justify-content:center;align-items:center;gap:8px;
+}
+#add-device .button-plus{display:flex;align-items:center;justify-content:center}
+#add-device .button-plus .ui-icon{width:17px;height:17px}
+#signin-lock{display:inline-flex;vertical-align:middle;color:#7fa990;align-items:center}
+#signin-lock .ui-icon{height:13px;width:13px}
+.file-row .device-link{display:inline-flex;align-items:center;gap:10px}
+.file-row .device-link .ui-icon{width:16px;height:16px;color:#7b9a84}
+.file-row .device-link[data-file-kind="directory"] .ui-icon{color:#547a60}
+.empty{min-height:116px;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:10px}
+.empty .ui-icon{width:21px;height:21px;color:#aab6ab;stroke-width:1.5}
+.search-icon{position:absolute;left:12px;bottom:12px;color:#9aa69b;display:flex;pointer-events:none}
+.search-icon .ui-icon{width:16px;height:16px}
+.device-search-label{position:relative}
+.device-search-label input{padding-left:37px}
+.icon-button{height:34px;min-height:34px;width:34px;padding:0}
+.icon-button .ui-icon{height:18px;width:18px}
+.text-button.back span{display:flex}
+.text-button.back .ui-icon{width:17px;height:17px}
+@media(max-width:650px){
+  #add-device .button-plus .ui-icon{width:20px;height:20px}
+  .device-avatar .ui-icon{width:17px;height:17px}
+}
