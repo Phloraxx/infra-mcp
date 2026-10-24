@@ -8,7 +8,7 @@ The product goal is not to be a thin SSH wrapper or a clone of Desktop Commander
 
 ## Read this first (23 October 2026)
 
-The **new first-run product redesign** is [docs/ONBOARDING_REDESIGN.md](docs/ONBOARDING_REDESIGN.md). The underlying current-state review and infrastructure plan remain in [docs/CURRENT_REALITY.md](docs/CURRENT_REALITY.md) and [docs/NEXT_STEPS.md](docs/NEXT_STEPS.md).
+The **preferred near-term installer design** is [docs/ONE_COMMAND_SETUP.md](docs/ONE_COMMAND_SETUP.md), with broader pairing/UX design in [docs/ONBOARDING_REDESIGN.md](docs/ONBOARDING_REDESIGN.md). The underlying current-state review and infrastructure plan remain in [docs/CURRENT_REALITY.md](docs/CURRENT_REALITY.md) and [docs/NEXT_STEPS.md](docs/NEXT_STEPS.md).
 
 **Next direction:** keep the existing Rust gateway, SQLite, outbound authenticated agents, and Android service. Make Tailscale optional rather than required: a private loopback gateway behind an existing HTTPS ingress, signed agents connecting over public `wss://` on 443, tested OAuth for MCP, and smooth installation/recovery. Measure persistent-connection latency and actual failures before introducing another transport or rewriting the UI. The feature branch is not production, and old fallback services stay until acceptance.
 

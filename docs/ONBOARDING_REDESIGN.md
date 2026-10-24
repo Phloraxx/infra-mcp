@@ -1,6 +1,6 @@
 # Infra onboarding v2 — product redesign decision and implementation blueprint
 
-**Decision date:** 2026-10-24. **Status:** proposed for implementation and acceptance, *not deployed*. This supersedes the default first-run UX in [INSTALLATION_UX.md](INSTALLATION_UX.md) and the onboarding parts of [NEXT_STEPS.md](NEXT_STEPS.md). Retain older documents as dated implementation history.
+**Decision date:** 2026-10-24. **Status:** proposed for implementation and acceptance, *not deployed*. **Updated installation preference:** [ONE_COMMAND_SETUP.md](ONE_COMMAND_SETUP.md) makes verified one-command native setup the first milestone; the signed MSI described below is an optional later distribution channel, not a blocker. This supersedes the default first-run UX in [INSTALLATION_UX.md](INSTALLATION_UX.md) and the onboarding parts of [NEXT_STEPS.md](NEXT_STEPS.md). Retain older documents as dated implementation history.
 
 ## A. What went wrong: evidence rather than assumptions
 

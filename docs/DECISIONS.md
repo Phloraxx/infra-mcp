@@ -128,3 +128,9 @@ Use a **signed per-user Windows MSI** as the first supported primary installatio
 Preserve existing Rust gateway, Ed25519 identities, SQLite, MCP and PTY/job/transfer logic. Do **not** add Electron/Tauri, a second gateway, or a new always-running onboarding service. Pair approval lives in the existing gateway and SQLite; the CLI can temporarily handle pending enrollment and open the browser. Implement the independent local verification code with the lightest safe UI proven by a Windows prototype, not an elevated MSI custom dialog by assumption.
 
 Detailed protocol, threat model, UX storyboard, migration and acceptance tests: [ONBOARDING_REDESIGN.md](ONBOARDING_REDESIGN.md).
+
+## D016 — Make one-command setup the first release priority (2026-10-24)
+
+**Status:** Proposed; supersedes the MSI-first sequence of D015, not the pairing security model.
+
+Use small Windows PowerShell and POSIX adapters to verify a published release, then run one shared Rust setup/repair lifecycle. Detect hostname automatically. Require authenticated owner approval and proven signed agent readiness before displaying Connected. Preserve identity and the previous binary on failures. MSI/PKG packaging is optional later. See [ONE_COMMAND_SETUP.md](ONE_COMMAND_SETUP.md).
