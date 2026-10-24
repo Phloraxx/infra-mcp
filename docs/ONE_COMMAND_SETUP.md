@@ -1,6 +1,6 @@
 # One-command Infra setup
 
-**2026-10-24 · Implementation started in the isolated feature branch; not deployed.** Pairing, setup, approval and aliases are implemented and locally validated. Real signed release download, initial short bootstrap, browser handoff, rollback and physical Windows/no-VPN testing remain open. See [IMPLEMENTATION_STATUS.md](IMPLEMENTATION_STATUS.md).
+**2026-10-24 · Implementation started in the isolated feature branch; not deployed.** Pairing, setup, approval and aliases are implemented and locally validated. Real signed release download, initial short bootstrap, rollback and physical Windows/no-VPN testing remain open. Local browser handoff is implemented and Windows CI now passes signed owner pairing with automatic OS hostname; no consumer release is published. See [IMPLEMENTATION_STATUS.md](IMPLEMENTATION_STATUS.md).
 
 This is the new near-term onboarding priority, refining [ONBOARDING_REDESIGN.md](ONBOARDING_REDESIGN.md). A signed MSI can be offered later, but is no longer the prerequisite for a usable desktop installer.
 

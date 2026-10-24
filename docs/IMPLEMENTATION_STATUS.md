@@ -332,3 +332,15 @@ First implementation slice in the isolated feature worktree (not deployed):
 - Local Rust workspace tests, strict lint, legacy/password/pairing smokes and Chromium browser fixture passed.
 
 Remaining release gates: authenticated published binaries, verified short production bootstrap command, atomic cross-version update/rollback, initial browser handoff, Windows user-login and reboot tests, public no-VPN WSS staging, OAuth dirty-worktree reconciliation, Android parity. Existing services and identities were not changed.
+
+## 2026-10-24 — Windows native onboarding acceptance and hostname correction
+
+GitHub CI for commit `c24ce32` completed successfully across Windows x64, macOS ARM64, Ubuntu ARM64/x64, browser interactions and TypeScript validation.
+
+- A genuine Windows startup defect was reproduced: `schtasks /Create /TR` produced an ambiguous quoted executable path when the install directory contained spaces. The scheduled task exited without connecting. Replaced fragile task-string construction with Windows' structured ScheduledTasks PowerShell API (separate executable and argument fields, current interactive user and limited privilege). CI now proves Task Scheduler launches the native agent and it connects through an authenticated signed WebSocket. This is **CI acceptance**, not a real personal Windows reboot.
+- A second Windows CI scenario now proves device-initiated pairing without a `--code` or manually supplied `--name`: it requests owner approval, receives it through the authenticated dashboard API, persists signed credentials, re-runs native setup without changing identity and connects as a separate agent.
+- That scenario uncovered Windows hostname detection falling back to `unknown` because the old platform implementation checked Unix `HOSTNAME` and `/etc/hostname`. The shared platform implementation now reads Windows `COMPUTERNAME` and has native hostname fallback on other systems. Windows CI asserts that the detected hostname matches the OS value, not `unknown`.
+- The Windows PowerShell 5.1 test harness occasionally provided a null `Start-Process` exit-code property even though process completion, identity and stdout proved successful setup. The fixture now validates persisted identity and CLI completion and does not misinterpret a null as a nonzero exit code.
+- Native pairing opens `/#add-device` in the local browser when a GUI is available. The dashboard deep-links directly to the authenticated Add Device approval panel, with headless CLI fallback if browser opening is unavailable.
+
+**Open:** No GitHub Release assets or owner-provisioned publisher signing key; no verified short consumer install command yet; Windows physical-user reboot, reconnect and upgrade/rollback, actual public WSS without Tailscale, and full rollout compatibility remain unverified. CI green does not authorize a production cutover.

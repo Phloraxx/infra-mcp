@@ -2,6 +2,8 @@
 
 # Windows Infra installation — current acceptance
 
+**2026-10-24 update:** The Windows CI startup task and newly added device-initiated pairing scenario now pass on an isolated Windows runner, including an installation path with spaces, genuine OS hostname, key-bound owner approval, setup retry/identity preservation and signed online reconnection. Fix: use structured ScheduledTasks action/executable/arguments instead of the fragile `schtasks /TR` string. This is not physical-PC logon/reboot acceptance and does not mean a signed public release exists. See [IMPLEMENTATION_STATUS.md](IMPLEMENTATION_STATUS.md).
+
 **2026-10-23:** Windows x64 native Rust build and ConPTY test suite passed in GitHub Actions, but physical Windows/Rose enrollment, signed gateway handshake, reboot reconnect and updater are **not yet certified**. The device is not currently listed as connected to the canonical gateway. Another ChatGPT Windows troubleshooting session was referenced by the owner but its exact errors were not available to this worktree review; do not state a root cause based on those unseen logs.
 
 ## Verified blocker: no release to install
