@@ -14,6 +14,7 @@ import android.widget.ScrollView;
 import android.widget.TextView;
 
 import java.io.ByteArrayOutputStream;
+import java.io.IOException;
 import java.io.InputStream;
 import java.nio.charset.StandardCharsets;
 import java.util.concurrent.ExecutorService;
@@ -102,8 +103,22 @@ public final class AdbProbeActivity extends Activity {
             ByteArrayOutputStream out=new ByteArrayOutputStream();
             byte[] b=new byte[512];
             int n;
-            while((n=in.read(b))!=-1 && out.size()<2048)
+            while(out.size()<2048) {
+                try {
+                    n=in.read(b);
+                } catch(IOException e) {
+                    // This ADB library throws on remote CLSE rather than returning EOF.
+                    // Accept the close only after receiving some command output.
+                    if(out.size()==0 || !"Stream closed.".equals(e.getMessage()))throw e;
+                    break;
+                }
+                if(n<0)break;
                 out.write(b,0,Math.min(n,2048-out.size()));
+                // "id" emits a single newline-terminated line; do not wait for a
+                // second read after it closes its ADB stream.
+                if(new String(out.toByteArray(),StandardCharsets.UTF_8).contains("\n"))
+                    break;
+            }
             return new String(out.toByteArray(),StandardCharsets.UTF_8);
         }
     }
