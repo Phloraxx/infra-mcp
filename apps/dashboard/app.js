@@ -400,7 +400,7 @@ function attachSession(device,kind,id,key){
   $('#terminal-tools').classList.toggle('hidden',kind!=='terminal');$('#terminal-screen').classList.toggle('hidden',kind!=='terminal');$('#session-output').classList.toggle('hidden',kind==='terminal');
   $('#session-stop').textContent=kind==='terminal'?'Close terminal':kind==='job'?'Cancel job':'Cancel transfer';$('#session-stop').disabled=!available(device);
   if(kind==='terminal'){
-    a.term=new Terminal({cols:100,rows:28,cursorBlink:true,fontSize:13,scrollback:3000,theme:{background:'#111c19',foreground:'#e8f0e8',cursor:'#ccea79',selectionBackground:'#344d40'},allowProposedApi:false});
+    a.term=new Terminal({cols:100,rows:28,cursorBlink:true,fontSize:13,scrollback:3000,theme:{background:'#0b100e',foreground:'#e7eee8',cursor:'#91c3a1',selectionBackground:'#304c3a'},allowProposedApi:false});
     a.term.open($('#terminal-screen'));a.term.onData(data=>queueInput(a,data));a.term.focus();
   }
   readSession(a);

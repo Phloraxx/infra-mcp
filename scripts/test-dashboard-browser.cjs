@@ -90,6 +90,19 @@ const server=http.createServer(async(req,res)=>{
     page.on('pageerror',e=>errors.push(e.message));
     page.on('console',msg=>{if(msg.type()==='error'&&msg.text().includes('Content Security Policy'))errors.push(msg.text());});
     await page.goto(base);await page.locator('#login-submit:not([disabled])').waitFor();
+    const darkMetrics=await page.evaluate(()=>{
+      const rgb=selector=>{
+        const value=getComputedStyle(document.querySelector(selector)).backgroundColor;
+        return value.match(/[0-9.]+/g).slice(0,3).map(Number);
+      };
+      return {mode:getComputedStyle(document.documentElement).colorScheme,
+        page:rgb('body'),login:rgb('#signin'),input:rgb('#login-password')};
+    });
+    assert.equal(darkMetrics.mode,'dark');
+    assert(darkMetrics.page.every(channel=>channel<40),'Page is not dark');
+    assert(darkMetrics.login.every(channel=>channel<40),'Login is not dark');
+    assert(darkMetrics.input.every(channel=>channel<55),'Login input is not dark');
+
     if(process.env.INFRA_QA_LOGIN_SCREENSHOT){await page.waitForTimeout(650);await page.screenshot({path:process.env.INFRA_QA_LOGIN_SCREENSHOT,fullPage:true});}
     assert.equal(await page.locator('#app-shell').isVisible(),false);
     await page.locator('#login-username').fill('owner');await page.locator('#login-password').fill('wrong');await page.locator('#login-submit').click();
@@ -127,6 +140,11 @@ const server=http.createServer(async(req,res)=>{
     }
     await page.goto(base+'/#add-device');
     await page.locator('#enroll-dialog[open]').waitFor();
+    assert(await page.locator('#enroll-dialog').evaluate(node=>{
+      const rgb=getComputedStyle(node).backgroundColor.match(/[0-9.]+/g).slice(0,3).map(Number);
+      return rgb.every(value=>value<50);
+    }),'Pairing dialog contains a light surface');
+
     await page.locator('#enroll-dialog').evaluate(element=>element.close());
     await page.goto(base);
     await page.locator('#overview-devices [data-device="online"]').waitFor();
@@ -182,6 +200,10 @@ const server=http.createServer(async(req,res)=>{
     await page.locator('[data-view="sessions"]').click();
     await page.locator('#session-kind').selectOption('terminal');await page.locator('#all-sessions [data-session]').click();
     await page.locator('.xterm-screen').waitFor();await page.waitForFunction(()=>document.querySelector('#session-read-state').textContent.includes('bytes read'));
+    assert(await page.locator('#terminal-screen').evaluate(node=>
+      getComputedStyle(node).backgroundColor.match(/[0-9.]+/g).slice(0,3).map(Number).every(value=>value<30)
+    ),'Terminal is not near-black');
+
     await page.locator('.xterm-helper-textarea').focus();await page.keyboard.type('abc');
     await page.waitForFunction(()=>document.querySelector('.xterm-screen').textContent.includes('abc'));
     assert.equal(operations.filter(o=>o.op==='terminal'&&o.action.action==='open').length,0);
@@ -225,8 +247,12 @@ const server=http.createServer(async(req,res)=>{
     await page.emulateMedia({colorScheme:'dark'});
     await page.goto(base+'/#overview');
     await page.locator('#overview-devices .device-row').first().waitFor();
-    assert.equal(await page.evaluate(()=>getComputedStyle(document.documentElement).colorScheme),'light');
+    assert.equal(await page.evaluate(()=>getComputedStyle(document.documentElement).colorScheme),'dark');
     await page.emulateMedia({colorScheme:'light'});
+    await page.goto(base+'/#overview');
+    await page.locator('#overview-devices .device-row').first().waitFor();
+    assert.equal(await page.evaluate(()=>getComputedStyle(document.documentElement).colorScheme),'dark');
+
     await page.setViewportSize({width:1280,height:900});
     await page.locator('[data-view="settings"]').click();await page.locator('#logout-session').click();
     await page.waitForFunction(()=>document.querySelector('#all-devices').textContent.includes('No devices'));
