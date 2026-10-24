@@ -12,16 +12,60 @@ param(
 $ErrorActionPreference = "Stop"
 $Repo = "Phloraxx/infra-mcp"
 
-$Arch = switch ([System.Runtime.InteropServices.RuntimeInformation]::OSArchitecture.ToString()) {
+# Avoid invoking .ToString() on a potentially missing environment/API value.
+$DetectedArchitecture = [System.Runtime.InteropServices.RuntimeInformation]::OSArchitecture
+if ($null -eq $DetectedArchitecture) {
+  throw "Infra preflight: Windows OS architecture was unavailable. Run in Windows PowerShell 5.1 or PowerShell 7."
+}
+$Arch = switch ([string]$DetectedArchitecture) {
   "X64" { "x86_64" }
   "Arm64" { "aarch64" }
-  default { throw "Unsupported Windows architecture: $_" }
+  default { throw "Infra preflight: unsupported Windows architecture '$DetectedArchitecture'." }
 }
 
 # Download and verify BOTH assets before modifying a working installation.
 # This also means a missing GitHub release cannot leave a half-installed agent.
 $TempDir = Join-Path ([IO.Path]::GetTempPath()) ("infra-install-" + [guid]::NewGuid())
 New-Item -ItemType Directory -Force -Path $TempDir | Out-Null
+
+# These helpers are deliberately strict: PowerShell 5.1 can return $null from
+# file reads instead of an empty string. Never call methods on those results.
+function Get-InfraExpectedHash([string]$ChecksumPath, [string]$Asset) {
+  if (-not (Test-Path -LiteralPath $ChecksumPath -PathType Leaf)) {
+    throw "Infra download: missing checksum file for $Asset. Check GitHub access or proxy filtering."
+  }
+  $Content = Get-Content -LiteralPath $ChecksumPath -Raw -ErrorAction Stop
+  if ([string]::IsNullOrWhiteSpace($Content)) {
+    throw "Infra download: checksum file for $Asset is empty. Check GitHub access or proxy filtering."
+  }
+  $Parts = $Content.Trim() -split '\s+'
+  if ($Parts.Count -lt 1 -or [string]::IsNullOrWhiteSpace($Parts[0])) {
+    throw "Infra download: checksum for $Asset is missing."
+  }
+  $Expected = [string]$Parts[0]
+  if ($Expected -notmatch '^[0-9a-fA-F]{64}$') {
+    throw "Infra download: checksum format is invalid for $Asset."
+  }
+  if ($Parts.Count -ge 2 -and $Parts[1] -ne $Asset -and $Parts[1] -ne "*$Asset") {
+    throw "Infra download: checksum references another asset, refusing $Asset."
+  }
+  return $Expected.ToLowerInvariant()
+}
+
+function Get-InfraActualHash([string]$FilePath, [string]$Asset) {
+  if (-not (Test-Path -LiteralPath $FilePath -PathType Leaf)) {
+    throw "Infra download: missing binary $Asset after download."
+  }
+  $FileInfo = Get-Item -LiteralPath $FilePath -ErrorAction Stop
+  if ($null -eq $FileInfo -or $FileInfo.Length -le 0) {
+    throw "Infra download: empty binary $Asset after download."
+  }
+  $Digest = Get-FileHash -LiteralPath $FilePath -Algorithm SHA256 -ErrorAction Stop
+  if ($null -eq $Digest -or [string]::IsNullOrWhiteSpace($Digest.Hash)) {
+    throw "Infra verification: could not calculate the SHA-256 of $Asset."
+  }
+  return ([string]$Digest.Hash).ToLowerInvariant()
+}
 
 function Stage-InfraBinary([string]$Name) {
   $Staged = Join-Path $TempDir "$Name.exe"
@@ -52,15 +96,8 @@ function Stage-InfraBinary([string]$Name) {
       }
       throw "Unable to download $Asset from GitHub ($($_.Exception.Message)). Check network access, proxy/TLS and the release tag."
     }
-    $Parts = ((Get-Content -LiteralPath $ChecksumPath -Raw).Trim() -split '\s+')
-    $Expected = $Parts[0].ToLowerInvariant()
-    if ($Expected -notmatch '^[0-9a-f]{64}$') {
-      throw "Release checksum format is invalid for $Asset"
-    }
-    if ($Parts.Length -ge 2 -and ($Parts[1] -ne $Asset -and $Parts[1] -ne "*$Asset")) {
-      throw "Release checksum references a different asset, refusing $Asset"
-    }
-    $Actual = (Get-FileHash -LiteralPath $Staged -Algorithm SHA256).Hash.ToLowerInvariant()
+    $Expected = Get-InfraExpectedHash -ChecksumPath $ChecksumPath -Asset $Asset
+    $Actual = Get-InfraActualHash -FilePath $Staged -Asset $Asset
     if ($Expected -ne $Actual) { throw "SHA-256 verification failed for $Asset" }
     # SHA-256 is only an integrity check. First-install publisher authentication
     # needs a signed bootstrap trust root (tracked separately).
@@ -73,8 +110,8 @@ function Activate-InfraBinary([string]$Name, [string]$Staged) {
   # Repair/re-run of this same release must not try to overwrite a running
   # Windows executable; that raises access-denied and can damage a healthy setup.
   if (Test-Path -LiteralPath $Destination -PathType Leaf) {
-    $InstalledHash = (Get-FileHash -LiteralPath $Destination -Algorithm SHA256).Hash
-    $StagedHash = (Get-FileHash -LiteralPath $Staged -Algorithm SHA256).Hash
+    $InstalledHash = Get-InfraActualHash -FilePath $Destination -Asset "$Name (installed)"
+    $StagedHash = Get-InfraActualHash -FilePath $Staged -Asset "$Name (staged)"
     if ($InstalledHash -eq $StagedHash) {
       Write-Host "Infra $Name is already installed; leaving the existing binary intact."
       return
@@ -162,6 +199,10 @@ try {
     }
     throw "Infra setup did not finish; previous versions were preserved and new-device pairing can be resumed. $($_.Exception.Message)"
   }
+}
+catch {
+  $Line = $_.InvocationInfo.ScriptLineNumber
+  throw "Infra installation failed at installer line ${Line}: $($_.Exception.Message)"
 }
 finally {
   Remove-Item -Recurse -Force $TempDir -ErrorAction SilentlyContinue
