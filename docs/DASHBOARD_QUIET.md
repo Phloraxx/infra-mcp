@@ -25,3 +25,7 @@ Locally embedded SVG icons replace placeholder letters for device platforms, ses
 ![Desktop](previews/icons/overview-desktop.png)
 
 ![Mobile](previews/icons/overview-mobile.png)
+
+### Live rollout of icon-enhanced dashboard
+
+Deployed gateway commit 0756ddc to https://infra.drbijoy.in on October 24, 2026. The published gateway SHA-256 is d171c4aad196c1c0dc8ff09a498751352be0f5c6870a5b6cd905359102eee6e5. The guarded process backed up the previous gateway and SQLite database at ~/.local/share/infra-v1-remote-burnin/gateway/staging-20261024-icons/ and validated OAuth, browser authentication, signed device reconnection (3 of 3), and the new SVG-bearing JavaScript and CSS on public HTTPS. The database remains healthy at schema v5 with three enrolled devices; native agents were unchanged.
