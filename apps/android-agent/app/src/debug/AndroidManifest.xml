@@ -3,5 +3,7 @@
  xmlns:tools="http://schemas.android.com/tools">
  <application android:label="Infra Phone Dev"
    android:usesCleartextTraffic="true"
-   tools:replace="android:usesCleartextTraffic,android:label"/>
+   tools:replace="android:usesCleartextTraffic,android:label">
+   <activity android:name=".AdbProbeActivity" android:exported="false"/>
+ </application>
 </manifest>
