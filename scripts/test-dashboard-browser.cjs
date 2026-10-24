@@ -96,6 +96,11 @@ const server=http.createServer(async(req,res)=>{
     await page.waitForFunction(()=>document.querySelector('#login-error').textContent.includes('Incorrect'));assert.equal(await page.locator('#app-shell').isVisible(),false);
     await page.locator('#login-password').fill('fixture-password-123');await page.locator('#login-submit').click();
     await page.locator('#overview-devices [data-device="online"]').waitFor();
+    await page.goto(base+'/#add-device');
+    await page.locator('#enroll-dialog[open]').waitFor();
+    await page.locator('#enroll-dialog').evaluate(element=>element.close());
+    await page.goto(base);
+    await page.locator('#overview-devices [data-device="online"]').waitFor();
     await page.locator('#add-device').click();
     await page.waitForFunction(()=>document.querySelector('#pending-pairs').textContent.includes('Windows Test PC'));
     assert.match(await page.locator('#pending-pairs').textContent(),/482731/);

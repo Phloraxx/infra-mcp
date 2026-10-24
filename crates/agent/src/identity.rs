@@ -316,7 +316,7 @@ pub async fn pair_with_owner(
                 dashboard, view.verification_code
             );
             if !browser_attempted {
-                open_pairing_dashboard(&dashboard);
+                open_pairing_dashboard(&format!("{dashboard}/#add-device"));
                 browser_attempted = true;
             }
             last_code = view.verification_code.clone();

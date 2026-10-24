@@ -76,24 +76,35 @@ pub fn install(agent: &Path, state_dir: &Path) -> anyhow::Result<()> {
 
 #[cfg(windows)]
 pub fn install(agent: &Path, state_dir: &Path) -> anyhow::Result<()> {
-    let command = format!(
-        "\"{}\" --state-dir \"{}\"",
-        agent.display(),
-        state_dir.display()
+    // schtasks /TR is ambiguous for quoted executable + arguments when paths
+    // contain spaces: Task Scheduler may preserve the outer quotes inside its
+    // *Execute* field and fail to launch the program. Supply structured fields
+    // through the built-in Windows ScheduledTasks PowerShell module instead.
+    let executable = powershell_single_quote(&agent.to_string_lossy());
+    let arguments = powershell_single_quote(&format!(
+        "--state-dir \"{}\"",
+        state_dir.display().to_string().replace('"', "")
+    ));
+    let script = format!(
+        "$ErrorActionPreference='Stop'; \
+         $action=New-ScheduledTaskAction -Execute '{executable}' -Argument '{arguments}'; \
+         $trigger=New-ScheduledTaskTrigger -AtLogOn; \
+         $principal=New-ScheduledTaskPrincipal -UserId ([Security.Principal.WindowsIdentity]::GetCurrent().Name) -LogonType Interactive -RunLevel Limited; \
+         Register-ScheduledTask -TaskName '{WINDOWS_TASK}' -Action $action -Trigger $trigger -Principal $principal -Force | Out-Null"
     );
-    command_ok(Command::new("schtasks").args([
-        "/Create",
-        "/SC",
-        "ONLOGON",
-        "/TN",
-        WINDOWS_TASK,
-        "/TR",
-        &command,
-        "/F",
+    command_ok(Command::new("powershell.exe").args([
+        "-NoProfile",
+        "-NonInteractive",
+        "-Command",
+        &script,
     ]))?;
-    // A created task is not proof that the scheduler launched it.
     command_ok(Command::new("schtasks").args(["/Run", "/TN", WINDOWS_TASK]))?;
     Ok(())
+}
+
+#[cfg(windows)]
+fn powershell_single_quote(value: &str) -> String {
+    value.replace(char::from(39), "''")
 }
 
 #[cfg(target_os = "linux")]

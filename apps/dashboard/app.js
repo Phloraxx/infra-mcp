@@ -203,7 +203,10 @@ function route(){
   state.routeVersion++;
   const key=parts.slice(0,4).join('/');
   if(state.attachment&&state.attachment.key!==key)detachSession();
-  if(parts[0]==='device'&&parts[1]){
+  if(parts[0]==='add-device'){
+    showView('devices','Devices','Reachability and capability across your fleet.');
+    if(!$('#enroll-dialog').open)$('#add-device').click();
+  }else if(parts[0]==='device'&&parts[1]){
     if(state.device!==parts[1]){state.file=null;$('#file-content').textContent='';$('#file-preview').classList.add('hidden');$('#files-list').replaceChildren();$('#files-path').value='.';$('#device-status-output').classList.add('hidden');}
     state.device=parts[1];state.tab=['overview','terminal','files','sessions','activity'].includes(parts[2])?parts[2]:'overview';
     showView('device-detail',currentDevice()?.device_name||'Device','Device health and persistent work.');renderDevice();
