@@ -1424,7 +1424,7 @@ fn oauth_authorize_page(
         axum::http::HeaderValue::from_static("text/html; charset=utf-8"),
     );
     let csp = String::from(
-        "default-src 'none'; img-src 'self'; style-src 'unsafe-inline'; script-src https://static.cloudflareinsights.com; connect-src https://cloudflareinsights.com; form-action https:; base-uri 'none'; frame-ancestors 'none'",
+        "default-src 'none'; img-src 'self'; style-src 'unsafe-inline'; script-src https://static.cloudflareinsights.com; connect-src https://cloudflareinsights.com; form-action https: http://127.0.0.1:* http://localhost:* http://[::1]:*; base-uri 'none'; frame-ancestors 'none'",
     );
     if let Ok(value) = axum::http::HeaderValue::from_str(&csp) {
         response
