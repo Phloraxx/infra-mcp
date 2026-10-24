@@ -6,8 +6,8 @@ android {
         applicationId 'com.phloraxx.infraphone'
         minSdk 28
         targetSdk 35
-        versionCode 5
-        versionName '0.3.2'
+        versionCode 7
+        versionName '0.3.4-lab'
     }
     compileOptions {
         sourceCompatibility JavaVersion.VERSION_17
