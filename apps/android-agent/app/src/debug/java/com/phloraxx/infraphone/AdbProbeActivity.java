@@ -35,7 +35,7 @@ public final class AdbProbeActivity extends Activity {
 
     @Override public void onCreate(Bundle state){
         super.onCreate(state);
-        if(!BuildConfig.DEBUG || !getPackageName().endsWith(".dev")){
+        if(!"debug".equals(BuildConfig.BUILD_TYPE) || !getPackageName().endsWith(".dev")){
             finish();return;
         }
         ScrollView scroll=new ScrollView(this);
