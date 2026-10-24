@@ -43,7 +43,7 @@ public final class GatewayEnrollment {
         data.put("public_key",identity.publicKey());
         data.put("platform","android");
         data.put("arch",android.os.Build.SUPPORTED_ABIS[0]);
-        data.put("agent_version","0.2.0");
+        data.put("agent_version",BuildConfig.VERSION_NAME);
         HttpURLConnection c=(HttpURLConnection)new URL(base+"/enroll").openConnection();
         c.setRequestMethod("POST");c.setConnectTimeout(8000);c.setReadTimeout(10000);
         c.setRequestProperty("Content-Type","application/json");
