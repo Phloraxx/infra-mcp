@@ -2767,8 +2767,13 @@ async fn dispatch_to_device(
         }
         Err(_) => {
             state.pending.lock().await.remove(&id);
-            // An unanswered command might have run. Disconnect instead of replaying it.
-            let _ = retire.try_send(());
+            // An unanswered operation may still complete on the agent. Report an
+            // uncertain outcome and never replay it. A slow operation alone is
+            // not evidence of a dead WebSocket: the independent heartbeat and
+            // socket checks own connection liveness. Retiring here made healthy
+            // devices appear offline on each tool timeout.
+            warn!(device_id=%device_id, request_id=%id, timeout_ms,
+                "agent operation response deadline exceeded; keeping live connection");
             Ok(AgentResponse {
                 id,
                 result: OperationResult::OutcomeUnknown {
@@ -3241,28 +3246,58 @@ mod tests {
         server.abort();
     }
     #[tokio::test]
-    async fn timed_out_request_retires_connection() {
+    async fn timed_out_operation_does_not_disconnect_healthy_agent() {
         let (_dir, state, addr, server) = spawn_test_gateway().await;
-        let (_socket, _) = connect_legacy(addr, "silent-device").await;
-        wait_registered(&state, "silent-device").await;
-        let response =
-            dispatch_to_device(&state, "silent-device".into(), AgentOperation::Status, 50)
-                .await
-                .unwrap();
+        let (socket, generation) = connect_legacy(addr, "slow-device").await;
+        wait_registered(&state, "slow-device").await;
+        let (mut sink, mut stream) = socket.split();
+        let responder = tokio::spawn(async move {
+            let mut requests = 0;
+            while let Some(Ok(ClientMessage::Text(text))) = stream.next().await {
+                let message: GatewayToAgent = serde_json::from_str(text.as_str()).unwrap();
+                if let GatewayToAgent::Request(request) = message {
+                    requests += 1;
+                    if requests == 1 {
+                        // One command never responds, but the agent can process
+                        // subsequent requests on its still-healthy connection.
+                        continue;
+                    }
+                    let answer = AgentToGateway::Response(AgentResponse {
+                        id: request.id,
+                        result: OperationResult::Ok {
+                            body: serde_json::json!({"status": "ready"}),
+                        },
+                    });
+                    sink.send(ClientMessage::Text(
+                        serde_json::to_string(&answer).unwrap().into(),
+                    ))
+                    .await
+                    .unwrap();
+                }
+            }
+        });
+        let first = dispatch_to_device(&state, "slow-device".into(), AgentOperation::Status, 50)
+            .await
+            .unwrap();
         assert!(matches!(
-            response.result,
+            first.result,
             OperationResult::OutcomeUnknown { .. }
         ));
-        tokio::time::timeout(Duration::from_secs(1), async {
-            loop {
-                if !state.devices.read().await.contains_key("silent-device") {
-                    break;
-                }
-                tokio::task::yield_now().await;
-            }
-        })
-        .await
-        .expect("timed-out device connection was not retired");
+        assert!(state.pending.lock().await.is_empty());
+        assert_eq!(
+            state.devices.read().await["slow-device"].generation,
+            generation
+        );
+        let next = dispatch_to_device(&state, "slow-device".into(), AgentOperation::Status, 1000)
+            .await
+            .unwrap();
+        assert!(matches!(next.result, OperationResult::Ok { .. }));
+        assert!(state.pending.lock().await.is_empty());
+        assert_eq!(
+            state.devices.read().await["slow-device"].generation,
+            generation
+        );
+        responder.abort();
         server.abort();
     }
 
