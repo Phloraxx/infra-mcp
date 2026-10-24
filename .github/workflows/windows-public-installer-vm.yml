@@ -90,7 +90,7 @@ jobs:
                 throw "Installer exited before pairing. stdout=$Out stderr=$Err"
               }
               try {
-                $Pairs = @(Invoke-RestMethod -Uri ($Base + '/api/pair/requests') -Headers $Headers -ErrorAction Stop)
+                $Pairs = @(Invoke-RestMethod -Uri ($Base + '/api/pair/requests') -Headers $Headers -ErrorAction Stop | Where-Object { $null -ne $_ -and $_.request_id -and $_.verification_code -and $_.device_name })
                 if ($Pairs.Count -gt 0) { $PendingPair = $Pairs[0]; break }
               } catch {}
             }
