@@ -36,3 +36,7 @@ authorized rotation mechanism. Simply changing a remote key or signature is not 
   version for controlled releases; design anti-rollback/version pinning before automatic updates.
 - Keep the existing staged health-check and rollback functionality and test it on real
   macOS/Windows/Linux machines before enabling unattended rollouts.
+
+## Published release candidate
+
+On 2026-10-24 the owner provisioned the repository release signing secret and public key variable. GitHub Actions published [v0.1.0-rc.1](https://github.com/Phloraxx/infra-mcp/releases/tag/v0.1.0-rc.1) with all six platform CLI/agent pairs and a valid signed release manifest. The public key and fingerprint are recorded in [RELEASE_PUBLISHER_KEY.md](RELEASE_PUBLISHER_KEY.md); its private counterpart was retained in the owner's macOS Keychain. This does **not** authenticate the bootstrap scripts or represent a production-ready release.
