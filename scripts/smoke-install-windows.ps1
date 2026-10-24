@@ -64,7 +64,20 @@ try {
   # Validate the real Windows scheduled startup, not only a manually launched
   # process: the user task must be registered, started and signed online.
   & (Join-Path $Install "infra.exe") repair --state-dir $State
-  if ($LASTEXITCODE -ne 0) { throw "Windows Scheduled Task startup repair failed" }
+  if ($LASTEXITCODE -ne 0) {
+    Write-Host "Windows scheduled startup diagnostics:"
+    $Task = Get-ScheduledTask -TaskName "Infra MCP Agent" -ErrorAction SilentlyContinue
+    if ($null -ne $Task) {
+      $Task.Actions | Select-Object Execute, Arguments, WorkingDirectory | Format-List | Out-String | Write-Host
+      $Task.Principal | Select-Object UserId, LogonType, RunLevel | Format-List | Out-String | Write-Host
+      Get-ScheduledTaskInfo -TaskName "Infra MCP Agent" | Select-Object LastTaskResult, LastRunTime, NumberOfMissedRuns | Format-List | Out-String | Write-Host
+    } else { Write-Host "Task does not exist after repair." }
+    $RuntimePath = Join-Path $State "runtime.json"
+    if (Test-Path -LiteralPath $RuntimePath) {
+      Get-Content -LiteralPath $RuntimePath -Raw | Write-Host
+    } else { Write-Host "Agent runtime.json was not created." }
+    throw "Windows Scheduled Task startup repair failed"
+  }
   $Online = $false
   for ($i = 0; $i -lt 70; $i++) {
     Start-Sleep -Milliseconds 150

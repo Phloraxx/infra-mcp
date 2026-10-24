@@ -7,6 +7,7 @@ use serde::{Deserialize, Serialize};
 use std::{
     fs,
     path::{Path, PathBuf},
+    process::{Command, Stdio},
 };
 use tracing::warn;
 use url::Url;
@@ -286,6 +287,7 @@ pub async fn pair_with_owner(
     // The process may exit and be rerun safely; the protected pending key remains.
     let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10 * 60);
     let mut last_code = String::new();
+    let mut browser_attempted = false;
     loop {
         if tokio::time::Instant::now() >= deadline {
             anyhow::bail!("pairing approval timed out; run Infra setup again to resume");
@@ -313,6 +315,10 @@ pub async fn pair_with_owner(
                 "Open {} and approve the matching code: {}",
                 dashboard, view.verification_code
             );
+            if !browser_attempted {
+                open_pairing_dashboard(&dashboard);
+                browser_attempted = true;
+            }
             last_code = view.verification_code.clone();
         }
         while view.state == "pending" && tokio::time::Instant::now() < deadline {
@@ -360,6 +366,37 @@ pub async fn pair_with_owner(
             anyhow::bail!("pairing returned an unexpected state; previous identity preserved");
         }
     }
+}
+
+// Browser launch is a best-effort convenience in the user's desktop session.
+// The printed URL remains the fallback for headless machines and policy blocks.
+fn open_pairing_dashboard(origin: &str) {
+    if std::env::var_os("CI").is_some() || std::env::var_os("INFRA_NO_BROWSER").is_some() {
+        return;
+    }
+    #[cfg(target_os = "linux")]
+    if std::env::var_os("DISPLAY").is_none() && std::env::var_os("WAYLAND_DISPLAY").is_none() {
+        return;
+    }
+    #[cfg(windows)]
+    let mut command = {
+        let mut cmd = Command::new("rundll32.exe");
+        cmd.args(["url.dll,FileProtocolHandler", origin]);
+        cmd
+    };
+    #[cfg(target_os = "macos")]
+    let mut command = {
+        let mut cmd = Command::new("open");
+        cmd.arg(origin);
+        cmd
+    };
+    #[cfg(target_os = "linux")]
+    let mut command = {
+        let mut cmd = Command::new("xdg-open");
+        cmd.arg(origin);
+        cmd
+    };
+    let _ = command.stdout(Stdio::null()).stderr(Stdio::null()).spawn();
 }
 
 fn load_or_create_pending(path: &Path, requested_name: &str) -> anyhow::Result<PendingIdentityV2> {
