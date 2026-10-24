@@ -1,3 +1,5 @@
+> **Current primary first-run direction (2026-10-24):** [ONE_COMMAND_SETUP.md](ONE_COMMAND_SETUP.md) defines a dependable thin bootstrap and shared Rust setup. [ONBOARDING_REDESIGN.md](ONBOARDING_REDESIGN.md) defines pairing and broader UX. Both supersede the script/code/name-entry first-run flow below. This page retains the earlier historical foundation and installer requirements.
+
 # Installation and onboarding UX
 
 ## Desired first-run flow

@@ -43,6 +43,14 @@ curl -fsS "http://127.0.0.1:$PORT/healthz" >/dev/null
 curl -fsS "http://127.0.0.1:$PORT/" | grep -q '<title>Infra</title>'
 curl -fsS "http://127.0.0.1:$PORT/app.js" -o "$TMP/dashboard.js"
 grep -q 'create-enrollment' "$TMP/dashboard.js"
+grep -q 'powershellInstallerCommand' "$TMP/dashboard.js"
+! grep -q "' | iex'" "$TMP/dashboard.js"
+grep -q 'UseBasicParsing -OutFile' "$TMP/dashboard.js"
+grep -q "' | sh'" "$TMP/dashboard.js"
+! grep -qi 'scriptblock.*create' "$TMP/dashboard.js"
+curl -fsS "http://127.0.0.1:$PORT/install.sh" | grep -q 'Infra installer'
+curl -fsS "http://127.0.0.1:$PORT/install.ps1" | grep -q 'param('
+
 curl -fsS "http://127.0.0.1:$PORT/downloads/install.sh" | grep -q 'Infra installer'
 ! grep -q 'sessionStorage' apps/dashboard/app.js
 

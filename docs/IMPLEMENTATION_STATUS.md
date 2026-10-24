@@ -1,3 +1,5 @@
+> **Time-sensitive notice:** this document contains dated engineering snapshots and deliberately retains historical claims. For current code-vs-production status and next priorities use [CURRENT_REALITY.md](CURRENT_REALITY.md) and [NEXT_STEPS.md](NEXT_STEPS.md). In particular the working Rust implementation, Android signed agent and OAuth routes supersede some early “pending” assertions below.
+
 # Infra v1 implementation status
 
 This file records what exists in code. Product intent remains in the other design documents.
@@ -265,3 +267,98 @@ After owner completed the phone-side setup, Infra `devices` confirmed Android v0
 - **Not yet checked**: denial outside SenseGuide with an actually active five-minute lease and untrusted app in foreground; expiry at five minutes, screen-off/Doze/battery kill, Wi-Fi/mobile transition, fresh reboot and foreground-service relaunch. Do not claim the user-enabled Accessibility service is appropriate outside a controlled testing session. Manually disable it when not needed.
 
 No generic shell, ADB-equivalent privileged control, background recording, silent APK install or unapproved application tapping was enabled.
+
+## 2026-10-23 — Infra UX/reliability patch (feature branch)
+
+- Gateway tool requests now accept a registered device UUID or unique friendly name (exact-first, then case-insensitive); unknown, ambiguous, revoked and disconnected devices return distinct messages. Device operation activity uses the resolved canonical UUID.
+- Dashboard uses a single authenticated `/api/overview` response and coalesced SSE updates, with periodic fallback when events are interrupted. A new explicit permission check exposes the read-only desktop permission diagnosis, without polling potentially permission-triggering OS APIs in the background.
+- Agent receive loop rejects saturation with `agent_busy` instead of blocking incoming heartbeat traffic while waiting for a request permit. It still never replays ambiguous commands.
+- Isolated Rust workspace tests, strict clippy, formatting, Chromium browser regression, MCP smoke and native installer/dashboard smoke passed on the Oracle Linux ARM64 host. The smoke test includes a successful friendly-name call and explicit unknown-name error.
+- Mac native `infra doctor` reports healthy with Keychain identity and launchd startup; the production gateway has also logged intermittent Mac timeouts. The overload fix is preventative; it is **not** proof of the cause of those timeouts.
+
+### Still required before production cutover
+
+1. Reproduce and diagnose Mac sleep/wake, network-switch and concurrent-command disconnects on actual hardware; add corresponding acceptance tests.
+2. Add trusted cryptographic release metadata/signature verification with a reviewed key management and recovery plan. SHA-256 sidecars alone do not establish publisher authenticity.
+3. Build a safe, resumable cross-device copy operation on top of existing transfer primitives (not a new transport), including partial-failure cleanup and progress.
+4. Finish user-driven diagnostic/repair UX for offline devices, richer backend health/permission signals and explicit agent compatibility/update status.
+5. Prove Windows, Linux reboot and Android lifecycle acceptance before any decommissioning of legacy services.
+6. Verify MCP 2026-07-28 transport interoperability against the currently connected client before changing the working rmcp transport. That revision removes protocol-level sessions and changes request metadata, so migration must be negotiated and tested.
+
+These patches were developed in an isolated worktree. They do **not** imply that the live gateway or enrolled agents were updated.
+
+## 2026-10-23 — continuation: cross-device copy, diagnostics and release authenticity
+
+- Implemented MCP `copy`: a single operation relays file bytes between two signed agents
+  through the existing transfer primitives, verifies source and destination SHA-256,
+  honors no-overwrite by default, returns both durable transfer IDs, and resumes
+  partial copies across calls. Each call is bounded (16 MiB default, 64 MiB max,
+  100-second work budget) rather than creating an unbounded gateway task.
+- Gateway SQLite v3 persists classified disconnect reasons/times. Device views
+  return online/reconnecting/offline/revoked state, and dashboard attention messages
+  distinguish heartbeat timeout from socket/command failures, with a local diagnostic step.
+- The native CLI updater verifies an Ed25519 detached signature over a JSON
+  manifest and verifies binaries against signed SHA-256 digests before staging them.
+  Release CI builds embed the trusted public key and sign the manifest using a
+  separately provisioned private GitHub secret. No signing keys have been provisioned
+  by this change; a tagged release now requires owner setup.
+- Bootstrap installers are still checksum-only, not release-signature-authenticated.
+  Full signing chain and anti-rollback support remain incomplete. See
+  [RELEASE_SIGNING.md](RELEASE_SIGNING.md).
+- Until the new code has been released and real-device acceptance passes, the existing
+  production control plane and legacy fallback services should remain untouched.
+
+- The agent writer now prioritizes Pong messages over queued operation output, rejects overload without blocking WebSocket reads, and treats reconciliation as opportunistic under backpressure. An empty download is immediately completed instead of lingering in active work. These address potential control-channel saturation but do not prove the root cause of earlier Mac network resets.
+
+## 2026-10-23 — Windows installer/CI follow-up
+
+- GitHub API reports **zero published GitHub Releases**: Windows release-mode download defaults to missing assets. Do not mistake a green x64 acceptance artifact for a published installer.
+- A newer smoke previously required unauthenticated public `/mcp` to return 404, but OAuth now correctly returns 401 with `WWW-Authenticate` challenge. Updated the test to enforce that security boundary; local regression passed.
+- Windows installer preflights and verifies both assets before mutating destination; reports missing release assets explicitly, retains safe `-UseBasicParsing` download mode, and isolates staging files. Dashboard generated Windows command now explicitly downloads scripts with basic parsing.
+- Added Windows PowerShell 5.1 CI fixture covering no-partial-install preflight, native local-source install, isolated one-time enrollment, paths with spaces and signed handshake.
+- This does not establish the referenced separate Windows session's unseen error; actual physical Windows, release-signing and restart acceptance remain open. See [WINDOWS_INSTALL_ACCEPTANCE.md](WINDOWS_INSTALL_ACCEPTANCE.md).
+
+## 2026-10-24 — Native setup and owner-approved pairing candidate
+
+First implementation slice in the isolated feature worktree (not deployed):
+
+- SQLite pairing v4 stores durable requests, verification code, expiry, key, and approved device ID, with idempotent retries and bounded pending requests.
+- Signed public pairing request and status APIs and owner-authenticated, CSRF-protected approval/reject/list endpoints. Approval does not mark the device online.
+- Native agent pairing-only mode reuses the existing pending Ed25519 key, shows the OS hostname and verification code, and saves an identity after approval.
+- Native CLI setup mode pairs if needed, retains existing device identity and name overrides, registers user-level startup, and requires actual online status before printing Connected.
+- Dashboard adds pending owner approval plus rename functionality. The alias is stored separately from the device hostname; legacy code-based enrollment remains available.
+- Bootstrap wrappers support no-code pairing, and Windows Scheduled Task launching now checks execution errors.
+- Linux end-to-end smoke tested owner authentication, signed pairing, rejection of wrong codes/signatures, setup retry with stable identity, and a real signed agent connection.
+- Local Rust workspace tests, strict lint, legacy/password/pairing smokes and Chromium browser fixture passed.
+
+Remaining release gates: authenticated published binaries, verified short production bootstrap command, atomic cross-version update/rollback, initial browser handoff, Windows user-login and reboot tests, public no-VPN WSS staging, OAuth dirty-worktree reconciliation, Android parity. Existing services and identities were not changed.
+
+## 2026-10-24 — Windows native onboarding acceptance and hostname correction
+
+GitHub CI for commit `c24ce32` completed successfully across Windows x64, macOS ARM64, Ubuntu ARM64/x64, browser interactions and TypeScript validation.
+
+- A genuine Windows startup defect was reproduced: `schtasks /Create /TR` produced an ambiguous quoted executable path when the install directory contained spaces. The scheduled task exited without connecting. Replaced fragile task-string construction with Windows' structured ScheduledTasks PowerShell API (separate executable and argument fields, current interactive user and limited privilege). CI now proves Task Scheduler launches the native agent and it connects through an authenticated signed WebSocket. This is **CI acceptance**, not a real personal Windows reboot.
+- A second Windows CI scenario now proves device-initiated pairing without a `--code` or manually supplied `--name`: it requests owner approval, receives it through the authenticated dashboard API, persists signed credentials, re-runs native setup without changing identity and connects as a separate agent.
+- That scenario uncovered Windows hostname detection falling back to `unknown` because the old platform implementation checked Unix `HOSTNAME` and `/etc/hostname`. The shared platform implementation now reads Windows `COMPUTERNAME` and has native hostname fallback on other systems. Windows CI asserts that the detected hostname matches the OS value, not `unknown`.
+- The Windows PowerShell 5.1 test harness occasionally provided a null `Start-Process` exit-code property even though process completion, identity and stdout proved successful setup. The fixture now validates persisted identity and CLI completion and does not misinterpret a null as a nonzero exit code.
+- Native pairing opens `/#add-device` in the local browser when a GUI is available. The dashboard deep-links directly to the authenticated Add Device approval panel, with headless CLI fallback if browser opening is unavailable.
+
+**Open:** Signed pre-release binaries are now published, but the first-install bootstrap scripts are still not independently authenticated and the short consumer-ready setup command is not published. Windows physical-user reboot, reconnect and upgrade/rollback, actual public WSS without Tailscale, and full rollout compatibility remain unverified. CI green does not authorize a production cutover.
+
+## 2026-10-24 — Signed six-platform release candidate published
+
+GitHub prerelease [v0.1.0-rc.1](https://github.com/Phloraxx/infra-mcp/releases/tag/v0.1.0-rc.1) is public and contains 12 native binaries (CLI + agent for Linux, macOS and Windows on x64 and ARM64), 12 SHA-256 sidecars, a signed Ed25519 release manifest and its detached signature. All six build jobs and the release job passed. The manifest's signature was independently checked against the configured public key and its asset names/digests validated. The owner-held private signing seed is stored in macOS Keychain and an encrypted GitHub Actions secret; the nonsecret public key and fingerprint are documented in [RELEASE_PUBLISHER_KEY.md](RELEASE_PUBLISHER_KEY.md).
+
+This is a **developer/testing prerelease**, not a production-ready or OS code-signed installer. The bootstrap scripts currently check GitHub-hosted hashes without independently pinning the publisher. Public no-VPN ingress, physical Windows reboot and atomic update/rollback remain gating items. Tag v0.1.0-rc.1 points to commit 2eb9a14 on the isolated feature branch; original uncommitted OAuth work and all running production agents remain untouched.
+
+## 2026-10-24 — Fieldwork dashboard deployed to infra.drbijoy.in
+
+The live gateway now runs build commit `16ef052`, including the redesigned HTML/CSS/JS and local OAuth loopback callback compatibility. No native device-agent binaries were upgraded or re-enrolled.
+
+A consistent SQLite backup and previous gateway binary were preserved before restart. An isolated staging gateway migrated the copied production database from v2 to v5, preserving all three enrolled device identities. The old gateway was separately tested against v5 to prove binary rollback compatibility.
+
+An independently executing guarded cutover restarted the existing gateway service and checked local readiness, OAuth metadata, browser authentication, protected fleet and pairing APIs, database integrity, public HTTPS asset content and reconnection of the two previously online signed agents. No active terminal, job or transfer sessions were present. Android was already offline before cutover. The error log was clear after deployment.
+
+Live SHA-256: `6913b7c0a683c39262b6d7cebe3baf3e22c87f5551610d746faebf31f3676372`. Rollback resources and guardian audit trail: `~/.local/share/infra-v1-remote-burnin/gateway/staging-20261024-fieldwork/`.
+
+Remaining work: independently authenticated first-install bootstrap, long-running production soak, physical Windows reboot and upgrade rollback, optional no-VPN device access; deploying the website does not update enrolled agents automatically.

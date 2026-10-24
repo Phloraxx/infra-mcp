@@ -2,6 +2,12 @@
 
 This file is the starting context for coding agents working in this repository.
 
+## Current required context — 2026-10-23
+
+Before planning or coding, read **[One-command setup](docs/ONE_COMMAND_SETUP.md)** first for the near-term installer priority, followed by **[Infra onboarding redesign](docs/ONBOARDING_REDESIGN.md)** for pairing and UX. Also read **[Current reality](docs/CURRENT_REALITY.md)** and **[Next steps](docs/NEXT_STEPS.md)**. These are the canonical current-state/near-term-plan documents; dated 2026-10-15/16/18 portions below are historical. The newest Rust feature commits implement name resolution, responsive dashboard refresh, bounded resumable `copy`, signed native updater, and classified disconnect diagnostics; **do not claim they are deployed**.
+
+Priorities: no mandatory Tailscale; simple public WSS/443 with signed agent identity; OAuth/MCP compatibility; measurable reconnect and latency; effortless owner install and honest errors; no unnecessary framework/rewrite. The repository is public: **never commit credentials, device UUIDs, private IPs, raw logs or sensitive operational topology**. The original worktree contains uncommitted OAuth loopback changes and must not be reset/overwritten; work in a separate branch/worktree and reconcile explicitly. Signing keys are not provisioned and bootstrap installers remain checksum-only.
+
 ## Mission
 
 Build **Infra v1**: a native, lightweight, cross-platform remote-control system optimized for ChatGPT/MCP. It must eventually replace both the separately deployed Node-based Infra v0.3 prototype and Desktop Commander for the owner's normal workflows.

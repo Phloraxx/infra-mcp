@@ -27,12 +27,23 @@ pub enum StoreError {
     EnrollmentExpired,
     #[error("enrollment code was already consumed")]
     EnrollmentConsumed,
+    #[error("pairing request does not exist")]
+    PairInvalid,
+    #[error("pairing approval code does not match")]
+    PairMismatch,
+    #[error("pairing request has expired")]
+    PairExpired,
+    #[error("pairing request conflicts with a different identity")]
+    PairConflict,
+    #[error("too many pending pairing requests")]
+    PairCapacity,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DeviceRecord {
     pub device_id: String,
     pub device_name: String,
+    pub display_name: Option<String>,
     pub public_key: Option<Vec<u8>>,
     pub platform: String,
     pub arch: String,
@@ -44,6 +55,8 @@ pub struct DeviceRecord {
     pub last_seen_unix_ms: u64,
     pub revoked: bool,
     pub reconcile: Option<ReconcileSnapshot>,
+    pub last_disconnect_reason: Option<String>,
+    pub last_disconnect_at_unix_ms: Option<u64>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -86,7 +99,7 @@ impl Store {
         Ok(store)
     }
 
-    fn connection(&self) -> Result<Connection, StoreError> {
+    pub(super) fn connection(&self) -> Result<Connection, StoreError> {
         let conn = Connection::open(&self.path)?;
         conn.pragma_update(None, "foreign_keys", "ON")?;
         conn.busy_timeout(std::time::Duration::from_secs(3))?;
@@ -149,6 +162,39 @@ impl Store {
                 CREATE INDEX IF NOT EXISTS audit_events_device_idx ON audit_events(device_id, at_ms DESC);
                 PRAGMA user_version=2;
                 "#,
+            )?;
+        }
+        if version < 3 {
+            conn.execute_batch(
+                "ALTER TABLE devices ADD COLUMN last_disconnect_reason TEXT;
+                 ALTER TABLE devices ADD COLUMN last_disconnect_at_ms INTEGER;
+                 PRAGMA user_version=3;",
+            )?;
+        }
+        if version < 4 {
+            conn.execute_batch(
+                "CREATE TABLE IF NOT EXISTS pair_requests (
+                    request_id TEXT PRIMARY KEY,
+                    code TEXT NOT NULL,
+                    public_key BLOB NOT NULL,
+                    device_name TEXT NOT NULL,
+                    platform TEXT NOT NULL,
+                    arch TEXT NOT NULL,
+                    agent_version TEXT NOT NULL,
+                    created_at_ms INTEGER NOT NULL,
+                    expires_at_ms INTEGER NOT NULL,
+                    approved_at_ms INTEGER,
+                    device_id TEXT,
+                    FOREIGN KEY(device_id) REFERENCES devices(device_id)
+                 );
+                 CREATE INDEX IF NOT EXISTS pair_requests_expires_idx ON pair_requests(expires_at_ms);
+                 PRAGMA user_version=4;",
+            )?;
+        }
+        if version < 5 {
+            conn.execute_batch(
+                "ALTER TABLE devices ADD COLUMN display_name TEXT;
+                 PRAGMA user_version=5;",
             )?;
         }
         Ok(())
@@ -266,7 +312,7 @@ impl Store {
         conn.query_row(
             r#"SELECT device_id, device_name, public_key, platform, arch, agent_version,
                boot_id, capabilities_json, metadata_json, paired_at_ms, last_seen_ms,
-               revoked, reconcile_json FROM devices WHERE device_id=?1"#,
+               revoked, reconcile_json, last_disconnect_reason, last_disconnect_at_ms, display_name FROM devices WHERE device_id=?1"#,
             params![device_id],
             decode_device,
         )
@@ -279,11 +325,27 @@ impl Store {
         let mut stmt = conn.prepare(
             r#"SELECT device_id, device_name, public_key, platform, arch, agent_version,
                boot_id, capabilities_json, metadata_json, paired_at_ms, last_seen_ms,
-               revoked, reconcile_json FROM devices ORDER BY device_name COLLATE NOCASE"#,
+               revoked, reconcile_json, last_disconnect_reason, last_disconnect_at_ms, display_name FROM devices ORDER BY COALESCE(display_name, device_name) COLLATE NOCASE"#,
         )?;
         let rows = stmt.query_map([], decode_device)?;
         rows.collect::<Result<Vec<_>, _>>()
             .map_err(StoreError::from)
+    }
+
+    pub fn set_device_alias(
+        &self,
+        device_id: &str,
+        name: Option<&str>,
+    ) -> Result<bool, StoreError> {
+        let name = name.map(str::trim).filter(|value| !value.is_empty());
+        if name.is_some_and(|value| value.len() > 120 || value.contains(['\n', '\r', '\0'])) {
+            return Err(StoreError::PairInvalid);
+        }
+        let conn = self.connection()?;
+        Ok(conn.execute(
+            "UPDATE devices SET display_name=?2 WHERE device_id=?1 AND revoked=0",
+            params![device_id, name],
+        )? > 0)
     }
 
     pub fn record_connect(
@@ -326,11 +388,12 @@ impl Store {
         Ok(())
     }
 
-    pub fn record_disconnect(&self, device_id: &str) -> Result<(), StoreError> {
+    pub fn record_disconnect(&self, device_id: &str, reason: &str) -> Result<(), StoreError> {
         let conn = self.connection()?;
+        // Reason is a fixed backend classification, not raw OS/network error content.
         conn.execute(
-            "UPDATE devices SET last_seen_ms=?1 WHERE device_id=?2",
-            params![now_ms() as i64, device_id],
+            "UPDATE devices SET last_seen_ms=?1, last_disconnect_at_ms=?1, last_disconnect_reason=?3 WHERE device_id=?2",
+            params![now_ms() as i64, device_id, reason],
         )?;
         Ok(())
     }
@@ -405,6 +468,7 @@ fn decode_device(row: &rusqlite::Row<'_>) -> rusqlite::Result<DeviceRecord> {
     Ok(DeviceRecord {
         device_id: row.get(0)?,
         device_name: row.get(1)?,
+        display_name: row.get(15)?,
         public_key: row.get(2)?,
         platform: row.get(3)?,
         arch: row.get(4)?,
@@ -416,6 +480,10 @@ fn decode_device(row: &rusqlite::Row<'_>) -> rusqlite::Result<DeviceRecord> {
         last_seen_unix_ms: row.get::<_, i64>(10)?.max(0) as u64,
         revoked: row.get::<_, i64>(11)? != 0,
         reconcile: reconcile_json.and_then(|json| serde_json::from_str(&json).ok()),
+        last_disconnect_reason: row.get(13)?,
+        last_disconnect_at_unix_ms: row
+            .get::<_, Option<i64>>(14)?
+            .map(|value| value.max(0) as u64),
     })
 }
 
@@ -436,6 +504,44 @@ pub fn now_ms() -> u64 {
 mod tests {
     use super::*;
     use tempfile::tempdir;
+
+    #[test]
+    fn display_alias_survives_database_reopen_and_does_not_change_signed_name() {
+        let dir = tempdir().unwrap();
+        let db = dir.path().join("db");
+        let store = Store::open(&db).unwrap();
+        let enroll = store.create_enrollment(60_000).unwrap();
+        let device = store
+            .consume_enrollment(
+                &enroll.code,
+                "one",
+                "DESKTOP-123",
+                &[22u8; 32],
+                "windows",
+                "x86_64",
+                "test",
+            )
+            .unwrap();
+        assert!(
+            store
+                .set_device_alias(&device.device_id, Some("Work PC"))
+                .unwrap()
+        );
+        drop(store);
+        let reopened = Store::open(&db).unwrap();
+        let record = reopened.get_device(&device.device_id).unwrap().unwrap();
+        assert_eq!(record.device_name, "DESKTOP-123");
+        assert_eq!(record.display_name.as_deref(), Some("Work PC"));
+        assert!(reopened.set_device_alias(&device.device_id, None).unwrap());
+        assert_eq!(
+            reopened
+                .get_device(&device.device_id)
+                .unwrap()
+                .unwrap()
+                .display_name,
+            None
+        );
+    }
 
     #[test]
     fn enrollment_is_single_use_but_idempotent_for_same_request() {
@@ -522,11 +628,19 @@ mod tests {
                 "test",
             )
             .unwrap();
+        store
+            .record_disconnect(&result.device_id, "heartbeat_timeout")
+            .unwrap();
         drop(store);
         let reopened = Store::open(&path).unwrap();
         let device = reopened.get_device(&result.device_id).unwrap().unwrap();
         assert_eq!(device.device_name, "Oracle");
         assert!(!device.revoked);
+        assert_eq!(
+            device.last_disconnect_reason.as_deref(),
+            Some("heartbeat_timeout")
+        );
+        assert!(device.last_disconnect_at_unix_ms.is_some());
     }
 
     #[test]

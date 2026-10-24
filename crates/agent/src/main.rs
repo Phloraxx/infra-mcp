@@ -61,6 +61,7 @@ struct AgentContext {
 struct StartupArgs {
     state_dir: PathBuf,
     enroll_only: bool,
+    pair_only: bool,
 }
 
 #[tokio::main]
@@ -109,6 +110,19 @@ async fn main() -> anyhow::Result<()> {
         })
         .unwrap_or_else(|| platform.hostname.clone());
     update_runtime(&state_dir, "starting", None, None, None, None);
+
+    if startup.pair_only {
+        identity::pair_with_owner(
+            &state_dir,
+            &gateway_url,
+            &platform.hostname,
+            platform.platform,
+            platform.arch,
+            env!("CARGO_PKG_VERSION"),
+        )
+        .await?;
+        return Ok(());
+    }
 
     let enrollment_code = std::env::var("INFRA_ENROLLMENT_CODE").ok();
     let device_identity = match identity::load_or_enroll(
@@ -200,6 +214,7 @@ async fn main() -> anyhow::Result<()> {
 fn parse_startup_args(args: &[String]) -> anyhow::Result<StartupArgs> {
     let mut state_dir = identity::default_state_dir();
     let mut enroll_only = false;
+    let mut pair_only = false;
     let mut index = 0;
     while index < args.len() {
         match args[index].as_str() {
@@ -211,6 +226,7 @@ fn parse_startup_args(args: &[String]) -> anyhow::Result<StartupArgs> {
                 state_dir = PathBuf::from(value);
             }
             "--enroll-only" => enroll_only = true,
+            "--pair-only" => pair_only = true,
             other => return Err(anyhow!("unknown agent argument {other:?}")),
         }
         index += 1;
@@ -218,6 +234,7 @@ fn parse_startup_args(args: &[String]) -> anyhow::Result<StartupArgs> {
     Ok(StartupArgs {
         state_dir,
         enroll_only,
+        pair_only,
     })
 }
 
@@ -390,8 +407,16 @@ async fn run_connection(
     }
 
     let (out_tx, mut out_rx) = mpsc::channel::<AgentToGateway>(64);
+    let (heartbeat_tx, mut heartbeat_rx) = mpsc::channel::<AgentToGateway>(8);
     let writer = tokio::spawn(async move {
-        while let Some(message) = out_rx.recv().await {
+        loop {
+            // Liveness must not queue behind large result/reconciliation bursts.
+            let message = tokio::select! {
+                biased;
+                Some(message) = heartbeat_rx.recv() => message,
+                Some(message) = out_rx.recv() => message,
+                else => break,
+            };
             let text = serde_json::to_string(&message)?;
             ws_tx.send(Message::Text(text.into())).await?;
         }
@@ -412,33 +437,47 @@ async fn run_connection(
         };
         let frame = frame?;
         match frame {
-            Message::Text(text) => match serde_json::from_str::<GatewayToAgent>(text.as_str()) {
-                Ok(GatewayToAgent::Request(request)) => {
-                    let permit = permits.clone().acquire_owned().await?;
-                    let out = out_tx.clone();
-                    let context = context.clone();
-                    tokio::spawn(async move {
-                        let response = dispatch(request, context.clone()).await;
-                        drop(permit);
-                        let _ = out.send(AgentToGateway::Response(response)).await;
-                        // Refresh durable-work state after every operation. A later heartbeat
-                        // refresh covers short worker-finalization races after close/cancel.
-                        let _ = out
-                            .send(AgentToGateway::Reconcile(reconcile_snapshot(&context)))
-                            .await;
-                    });
+            Message::Text(text) => {
+                match serde_json::from_str::<GatewayToAgent>(text.as_str()) {
+                    Ok(GatewayToAgent::Request(request)) => {
+                        // Never await a worker permit in the WebSocket receive loop: when
+                        // all slots are busy, that would block Ping/Pong for up to a whole
+                        // command timeout and cause an unnecessary device disconnect.
+                        if let Ok(permit) = permits.clone().try_acquire_owned() {
+                            let out = out_tx.clone();
+                            let context = context.clone();
+                            tokio::spawn(async move {
+                                let response = dispatch(request, context.clone()).await;
+                                drop(permit);
+                                let _ = out.send(AgentToGateway::Response(response)).await;
+                                // Reconcile newly finished workers after each operation.
+                                let _ = out
+                                    .send(AgentToGateway::Reconcile(reconcile_snapshot(&context)))
+                                    .await;
+                            });
+                        } else {
+                            out_tx.try_send(AgentToGateway::Response(AgentResponse {
+                                id: request.id,
+                                result: OperationResult::Failed {
+                                    error: "agent_busy: concurrent request limit reached; retry later".into(),
+                                },
+                            })).map_err(|_| anyhow::anyhow!("agent response channel full; reconnecting"))?;
+                        }
+                    }
+                    Ok(GatewayToAgent::Ping) => {
+                        heartbeat_tx.try_send(AgentToGateway::Pong).map_err(|_| {
+                            anyhow::anyhow!("heartbeat response queue full; reconnecting")
+                        })?;
+                        // Reconcile is opportunistic: no work snapshot is worth losing liveness.
+                        let _ = out_tx
+                            .try_send(AgentToGateway::Reconcile(reconcile_snapshot(&context)));
+                    }
+                    Ok(GatewayToAgent::HelloAck(_)) | Ok(GatewayToAgent::AuthChallenge(_)) => {
+                        warn!("unexpected handshake frame ignored")
+                    }
+                    Err(err) => warn!(%err, "invalid gateway frame"),
                 }
-                Ok(GatewayToAgent::Ping) => {
-                    out_tx.send(AgentToGateway::Pong).await?;
-                    out_tx
-                        .send(AgentToGateway::Reconcile(reconcile_snapshot(&context)))
-                        .await?;
-                }
-                Ok(GatewayToAgent::HelloAck(_)) | Ok(GatewayToAgent::AuthChallenge(_)) => {
-                    warn!("unexpected handshake frame ignored")
-                }
-                Err(err) => warn!(%err, "invalid gateway frame"),
-            },
+            }
             Message::Ping(_) => {}
             Message::Close(_) => break,
             _ => {}

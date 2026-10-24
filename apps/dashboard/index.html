@@ -3,9 +3,9 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
-  <meta name="color-scheme" content="light dark">
+  <meta name="color-scheme" content="dark">
   <title>Infra</title>
-  <meta name="theme-color" content="#0d0f14">
+  <meta name="theme-color" content="#101312">
   <link rel="icon" href="/favicon.ico" sizes="any">
   <link rel="icon" href="/favicon.png" type="image/png">
   <link rel="apple-touch-icon" href="/apple-touch-icon.png">
@@ -14,86 +14,61 @@
 </head>
 <body>
   <section id="signin" class="signin" aria-label="Sign in">
-    <div class="signin-visual" aria-hidden="true">
-      <div class="signin-brand"><img src="/assets/logo.png" alt="" width="38" height="38"><span>Infra</span><b>v1</b></div>
-      <div class="signin-copy">
-        <span class="eyebrow inverse">PRIVATE CONTROL PLANE</span>
-        <h1>Every machine.<br>One calm workspace.</h1>
-        <p>Persistent terminals, files, jobs and device health — without the remote-desktop clutter.</p>
-      </div>
-      <div class="signin-preview">
-        <div class="preview-device">
-          <div class="preview-icon">M</div><div><strong>Primary Mac</strong><span>darwin · arm64</span></div><i class="preview-online"></i>
-        </div>
-        <div class="preview-device">
-          <div class="preview-icon">S</div><div><strong>Cloud server</strong><span>linux · arm64</span></div><i class="preview-online"></i>
-        </div>
-        <div class="preview-terminal"><span></span><span></span><span></span><code>$ infra status&nbsp;&nbsp; <b>online</b></code></div>
-      </div>
-      <p class="signin-visual-foot">Private by default · Signed device identity · Durable sessions</p>
+    <div class="signin-card">
+      <div class="signin-brand"><span class="brand-monogram" aria-hidden="true">i<span>.</span></span><span>infra</span></div>
+      <span class="signin-kicker">Your private workspace</span>
+      <h1>Good to have you back.</h1>
+      <p class="signin-subtitle">Sign in to your devices and ongoing work.</p>
+      <form id="login-form">
+        <label id="username-label">Username<input id="login-username" autocomplete="username" maxlength="128" placeholder="Username" required></label>
+        <label><span id="password-label">Password</span><input id="login-password" type="password" autocomplete="current-password" maxlength="1024" placeholder="Password" required></label>
+        <p id="login-error" class="error" role="alert"></p>
+        <button id="login-submit" class="primary wide" disabled>Checking session…</button>
+      </form>
+      <p class="signin-footnote"><span id="signin-lock" aria-hidden="true">●</span> Only you can access this workspace.</p>
     </div>
-    <div class="signin-panel">
-      <div class="signin-card">
-        <div class="signin-mobile-brand"><img src="/assets/logo.png" class="login-logo" alt="Infra logo" width="42" height="42"><span>Infra</span></div>
-        <span class="eyebrow">WELCOME BACK</span>
-        <h2>Sign in to Infra</h2>
-        <p class="signin-subtitle">Access your private device control plane.</p>
-        <form id="login-form">
-          <label id="username-label">Username<input id="login-username" autocomplete="username" maxlength="128" placeholder="Username" required></label>
-          <label><span id="password-label">Password</span><input id="login-password" type="password" autocomplete="current-password" maxlength="1024" placeholder="Password" required></label>
-          <p id="login-error" class="error" role="alert"></p>
-          <button id="login-submit" class="primary wide" disabled>Checking session…</button>
-        </form>
-        <div class="signin-security"><span class="security-dot"></span><span>Encrypted session · HttpOnly authentication</span></div>
-      </div>
-    </div>
+    <div class="signin-bottom">Infra <span>Private by design</span></div>
   </section>
 
   <div id="app-shell" class="shell hidden">
     <aside class="sidebar">
-      <div class="brand">
-        <div class="brand-symbol"><img src="/assets/logo.png" class="brand-logo" alt="" width="29" height="29"></div>
-        <div class="brand-copy"><strong>Infra</strong><span>Control plane</span></div>
-        <span class="version-pill">v1</span>
-      </div>
-      <div class="nav-label">WORKSPACE</div>
+      <div class="brand"><span class="brand-monogram" aria-hidden="true">i<span>.</span></span><span>infra</span></div>
+      <p class="nav-label">Workspace</p>
       <nav class="primary-nav">
         <button class="nav active" data-view="overview"><span class="nav-icon"><svg viewBox="0 0 20 20"><path d="M3 3h5v5H3zM12 3h5v5h-5zM3 12h5v5H3zM12 12h5v5h-5z"/></svg></span><span>Overview</span></button>
         <button class="nav" data-view="devices"><span class="nav-icon"><svg viewBox="0 0 20 20"><rect x="2.5" y="3" width="15" height="10.5" rx="2"/><path d="M7 17h6M10 13.5V17"/></svg></span><span>Devices</span></button>
         <button class="nav" data-view="sessions"><span class="nav-icon"><svg viewBox="0 0 20 20"><path d="m4 5 4 4-4 4M10 14h6"/></svg></span><span>Sessions</span></button>
         <button class="nav" data-view="activity"><span class="nav-icon"><svg viewBox="0 0 20 20"><path d="M10 3a7 7 0 1 0 7 7M10 6v4l3 2"/></svg></span><span>Activity</span></button>
       </nav>
-      <div class="nav-label nav-label-bottom">SYSTEM</div>
+      <div class="nav-divider"></div>
       <nav>
         <button class="nav" data-view="settings"><span class="nav-icon"><svg viewBox="0 0 20 20"><circle cx="10" cy="10" r="2.5"/><path d="M10 2.7v2M10 15.3v2M2.7 10h2M15.3 10h2M4.85 4.85l1.4 1.4M13.75 13.75l1.4 1.4M15.15 4.85l-1.4 1.4M6.25 13.75l-1.4 1.4"/></svg></span><span>Settings</span></button>
       </nav>
       <div class="sidebar-foot">
-        <div class="gateway-state"><span id="gateway-dot" class="dot"></span><div><strong id="gateway-label">Gateway</strong><span>infra.drbijoy.in</span></div></div>
+        <span id="gateway-dot" class="dot"></span>
+        <div><strong id="gateway-label">Connecting…</strong><span>Gateway</span></div>
       </div>
     </aside>
 
     <main>
       <header class="topbar">
-        <div class="title-block">
-          <span class="eyebrow">INFRA WORKSPACE</span>
-          <h1 id="view-title">Overview</h1>
-          <p id="view-subtitle">Your devices and active work.</p>
-        </div>
-        <div class="topbar-actions"><button id="add-device" class="primary"><span class="button-plus">+</span>Add device</button></div>
+        <div class="title-block"><span id="breadcrumb-view" class="page-kicker">Workspace</span><h1 id="view-title">Overview</h1><p id="view-subtitle">Your devices and active work.</p></div>
+        <div class="topbar-actions"><button id="add-device" class="primary"><span class="button-plus">+</span> Add device</button></div>
       </header>
 
       <section id="overview" class="view active">
+        <div class="overview-intro"><span class="overview-greeting">Everything in one place</span><p>A simple view of what’s connected and what’s running.</p></div>
         <div id="summary" class="summary-grid"></div>
         <section id="attention-section" class="attention-panel hidden">
-          <div class="attention-icon">!</div><div class="attention-content"><div class="section-head"><div><span class="eyebrow warning">ATTENTION</span><h2>Something needs you</h2></div></div><div id="attention"></div></div>
+          <div class="attention-content"><div class="section-head"><div><h2>Needs attention</h2><p>Devices that may need a connection check.</p></div></div><div id="attention"></div></div>
         </section>
-        <div class="overview-grid">
-          <section class="panel panel-large overview-devices-panel">
-            <div class="section-head"><div><span class="eyebrow">FLEET</span><h2>Devices</h2><p>Reachability and active work at a glance.</p></div><button class="text-button" data-view-target="devices">View all <span>→</span></button></div>
+        <div class="overview-stack">
+          <section class="panel overview-devices-panel">
+            <div class="section-head"><div><h2>Devices</h2><p>Your connected computers and their status.</p></div><button class="text-button" data-view-target="devices">View all <span>→</span></button></div>
             <div id="overview-devices" class="device-list"></div>
           </section>
-          <section class="panel panel-large overview-sessions-panel">
-            <div class="section-head"><div><span class="eyebrow">LIVE</span><h2>Active work</h2><p>Persistent work across your machines.</p></div><button class="text-button" data-view-target="sessions">All sessions <span>→</span></button></div>
+          <section class="panel overview-sessions-panel">
+            <div class="section-head"><div><h2>Recent work</h2><p>Terminals, jobs and transfers that stay available.</p></div><button class="text-button" data-view-target="sessions">All sessions <span>→</span></button></div>
             <div id="overview-sessions" class="compact-session-list"></div>
           </section>
         </div>
@@ -101,7 +76,7 @@
 
       <section id="devices" class="view">
         <section class="panel panel-large">
-          <div class="section-head"><div><span class="eyebrow">FLEET</span><h2>All devices</h2><p>Signed machines enrolled in this control plane.</p></div></div>
+          <div class="section-head"><div><h2>All devices</h2><p>Everything connected to your workspace.</p></div><label class="device-search-label"><span class="visually-hidden">Search devices</span><span class="search-icon" aria-hidden="true"></span><input id="device-search" type="search" autocomplete="off" placeholder="Search by name or platform" aria-label="Search devices"></label></div>
           <div class="device-table-head"><span>Device</span><span>Capabilities</span><span>Work</span><span>State</span></div>
           <div id="all-devices" class="device-list"></div>
         </section>
@@ -109,7 +84,7 @@
 
       <section id="sessions" class="view">
         <section class="panel panel-large">
-          <div class="section-head session-page-head"><div><span class="eyebrow">PERSISTENT WORK</span><h2>Sessions</h2><p>Terminals, jobs and transfers continue when you leave.</p></div>
+          <div class="section-head session-page-head"><div><h2>All sessions</h2><p>Terminals, jobs and transfers continue when you leave.</p></div>
             <div class="filters"><label>Device<select id="session-device"><option value="">All devices</option></select></label><label>Type<select id="session-kind"><option value="">All types</option><option value="terminal">Terminals</option><option value="job">Jobs</option><option value="transfer">Transfers</option></select></label></div>
           </div>
           <div id="all-sessions" class="session-list"></div>
@@ -128,23 +103,28 @@
         </nav>
 
         <div id="device-overview" class="device-pane panel panel-large">
-          <div class="section-head"><div><span class="eyebrow">CONTROL SURFACE</span><h2>Capabilities</h2><p>What this agent currently advertises.</p></div><button id="device-status" class="secondary">Check agent</button></div>
+          <div class="section-head"><div><h2>Capabilities</h2><p>What this agent currently advertises.</p></div><div class="row-actions"><button id="device-status" class="secondary">Check agent</button><button id="device-rename" class="secondary">Rename</button><button id="device-permissions" class="secondary hidden">Check permissions</button></div></div>
+          <form id="device-rename-form" class="rename-form hidden">
+            <label>Device display name<input id="device-rename-name" maxlength="120" autocomplete="off" placeholder="Use computer name"></label>
+            <div class="row-actions"><button class="primary" type="submit">Save name</button><button id="device-rename-cancel" type="button" class="secondary">Cancel</button></div>
+            <p id="device-rename-error" class="error" role="alert"></p>
+          </form>
           <div id="device-capabilities" class="capability-grid"></div>
           <pre id="device-status-output" class="status-output hidden"></pre>
         </div>
 
         <div id="device-terminal" class="device-pane panel terminal-launch hidden">
-          <div class="section-head"><div><span class="eyebrow">TERMINAL</span><h2>Start a persistent shell</h2><p>Leave the page and return later — the terminal stays alive.</p></div></div>
-          <form id="terminal-open" class="terminal-open-form"><label>Shell or command<input id="terminal-command" required maxlength="32768"></label><label>Working directory<input id="terminal-cwd" placeholder="Default directory"></label><button class="primary">Open terminal <span>↗</span></button></form>
+          <div class="section-head"><div><h2>Open a terminal</h2><p>Leave the page and return later — the terminal stays alive.</p></div></div>
+          <form id="terminal-open" class="terminal-open-form"><label>Shell or command<input id="terminal-command" required maxlength="32768"></label><label>Working directory<input id="terminal-cwd" placeholder="Default directory"></label><button class="primary">Open terminal</button></form>
           <div class="subsection-head"><span>Existing terminals</span></div><div id="device-terminals"></div>
         </div>
 
         <div id="device-files" class="device-pane panel panel-large files-workspace hidden">
-          <div class="section-head"><div><span class="eyebrow">FILES</span><h2>Browse this device</h2><p>Inspect directories and preview bounded text files.</p></div></div>
+          <div class="section-head"><div><h2>Browse files</h2><p>Inspect directories and preview bounded text files.</p></div></div>
           <form id="files-browse" class="files-toolbar"><label><span>Path</span><input id="files-path" value="." required></label><button class="secondary">Browse</button><button id="files-up" type="button" class="ghost-button">↑ Parent</button></form>
           <p id="files-note" class="muted small"></p>
           <div class="file-table-head"><span>Name</span><span>Size</span><span>Type</span></div><div id="files-list" class="files-list"></div>
-          <section id="file-preview" class="file-preview hidden"><div class="section-head"><div><span class="eyebrow">PREVIEW</span><h2 id="file-name"></h2></div><button id="file-close" class="ghost-button">Close</button></div><pre id="file-content"></pre><div class="preview-footer"><p id="file-range" class="muted small"></p><button id="file-next" class="secondary hidden">Next 32 KB</button></div></section>
+          <section id="file-preview" class="file-preview hidden"><div class="section-head"><div><h2 id="file-name"></h2></div><button id="file-close" class="ghost-button">Close</button></div><pre id="file-content"></pre><div class="preview-footer"><p id="file-range" class="muted small"></p><button id="file-next" class="secondary hidden">Next 32 KB</button></div></section>
         </div>
 
         <div id="device-sessions" class="device-pane panel panel-large session-list hidden"></div>
@@ -155,7 +135,7 @@
       <section id="session-detail" class="view">
         <button class="text-button back" data-view-target="sessions"><span>←</span> Back to sessions</button>
         <div class="panel session-workspace">
-          <div class="session-workspace-head"><div><span class="eyebrow">LIVE SESSION</span><h2 id="session-heading"></h2><p id="session-meta" class="small"></p></div><button id="session-stop" class="secondary danger">Close terminal</button></div>
+          <div class="session-workspace-head"><div><h2 id="session-heading"></h2><p id="session-meta" class="small"></p></div><button id="session-stop" class="secondary danger">Close terminal</button></div>
           <div id="terminal-tools" class="toolbar terminal-toolbar hidden"><div class="terminal-toolbar-label">Terminal size</div><label>Cols<input id="terminal-cols" type="number" min="20" max="300" value="100"></label><label>Rows<input id="terminal-rows" type="number" min="5" max="100" value="28"></label><button id="terminal-resize" class="secondary">Resize</button><button id="terminal-interrupt" class="secondary">Ctrl+C</button></div>
           <div id="terminal-screen" class="hidden" aria-label="Interactive terminal"></div>
           <pre id="session-output" class="hidden"></pre>
@@ -165,13 +145,13 @@
       </section>
 
       <section id="activity" class="view">
-        <section class="panel panel-large"><div class="section-head"><div><span class="eyebrow">AUDIT TRAIL</span><h2>Recent activity</h2><p>Bounded operational metadata from this gateway.</p></div></div><div id="activity-list" class="activity-list"></div></section>
+        <section class="panel panel-large"><div class="section-head"><div><h2>Recent activity</h2><p>Bounded operational metadata from this gateway.</p></div></div><div id="activity-list" class="activity-list"></div></section>
       </section>
 
       <section id="settings" class="view">
         <div class="settings-layout">
           <section class="panel panel-large settings-card">
-            <div><span class="eyebrow">ACCOUNT</span><h2>Your account</h2><p class="muted">Update the owner password for this private dashboard.</p><div class="auth-chip"><span class="security-dot"></span><span id="auth-state">Checking authentication…</span></div></div>
+            <div><h2>Your account</h2><p class="muted">Update the owner password for this private dashboard.</p><div class="auth-chip"><span class="security-dot"></span><span id="auth-state">Checking authentication…</span></div></div>
             <form id="password-change" class="settings-grid">
               <label>Current password<input id="current-password" type="password" autocomplete="current-password" required maxlength="1024"></label>
               <div class="settings-two"><label>New password<input id="new-password" type="password" autocomplete="new-password" required minlength="12" maxlength="1024"></label><label>Confirm new password<input id="confirm-password" type="password" autocomplete="new-password" required minlength="12" maxlength="1024"></label></div>
@@ -187,7 +167,27 @@
 
   <dialog id="enroll-dialog">
     <form method="dialog" class="dialog-card">
-      <div class="dialog-head"><div><span class="eyebrow">ENROLLMENT</span><h2>Add a device</h2><p>Generate a one-time code. The new device creates and keeps its own long-lived key.</p></div><button value="cancel" class="icon-button" aria-label="Close">×</button></div>
+      <div class="dialog-head"><div><h2>Add a device</h2><p>Start Infra on your computer, then confirm its pairing request here. Your computer holds its own signing key.</p></div><button value="cancel" class="icon-button" aria-label="Close"></button></div>
+      <section id="quick-install" class="quick-install" aria-label="Install Infra">
+        <h3>1. Install Infra on your computer</h3>
+        <p class="muted small">Copy one command into your computer's terminal. No device name, account token, or enrollment code required.</p>
+        <div class="tabs platform-tabs">
+          <button type="button" class="tab active" data-quick-platform="unix">macOS / Linux</button>
+          <button type="button" class="tab" data-quick-platform="windows">Windows</button>
+        </div>
+        <div class="command-wrap"><pre id="quick-install-command"></pre><button id="copy-quick-install" class="secondary" type="button">Copy install command</button></div>
+        <p class="muted small">One command, no extra runtime. Windows downloads to a local file first, then runs it; it will not evaluate an empty web response. This test installer requires trust in the Infra domain. For restricted machines, use a signed package when available.</p>
+      </section>
+      <section id="pair-approval" class="pair-approval" aria-label="Approve a computer">
+        <h3>2. Approve this computer</h3>
+        <p class="muted small">Your computer will appear below with a six-digit code. Check the code on both screens before allowing access.</p>
+        <div id="pending-pairs" aria-live="polite"><p class="muted small">Checking for computers…</p></div>
+        <p id="pair-result" class="small" role="status"></p>
+        <p id="pair-error" class="error" role="alert"></p>
+      </section>
+      <details class="legacy-enrollment">
+        <summary>Manual enrollment (older devices)</summary>
+        <p class="muted small">Use only for an older Infra agent requiring an enrollment code.</p>
       <div id="enroll-start" class="enroll-start">
         <label>Friendly name <input id="device-name" placeholder="Optional — defaults to hostname"></label>
         <button id="create-enrollment" type="button" class="primary wide">Create enrollment code</button>
@@ -198,6 +198,7 @@
         <div class="command-wrap"><pre id="install-command"></pre><button id="copy-command" type="button" class="secondary">Copy</button></div>
         <p class="muted small">The code expires automatically and can enroll only one device.</p>
       </div>
+      </details>
     </form>
   </dialog>
 

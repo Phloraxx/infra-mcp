@@ -1,5 +1,7 @@
 mod auth;
+mod copy;
 mod oauth;
+mod pairing;
 mod store;
 
 use anyhow::Context;
@@ -138,6 +140,9 @@ struct McpDeviceView {
     online: bool,
     revoked: bool,
     last_seen_unix_ms: u64,
+    connection_state: &'static str,
+    last_disconnect_reason: Option<String>,
+    last_disconnect_at_unix_ms: Option<u64>,
     connection_generation: Option<u64>,
     active_jobs: usize,
     active_terminals: usize,
@@ -181,6 +186,33 @@ struct EnrollInput {
 struct EnrollOutput {
     device_id: String,
     device_name: String,
+}
+#[derive(Debug, Deserialize)]
+struct PairRequestInput {
+    request_id: String,
+    device_name: String,
+    public_key: String,
+    platform: String,
+    arch: String,
+    agent_version: String,
+    signature: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct PairStatusInput {
+    request_id: String,
+    public_key: String,
+    signature: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct ApprovePairInput {
+    verification_code: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct RenameDeviceInput {
+    name: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -257,7 +289,14 @@ struct OAuthTokenForm {
 
 #[derive(Debug)]
 enum DispatchError {
-    Offline,
+    NotFound(String),
+    Ambiguous {
+        selector: String,
+        matches: Vec<String>,
+    },
+    Revoked(String),
+    Offline(String),
+    Storage(String),
     ConnectionClosed,
     ResponseClosed,
 }
@@ -379,6 +418,25 @@ struct McpTerminalInput {
     offset: Option<u64>,
     #[serde(default)]
     length: Option<usize>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+struct McpCopyInput {
+    source_device: String,
+    destination_device: String,
+    source_path: String,
+    destination_path: String,
+    #[serde(default)]
+    overwrite: Option<bool>,
+    #[serde(default)]
+    create_parents: Option<bool>,
+    #[serde(default)]
+    source_transfer_id: Option<String>,
+    #[serde(default)]
+    destination_transfer_id: Option<String>,
+    /// Max bytes relayed this request (default 16 MiB, cap 64 MiB).
+    #[serde(default)]
+    max_bytes: Option<u64>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -514,10 +572,12 @@ impl InfraMcp {
         &self,
         Parameters(input): Parameters<McpExecInput>,
     ) -> Result<McpJson<McpExecOutput>, String> {
-        let device_id = input.device.clone();
+        let device_id = resolve_device(&self.state, &input.device)
+            .await
+            .map_err(dispatch_error)?;
         let response = dispatch_to_device(
             &self.state,
-            input.device,
+            device_id.clone(),
             AgentOperation::Exec {
                 command: input.command,
                 cwd: input.cwd,
@@ -783,6 +843,17 @@ impl InfraMcp {
             300_000,
         )
         .await
+    }
+
+    #[tool(
+        name = "copy",
+        description = "Copy a file between enrolled Infra devices by name or ID. SHA-256 verified, resumable, bounded to 16 MiB per call by default. For partial results call again with both transfer IDs. Never auto-retry an uncertain chunk."
+    )]
+    async fn copy(
+        &self,
+        Parameters(input): Parameters<McpCopyInput>,
+    ) -> Result<McpJson<serde_json::Value>, String> {
+        Ok(McpJson(copy::run(&self.state, input).await?))
     }
 
     #[tool(
@@ -1069,11 +1140,16 @@ fn build_app(state: AppState) -> Router {
         middleware::from_fn_with_state(state.clone(), require_mcp_auth),
     );
     let protected_api = Router::new()
+        .route("/api/overview", get(overview_http))
         .route("/api/devices", get(list_devices_http))
         .route("/api/sessions", get(list_sessions_http))
         .route("/api/activity", get(list_activity_http))
         .route("/api/events", get(dashboard_events))
         .route("/api/enrollments", post(create_enrollment))
+        .route("/api/pair/requests", get(list_pending_pairs))
+        .route("/api/pair/{request_id}/approve", post(approve_pair))
+        .route("/api/pair/{request_id}/reject", post(reject_pair))
+        .route("/api/devices/{device_id}/rename", post(rename_device))
         .route("/api/auth/password", post(change_browser_password))
         .route("/api/devices/{device_id}/revoke", post(revoke_device))
         .route(
@@ -1098,6 +1174,8 @@ fn build_app(state: AppState) -> Router {
         .route("/apple-touch-icon.png", get(dashboard_touch_icon))
         .route("/downloads/install.sh", get(download_install_sh))
         .route("/downloads/install.ps1", get(download_install_ps1))
+        .route("/install.sh", get(download_install_sh))
+        .route("/install.ps1", get(download_install_ps1))
         .route("/healthz", get(health))
         .route(
             "/.well-known/oauth-protected-resource",
@@ -1120,6 +1198,8 @@ fn build_app(state: AppState) -> Router {
                 .delete(browser_logout),
         )
         .route("/enroll", post(enroll))
+        .route("/pair/request", post(request_pair))
+        .route("/pair/status", post(pair_status))
         .route("/agent", get(agent_upgrade))
         .layer(middleware::from_fn_with_state(
             state.clone(),
@@ -1346,7 +1426,7 @@ fn oauth_authorize_page(
         axum::http::HeaderValue::from_static("text/html; charset=utf-8"),
     );
     let csp = String::from(
-        "default-src 'none'; img-src 'self'; style-src 'unsafe-inline'; script-src https://static.cloudflareinsights.com; connect-src https://cloudflareinsights.com; form-action https:; base-uri 'none'; frame-ancestors 'none'",
+        "default-src 'none'; img-src 'self'; style-src 'unsafe-inline'; script-src https://static.cloudflareinsights.com; connect-src https://cloudflareinsights.com; form-action https: http://127.0.0.1:* http://localhost:* http://[::1]:*; base-uri 'none'; frame-ancestors 'none'",
     );
     if let Ok(value) = axum::http::HeaderValue::from_str(&csp) {
         response
@@ -1699,6 +1779,9 @@ async fn dashboard_operation(
     let supported = matches!(
         &operation,
         AgentOperation::Status
+            | AgentOperation::Desktop(DesktopRequest {
+                action: DesktopAction::Permissions
+            })
             | AgentOperation::Terminal(_)
             | AgentOperation::Jobs(JobRequest {
                 action: JobAction::List | JobAction::Read { .. } | JobAction::Cancel { .. }
@@ -1763,7 +1846,10 @@ async fn dashboard_sessions(state: &AppState) -> Result<Vec<DashboardSession>, S
                 boot_id: item.boot_id.clone(),
                 started_at_unix_ms: item.started_at_unix_ms,
                 device_id: record.device_id.clone(),
-                device_name: record.device_name.clone(),
+                device_name: record
+                    .display_name
+                    .clone()
+                    .unwrap_or_else(|| record.device_name.clone()),
                 device_online: live.is_some(),
             });
         }
@@ -1779,6 +1865,25 @@ async fn health(State(state): State<AppState>) -> Json<Health<'static>> {
         protocol: PROTOCOL_VERSION,
         gateway_epoch: state.gateway_epoch,
     })
+}
+// Single bounded snapshot avoids three independent HTTP round trips on each UI refresh.
+async fn overview_http(State(state): State<AppState>) -> Response {
+    let devices = device_views(&state).await;
+    let sessions = dashboard_sessions(&state).await;
+    let activity = state.store.list_activity(100);
+    match (devices, sessions, activity) {
+        (Ok(devices), Ok(sessions), Ok(activity)) => Json(serde_json::json!({
+            "devices": devices,
+            "sessions": sessions,
+            "activity": activity,
+        }))
+        .into_response(),
+        _ => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({"error":"overview snapshot unavailable"})),
+        )
+            .into_response(),
+    }
 }
 async fn list_devices_http(State(state): State<AppState>) -> Response {
     match device_views(&state).await {
@@ -1861,6 +1966,171 @@ async fn enroll(State(state): State<AppState>, Json(input): Json<EnrollInput>) -
             (StatusCode::CONFLICT, "enrollment code already used").into_response()
         }
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+    }
+}
+
+// Proof of possession for an untrusted candidate key. Approval grants trust.
+fn verify_pair_signature(key: &str, signature: &str, message: &[u8]) -> Option<[u8; 32]> {
+    let bytes = URL_SAFE_NO_PAD.decode(key).ok()?;
+    let key_bytes: [u8; 32] = bytes.try_into().ok()?;
+    let verifying = VerifyingKey::from_bytes(&key_bytes).ok()?;
+    let sig: [u8; 64] = URL_SAFE_NO_PAD.decode(signature).ok()?.try_into().ok()?;
+    verifying
+        .verify_strict(message, &Signature::from_bytes(&sig))
+        .ok()?;
+    Some(key_bytes)
+}
+
+fn pair_field_valid(field: &str, maximum: usize) -> bool {
+    !field.trim().is_empty() && field.len() <= maximum && !field.contains(['\r', '\n', '\0'])
+}
+
+fn pair_request_message(input: &PairRequestInput) -> String {
+    format!(
+        "infra-pair-request-v1\n{}\n{}\n{}\n{}\n{}\n{}",
+        input.request_id,
+        input.public_key,
+        input.device_name,
+        input.platform,
+        input.arch,
+        input.agent_version,
+    )
+}
+
+async fn request_pair(
+    State(state): State<AppState>,
+    Json(input): Json<PairRequestInput>,
+) -> Response {
+    if Uuid::parse_str(&input.request_id).is_err()
+        || !pair_field_valid(&input.device_name, 120)
+        || !pair_field_valid(&input.platform, 32)
+        || !pair_field_valid(&input.arch, 32)
+        || !pair_field_valid(&input.agent_version, 64)
+    {
+        return (StatusCode::BAD_REQUEST, "invalid pairing request").into_response();
+    }
+    let Some(key) = verify_pair_signature(
+        &input.public_key,
+        &input.signature,
+        pair_request_message(&input).as_bytes(),
+    ) else {
+        return (StatusCode::UNAUTHORIZED, "invalid pairing key proof").into_response();
+    };
+    match state.store.request_pair(
+        &input.request_id,
+        &key,
+        &input.device_name,
+        &input.platform,
+        &input.arch,
+        &input.agent_version,
+    ) {
+        Ok(record) => {
+            state.emit("pair_requested", None);
+            Json(record).into_response()
+        }
+        Err(StoreError::PairCapacity) => (
+            StatusCode::TOO_MANY_REQUESTS,
+            "pairing is busy; try again later",
+        )
+            .into_response(),
+        Err(StoreError::PairConflict) => {
+            (StatusCode::CONFLICT, "pairing identity conflict").into_response()
+        }
+        Err(_) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+    }
+}
+
+async fn pair_status(
+    State(state): State<AppState>,
+    Json(input): Json<PairStatusInput>,
+) -> Response {
+    if Uuid::parse_str(&input.request_id).is_err() {
+        return StatusCode::BAD_REQUEST.into_response();
+    }
+    let message = format!("infra-pair-status-v1\n{}", input.request_id);
+    let Some(key) = verify_pair_signature(&input.public_key, &input.signature, message.as_bytes())
+    else {
+        return StatusCode::UNAUTHORIZED.into_response();
+    };
+    match state.store.pair_status(&input.request_id, &key) {
+        Ok(record) => Json(record).into_response(),
+        Err(StoreError::PairInvalid) => StatusCode::NOT_FOUND.into_response(),
+        Err(_) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+    }
+}
+
+async fn list_pending_pairs(State(state): State<AppState>) -> Response {
+    match state.store.pending_pairs() {
+        Ok(records) => Json(records).into_response(),
+        Err(_) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+    }
+}
+
+async fn approve_pair(
+    State(state): State<AppState>,
+    Path(request_id): Path<String>,
+    Json(input): Json<ApprovePairInput>,
+) -> Response {
+    if Uuid::parse_str(&request_id).is_err()
+        || input.verification_code.len() != 6
+        || !input.verification_code.bytes().all(|b| b.is_ascii_digit())
+    {
+        return StatusCode::BAD_REQUEST.into_response();
+    }
+    match state
+        .store
+        .approve_pair(&request_id, &input.verification_code)
+    {
+        Ok(record) => {
+            let _ = state.store.record_activity(
+                record.device_id.as_deref(),
+                "pair.approve",
+                "ok",
+                Some(&request_id),
+            );
+            state.emit("pair_approved", record.device_id.clone());
+            Json(record).into_response()
+        }
+        Err(StoreError::PairInvalid) => StatusCode::NOT_FOUND.into_response(),
+        Err(StoreError::PairMismatch) => StatusCode::FORBIDDEN.into_response(),
+        Err(StoreError::PairExpired) => StatusCode::GONE.into_response(),
+        Err(StoreError::PairConflict) => StatusCode::CONFLICT.into_response(),
+        Err(_) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+    }
+}
+
+async fn reject_pair(State(state): State<AppState>, Path(request_id): Path<String>) -> Response {
+    if Uuid::parse_str(&request_id).is_err() {
+        return StatusCode::BAD_REQUEST.into_response();
+    }
+    match state.store.reject_pair(&request_id) {
+        Ok(true) => {
+            state.emit("pair_rejected", None);
+            Json(serde_json::json!({"ok":true})).into_response()
+        }
+        Ok(false) => StatusCode::NOT_FOUND.into_response(),
+        Err(_) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+    }
+}
+
+async fn rename_device(
+    State(state): State<AppState>,
+    Path(device_id): Path<String>,
+    Json(input): Json<RenameDeviceInput>,
+) -> Response {
+    match state
+        .store
+        .set_device_alias(&device_id, input.name.as_deref())
+    {
+        Ok(true) => {
+            state.emit("device_renamed", Some(device_id.clone()));
+            Json(serde_json::json!({"ok":true,"device_id":device_id})).into_response()
+        }
+        Ok(false) => StatusCode::NOT_FOUND.into_response(),
+        Err(StoreError::PairInvalid) => {
+            (StatusCode::BAD_REQUEST, "invalid display name").into_response()
+        }
+        Err(_) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
     }
 }
 
@@ -2219,7 +2489,7 @@ fn device_view(record: DeviceRecord, live: Option<&DeviceConnection>) -> McpDevi
         .unwrap_or(0);
     McpDeviceView {
         device_id: record.device_id,
-        device_name: record.device_name,
+        device_name: record.display_name.unwrap_or(record.device_name),
         agent_version: live
             .map(|d| d.hello.agent_version.clone())
             .unwrap_or(record.agent_version),
@@ -2231,6 +2501,17 @@ fn device_view(record: DeviceRecord, live: Option<&DeviceConnection>) -> McpDevi
         online: live.is_some(),
         revoked: record.revoked,
         last_seen_unix_ms: record.last_seen_unix_ms,
+        connection_state: if record.revoked {
+            "revoked"
+        } else if live.is_some() {
+            "online"
+        } else if now_ms().saturating_sub(record.last_seen_unix_ms) < 60_000 {
+            "reconnecting"
+        } else {
+            "offline"
+        },
+        last_disconnect_reason: record.last_disconnect_reason,
+        last_disconnect_at_unix_ms: record.last_disconnect_at_unix_ms,
         connection_generation: live.map(|d| d.generation),
         active_jobs,
         active_terminals,
@@ -2245,6 +2526,9 @@ async fn tool_operation(
     timeout_ms: u64,
 ) -> Result<McpJson<serde_json::Value>, String> {
     let action = operation_label(&operation);
+    let device = resolve_device(state, &device)
+        .await
+        .map_err(dispatch_error)?;
     let response = dispatch_to_device(state, device.clone(), operation, timeout_ms)
         .await
         .map_err(dispatch_error)?;
@@ -2367,26 +2651,104 @@ fn required<T>(value: Option<T>, name: &str) -> Result<T, String> {
 fn parse_uuid(value: Option<String>, name: &str) -> Result<Uuid, String> {
     Uuid::parse_str(&required(value, name)?).map_err(|_| format!("{name} must be a UUID"))
 }
+/// Accept stable IDs or unique human-friendly names. Never mistake an unknown name for
+/// an offline device. Name matching is case-insensitive only after exact matching.
+fn select_device<'a>(
+    records: &'a [DeviceRecord],
+    selector: &str,
+) -> Result<&'a DeviceRecord, DispatchError> {
+    let key = selector.trim();
+    if key.is_empty() {
+        return Err(DispatchError::NotFound(selector.to_owned()));
+    }
+    if let Some(record) = records.iter().find(|d| d.device_id == key) {
+        return if record.revoked {
+            Err(DispatchError::Revoked(record.device_name.clone()))
+        } else {
+            Ok(record)
+        };
+    }
+    let exact: Vec<_> = records
+        .iter()
+        .filter(|d| d.device_name == key || d.display_name.as_deref() == Some(key))
+        .collect();
+    let matches: Vec<_> = if exact.is_empty() {
+        records
+            .iter()
+            .filter(|d| {
+                d.device_name.eq_ignore_ascii_case(key)
+                    || d.display_name
+                        .as_deref()
+                        .is_some_and(|name| name.eq_ignore_ascii_case(key))
+            })
+            .collect()
+    } else {
+        exact
+    };
+    match matches.as_slice() {
+        [record] if record.revoked => Err(DispatchError::Revoked(record.device_name.clone())),
+        [record] => Ok(record),
+        [] => Err(DispatchError::NotFound(selector.to_owned())),
+        _ => Err(DispatchError::Ambiguous {
+            selector: selector.to_owned(),
+            matches: matches
+                .iter()
+                .map(|d| format!("{} ({})", d.device_name, d.device_id))
+                .collect(),
+        }),
+    }
+}
+
+async fn resolve_device(state: &AppState, selector: &str) -> Result<String, DispatchError> {
+    // Common paths need no registry lookup; the direct online UUID is canonical.
+    if state.devices.read().await.contains_key(selector) {
+        return Ok(selector.to_owned());
+    }
+    let records = state
+        .store
+        .list_devices()
+        .map_err(|err| DispatchError::Storage(err.to_string()))?;
+    Ok(select_device(&records, selector)?.device_id.clone())
+}
+
 fn dispatch_error(error: DispatchError) -> String {
     match error {
-        DispatchError::Offline => "device is not online".into(),
-        DispatchError::ConnectionClosed => "device connection closed".into(),
-        DispatchError::ResponseClosed => "agent response channel closed".into(),
+        DispatchError::NotFound(name) => format!(
+            "device_not_found: no enrolled device matches '{name}'; use devices to see valid names"
+        ),
+        DispatchError::Ambiguous { selector, matches } => format!(
+            "ambiguous_device: '{selector}' matches {}; select a device ID",
+            matches.join(", ")
+        ),
+        DispatchError::Revoked(name) => {
+            format!("device_revoked: '{name}' has been revoked and must be re-enrolled")
+        }
+        DispatchError::Offline(name) => format!(
+            "device_offline: '{name}' is enrolled but is not connected; it will reconnect when reachable"
+        ),
+        DispatchError::Storage(error) => format!("device_registry_error: {error}"),
+        DispatchError::ConnectionClosed => {
+            "device_connection_closed: device disconnected while sending the request".into()
+        }
+        DispatchError::ResponseClosed => {
+            "device_response_closed: agent response channel closed".into()
+        }
     }
 }
 
 async fn dispatch_to_device(
     state: &AppState,
-    device_id: String,
+    selector: String,
     operation: AgentOperation,
     timeout_ms: u64,
 ) -> Result<AgentResponse, DispatchError> {
+    let device_id = resolve_device(state, &selector).await?;
     let (tx, retire) = {
         let devices = state.devices.read().await;
         devices
             .get(&device_id)
             .map(|d| (d.tx.clone(), d.retire.clone()))
-            .ok_or(DispatchError::Offline)?
+            .ok_or_else(|| DispatchError::Offline(selector.clone()))?
     };
     let id = Uuid::new_v4();
     let request = GatewayToAgent::Request(AgentRequest { id, operation });
@@ -2405,9 +2767,7 @@ async fn dispatch_to_device(
         }
         Err(_) => {
             state.pending.lock().await.remove(&id);
-            // A connection that accepted a request but failed to answer within its bounded
-            // deadline is no longer trustworthy as an "online" control path. Retire it so
-            // the agent reconnects with a fresh generation; never replay the operation.
+            // An unanswered command might have run. Disconnect instead of replaying it.
             let _ = retire.try_send(());
             Ok(AgentResponse {
                 id,
@@ -2479,27 +2839,31 @@ async fn handle_agent(mut socket: WebSocket, state: AppState) {
     // connection gets a full interval before its first protocol heartbeat.
     heartbeat.tick().await;
     let mut last_inbound = Instant::now();
+    let mut disconnect_reason = "connection_closed";
     loop {
         tokio::select! {
             _ = heartbeat.tick() => {
                 if last_inbound.elapsed() >= AGENT_HEARTBEAT_TIMEOUT {
                     warn!(device_id=%hello.device_id,generation,"agent heartbeat timed out; retiring stale connection");
+                    disconnect_reason = "heartbeat_timeout";
                     break;
                 }
                 if out_tx.try_send(GatewayToAgent::Ping).is_err() {
                     warn!(device_id=%hello.device_id,generation,"agent heartbeat queue unavailable");
+                    disconnect_reason = "heartbeat_queue_full";
                     break;
                 }
             },
             _ = retire_rx.recv() => {
                 warn!(device_id=%hello.device_id,generation,"agent connection retired after failed control-path health check");
+                disconnect_reason = "control_path_timeout";
                 break;
             },
             maybe_out=out_rx.recv()=>match maybe_out{Some(message)=>{
                 match tokio::time::timeout(Duration::from_secs(5),send_json(&mut socket,&message)).await {
                     Ok(Ok(()))=>{},
-                    Ok(Err(e))=>{warn!(device_id=%hello.device_id,error=%e,"failed to send to agent");break},
-                    Err(_)=>{warn!(device_id=%hello.device_id,generation,"timed out sending to agent");break},
+                    Ok(Err(e))=>{warn!(device_id=%hello.device_id,error=%e,"failed to send to agent");disconnect_reason="send_error";break},
+                    Err(_)=>{warn!(device_id=%hello.device_id,generation,"timed out sending to agent");disconnect_reason="send_timeout";break},
                 }
             },None=>break},
             incoming=socket.recv()=>match incoming{
@@ -2521,7 +2885,7 @@ async fn handle_agent(mut socket: WebSocket, state: AppState) {
                 },
                 Some(Ok(Message::Ping(payload)))=>{last_inbound=Instant::now();if socket.send(Message::Pong(payload)).await.is_err(){break}},
                 Some(Ok(Message::Pong(_)))=>{last_inbound=Instant::now();},
-                Some(Ok(Message::Close(_)))|None=>break,Some(Ok(_))=>{},Some(Err(e))=>{warn!(device_id=%hello.device_id,error=%e,"agent websocket error");break}
+                Some(Ok(Message::Close(_)))|None=>{disconnect_reason="socket_closed";break},Some(Ok(_))=>{},Some(Err(e))=>{warn!(device_id=%hello.device_id,error=%e,"agent websocket error");disconnect_reason="socket_error";break}
             }
         }
     }
@@ -2531,7 +2895,9 @@ async fn handle_agent(mut socket: WebSocket, state: AppState) {
         .is_some_and(|d| d.generation == generation)
     {
         devices.remove(&hello.device_id);
-        let _ = state.store.record_disconnect(&hello.device_id);
+        let _ = state
+            .store
+            .record_disconnect(&hello.device_id, disconnect_reason);
         let _ =
             state
                 .store
@@ -2666,6 +3032,72 @@ mod tests {
     use tempfile::TempDir;
     use tokio_tungstenite::{connect_async, tungstenite::Message as ClientMessage};
     const TEST_TOKEN: &str = "developmenttoken123456";
+
+    fn test_device(id: &str, name: &str) -> DeviceRecord {
+        DeviceRecord {
+            device_id: id.to_owned(),
+            device_name: name.to_owned(),
+            display_name: None,
+            public_key: None,
+            platform: "linux".into(),
+            arch: "aarch64".into(),
+            agent_version: "test".into(),
+            boot_id: "boot-test".into(),
+            capabilities: vec!["exec".into()],
+            metadata: serde_json::json!({}),
+            paired_at_unix_ms: 1,
+            last_seen_unix_ms: 1,
+            revoked: false,
+            reconcile: None,
+            last_disconnect_reason: None,
+            last_disconnect_at_unix_ms: None,
+        }
+    }
+
+    #[test]
+    fn friendly_names_and_ids_resolve_without_confusing_offline_and_unknown() {
+        let records = vec![
+            test_device("vm-id", "oracle-vm"),
+            test_device("mac-id", "BigMac"),
+        ];
+        assert_eq!(
+            select_device(&records, "oracle-vm").unwrap().device_id,
+            "vm-id"
+        );
+        assert_eq!(
+            select_device(&records, "BIGMAC").unwrap().device_id,
+            "mac-id"
+        );
+        assert_eq!(select_device(&records, "vm-id").unwrap().device_id, "vm-id");
+        assert!(matches!(
+            select_device(&records, "unknown"),
+            Err(DispatchError::NotFound(_))
+        ));
+        assert!(matches!(
+            select_device(&records, " "),
+            Err(DispatchError::NotFound(_))
+        ));
+    }
+
+    #[test]
+    fn duplicate_names_require_an_unambiguous_device_id() {
+        let records = vec![test_device("a-id", "Laptop"), test_device("b-id", "Laptop")];
+        assert!(matches!(
+            select_device(&records, "Laptop"),
+            Err(DispatchError::Ambiguous { .. })
+        ));
+        assert_eq!(select_device(&records, "b-id").unwrap().device_id, "b-id");
+    }
+
+    #[test]
+    fn revoked_devices_do_not_route() {
+        let mut record = test_device("bad-id", "RevokedMac");
+        record.revoked = true;
+        assert!(matches!(
+            select_device(&[record], "RevokedMac"),
+            Err(DispatchError::Revoked(_))
+        ));
+    }
     async fn spawn_test_gateway() -> (TempDir, AppState, SocketAddr, tokio::task::JoinHandle<()>) {
         let dir = tempfile::tempdir().unwrap();
         let store = Store::open(dir.path().join("infra.db")).unwrap();

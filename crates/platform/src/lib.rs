@@ -24,13 +24,27 @@ pub fn identity() -> PlatformIdentity {
 }
 
 fn hostname() -> String {
-    std::env::var("HOSTNAME")
-        .ok()
-        .filter(|v| !v.trim().is_empty())
+    // HOSTNAME and /etc/hostname are Unix conventions, not Windows ones.
+    // Windows provides COMPUTERNAME. Prefer native OS discovery everywhere,
+    // with the environment as a fallback for constrained/headless runtimes.
+    #[cfg(windows)]
+    if let Ok(name) = std::env::var("COMPUTERNAME")
+        && !name.trim().is_empty()
+    {
+        return name.trim().to_string();
+    }
+    sysinfo::System::host_name()
+        .filter(|name| !name.trim().is_empty())
+        .or_else(|| {
+            std::env::var("HOSTNAME")
+                .ok()
+                .filter(|name| !name.trim().is_empty())
+        })
         .or_else(|| {
             fs::read_to_string("/etc/hostname")
                 .ok()
-                .map(|v| v.trim().to_string())
+                .map(|name| name.trim().to_string())
+                .filter(|name| !name.is_empty())
         })
         .unwrap_or_else(|| "unknown".into())
 }
@@ -67,6 +81,14 @@ pub fn ensure_private_dir(path: &Path) -> anyhow::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_uses_actual_computer_name() {
+        let os_name = std::env::var("COMPUTERNAME").expect("Windows provides COMPUTERNAME");
+        assert!(!os_name.trim().is_empty());
+        assert_eq!(identity().hostname, os_name);
+    }
 
     #[test]
     fn identity_is_usable() {

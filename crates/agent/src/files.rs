@@ -35,14 +35,12 @@ struct FileEntry {
 pub fn handle(request: FileRequest) -> OperationResult {
     match handle_inner(request.action) {
         Ok(body) => OperationResult::Ok { body },
-        Err(FileError::Unsupported(message)) => OperationResult::Unsupported { operation: message },
         Err(FileError::Other(message)) => OperationResult::Failed { error: message },
     }
 }
 
 #[derive(Debug)]
 enum FileError {
-    Unsupported(String),
     Other(String),
 }
 
@@ -54,8 +52,16 @@ impl From<std::io::Error> for FileError {
 
 fn handle_inner(action: FileAction) -> Result<serde_json::Value, FileError> {
     match action {
-        FileAction::Read { path, offset, length } => read_text(&path, offset.unwrap_or(0), bounded_length(length)),
-        FileAction::Write { path, content, create_parents } => {
+        FileAction::Read {
+            path,
+            offset,
+            length,
+        } => read_text(&path, offset.unwrap_or(0), bounded_length(length)),
+        FileAction::Write {
+            path,
+            content,
+            create_parents,
+        } => {
             let path = PathBuf::from(path);
             if create_parents && let Some(parent) = path.parent() {
                 fs::create_dir_all(parent)?;
@@ -63,19 +69,29 @@ fn handle_inner(action: FileAction) -> Result<serde_json::Value, FileError> {
             atomic_write(&path, content.as_bytes())?;
             Ok(serde_json::json!({"ok": true, "path": display(&path), "bytes": content.len()}))
         }
-        FileAction::Append { path, content, create_parents } => {
+        FileAction::Append {
+            path,
+            content,
+            create_parents,
+        } => {
             let path = PathBuf::from(path);
             if create_parents && let Some(parent) = path.parent() {
                 fs::create_dir_all(parent)?;
             }
-            let mut file = fs::OpenOptions::new().create(true).append(true).open(&path)?;
+            let mut file = fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(&path)?;
             file.write_all(content.as_bytes())?;
             file.flush()?;
             Ok(serde_json::json!({"ok": true, "path": display(&path), "bytes": content.len()}))
         }
-        FileAction::ExactEdit { path, old, new, expected_replacements } => {
-            exact_edit(&PathBuf::from(path), &old, &new, expected_replacements)
-        }
+        FileAction::ExactEdit {
+            path,
+            old,
+            new,
+            expected_replacements,
+        } => exact_edit(&PathBuf::from(path), &old, &new, expected_replacements),
         FileAction::Hash { path } => hash_file(&PathBuf::from(path)),
         FileAction::List { path } => list(&PathBuf::from(path)),
         FileAction::Stat { path } => stat(&PathBuf::from(path)),
@@ -84,31 +100,58 @@ fn handle_inner(action: FileAction) -> Result<serde_json::Value, FileError> {
             fs::create_dir_all(&path)?;
             Ok(serde_json::json!({"ok": true, "path": display(&path)}))
         }
-        FileAction::Copy { source, destination, recursive } => {
+        FileAction::Copy {
+            source,
+            destination,
+            recursive,
+        } => {
             let source = PathBuf::from(source);
             let destination = PathBuf::from(destination);
             copy_path(&source, &destination, recursive)?;
-            Ok(serde_json::json!({"ok": true, "source": display(&source), "destination": display(&destination)}))
+            Ok(
+                serde_json::json!({"ok": true, "source": display(&source), "destination": display(&destination)}),
+            )
         }
-        FileAction::Move { source, destination } => {
+        FileAction::Move {
+            source,
+            destination,
+        } => {
             let source = PathBuf::from(source);
             let destination = PathBuf::from(destination);
-            if let Some(parent) = destination.parent() { fs::create_dir_all(parent)?; }
+            if let Some(parent) = destination.parent() {
+                fs::create_dir_all(parent)?;
+            }
             fs::rename(&source, &destination)?;
-            Ok(serde_json::json!({"ok": true, "source": display(&source), "destination": display(&destination)}))
+            Ok(
+                serde_json::json!({"ok": true, "source": display(&source), "destination": display(&destination)}),
+            )
         }
-        FileAction::Trash { .. } => Err(FileError::Unsupported("trash is not implemented on this platform build; use delete_permanent only when permanent deletion is intended".into())),
+        FileAction::Trash { path } => trash_path(&PathBuf::from(path)),
         FileAction::DeletePermanent { path, recursive } => {
             let path = PathBuf::from(path);
             let metadata = fs::symlink_metadata(&path)?;
             if metadata.is_dir() {
-                if recursive { fs::remove_dir_all(&path)?; } else { fs::remove_dir(&path)?; }
+                if recursive {
+                    fs::remove_dir_all(&path)?;
+                } else {
+                    fs::remove_dir(&path)?;
+                }
             } else {
                 fs::remove_file(&path)?;
             }
             Ok(serde_json::json!({"ok": true, "path": display(&path), "permanent": true}))
         }
     }
+}
+
+fn trash_path(path: &Path) -> Result<serde_json::Value, FileError> {
+    let absolute = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        std::env::current_dir()?.join(path)
+    };
+    trash::delete(&absolute).map_err(|error| FileError::Other(error.to_string()))?;
+    Ok(serde_json::json!({"ok": true, "path": display(&absolute), "trashed": true}))
 }
 
 fn bounded_length(length: Option<usize>) -> usize {

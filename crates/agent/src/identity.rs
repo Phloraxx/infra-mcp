@@ -7,6 +7,7 @@ use serde::{Deserialize, Serialize};
 use std::{
     fs,
     path::{Path, PathBuf},
+    process::{Command, Stdio},
 };
 use tracing::warn;
 use url::Url;
@@ -202,6 +203,200 @@ pub async fn load_or_enroll(
         storage: stored.storage,
         signing_key,
     }))
+}
+
+#[derive(Debug, Deserialize)]
+struct PairResponse {
+    state: String,
+    verification_code: String,
+    expires_at_unix_ms: u64,
+    device_id: Option<String>,
+    device_name: String,
+}
+
+#[derive(Debug, Serialize)]
+struct PairCreateRequest<'a> {
+    request_id: &'a str,
+    device_name: &'a str,
+    public_key: &'a str,
+    platform: &'a str,
+    arch: &'a str,
+    agent_version: &'a str,
+    signature: String,
+}
+
+#[derive(Debug, Serialize)]
+struct PairPollRequest<'a> {
+    request_id: &'a str,
+    public_key: &'a str,
+    signature: String,
+}
+
+// Device-side pairing shares the original pending Ed25519 key + request ID with
+// legacy enrollment, so a failed network request never creates a second key.
+pub async fn pair_with_owner(
+    state_dir: &Path,
+    gateway_ws_url: &str,
+    detected_name: &str,
+    platform: &str,
+    arch: &str,
+    version: &str,
+) -> anyhow::Result<DeviceIdentity> {
+    ensure_state_dir(state_dir)?;
+    if let Some(identity) = load(state_dir)? {
+        println!("Infra is already paired as {}.", identity.device_name);
+        return Ok(identity);
+    }
+    let pending_path = state_dir.join("pending-enrollment.json");
+    let pending = load_or_create_pending(&pending_path, detected_name)?;
+    let secret = load_protected_secret(
+        pending.storage,
+        &pending.key_id,
+        pending.secret_key.as_deref(),
+    )?;
+    let signing_key = SigningKey::from_bytes(&secret);
+    let key = URL_SAFE_NO_PAD.encode(signing_key.verifying_key().to_bytes());
+    let mut request_url = enrollment_url(gateway_ws_url)?;
+    request_url.set_path("/pair/request");
+    let mut status_url = request_url.clone();
+    status_url.set_path("/pair/status");
+
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(12))
+        .build()?;
+    let message = format!(
+        "infra-pair-request-v1\n{}\n{}\n{}\n{}\n{}\n{}",
+        pending.request_id, key, pending.device_name, platform, arch, version,
+    );
+    let create = PairCreateRequest {
+        request_id: &pending.request_id,
+        device_name: &pending.device_name,
+        public_key: &key,
+        platform,
+        arch,
+        agent_version: version,
+        signature: URL_SAFE_NO_PAD.encode(signing_key.sign(message.as_bytes()).to_bytes()),
+    };
+    let proof = format!("infra-pair-status-v1\n{}", pending.request_id);
+    let poll = PairPollRequest {
+        request_id: &pending.request_id,
+        public_key: &key,
+        signature: URL_SAFE_NO_PAD.encode(signing_key.sign(proof.as_bytes()).to_bytes()),
+    };
+
+    // The process may exit and be rerun safely; the protected pending key remains.
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10 * 60);
+    let mut last_code = String::new();
+    let mut browser_attempted = false;
+    loop {
+        if tokio::time::Instant::now() >= deadline {
+            anyhow::bail!("pairing approval timed out; run Infra setup again to resume");
+        }
+        let response = client
+            .post(request_url.clone())
+            .json(&create)
+            .send()
+            .await
+            .context("request owner pairing (check DNS and TLS)")?;
+        if !response.status().is_success() {
+            anyhow::bail!(
+                "pairing request rejected (HTTP {}); your previous identity was preserved",
+                response.status()
+            );
+        }
+        let mut view: PairResponse = response.json().await.context("decode pairing request")?;
+        if view.verification_code != last_code {
+            let dashboard = request_url.origin().ascii_serialization();
+            println!(
+                "Infra wants to connect this computer: {}",
+                pending.device_name
+            );
+            println!(
+                "Open {} and approve the matching code: {}",
+                dashboard, view.verification_code
+            );
+            if !browser_attempted {
+                open_pairing_dashboard(&format!("{dashboard}/#add-device"));
+                browser_attempted = true;
+            }
+            last_code = view.verification_code.clone();
+        }
+        while view.state == "pending" && tokio::time::Instant::now() < deadline {
+            if view.expires_at_unix_ms <= infra_local_state::now_ms() {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+            let response = client
+                .post(status_url.clone())
+                .json(&poll)
+                .send()
+                .await
+                .context("check pairing approval (retry setup if network is offline)")?;
+            if !response.status().is_success() {
+                anyhow::bail!(
+                    "pairing status unavailable (HTTP {}); retry setup to resume",
+                    response.status()
+                );
+            }
+            view = response.json().await.context("decode pairing status")?;
+        }
+        if view.state == "approved" {
+            let device_id = view
+                .device_id
+                .ok_or_else(|| anyhow!("approved pairing has no device ID"))?;
+            let stored = IdentityFileV2 {
+                version: IDENTITY_VERSION,
+                device_id: device_id.clone(),
+                device_name: view.device_name.clone(),
+                key_id: pending.key_id,
+                storage: pending.storage,
+                secret_key: pending.secret_key,
+            };
+            write_secret_json(&state_dir.join("identity.json"), &stored)?;
+            let _ = fs::remove_file(pending_path);
+            println!("Pairing approved. Checking connection next.");
+            return Ok(DeviceIdentity {
+                device_id,
+                device_name: stored.device_name,
+                storage: stored.storage,
+                signing_key,
+            });
+        }
+        if view.state != "expired" && view.state != "pending" {
+            anyhow::bail!("pairing returned an unexpected state; previous identity preserved");
+        }
+    }
+}
+
+// Browser launch is a best-effort convenience in the user's desktop session.
+// The printed URL remains the fallback for headless machines and policy blocks.
+fn open_pairing_dashboard(origin: &str) {
+    if std::env::var_os("CI").is_some() || std::env::var_os("INFRA_NO_BROWSER").is_some() {
+        return;
+    }
+    #[cfg(target_os = "linux")]
+    if std::env::var_os("DISPLAY").is_none() && std::env::var_os("WAYLAND_DISPLAY").is_none() {
+        return;
+    }
+    #[cfg(windows)]
+    let mut command = {
+        let mut cmd = Command::new("rundll32.exe");
+        cmd.args(["url.dll,FileProtocolHandler", origin]);
+        cmd
+    };
+    #[cfg(target_os = "macos")]
+    let mut command = {
+        let mut cmd = Command::new("open");
+        cmd.arg(origin);
+        cmd
+    };
+    #[cfg(target_os = "linux")]
+    let mut command = {
+        let mut cmd = Command::new("xdg-open");
+        cmd.arg(origin);
+        cmd
+    };
+    let _ = command.stdout(Stdio::null()).stderr(Stdio::null()).spawn();
 }
 
 fn load_or_create_pending(path: &Path, requested_name: &str) -> anyhow::Result<PendingIdentityV2> {

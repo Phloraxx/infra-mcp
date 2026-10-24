@@ -17,7 +17,7 @@ use std::{
     },
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
-use sysinfo::{Pid, System};
+use sysinfo::{Pid, ProcessRefreshKind, ProcessesToUpdate, System};
 use uuid::Uuid;
 
 #[cfg(windows)]
@@ -108,9 +108,7 @@ impl Terminals {
                 rows,
                 cols,
             }),
-            TerminalAction::Close { session_id } => {
-                self.control(session_id, |token| ControlRequest::Close { token })
-            }
+            TerminalAction::Close { session_id } => self.close(session_id),
         }
     }
 
@@ -272,6 +270,26 @@ impl Terminals {
             Err(response
                 .error
                 .unwrap_or_else(|| "terminal worker rejected request".into()))
+        }
+    }
+
+    fn close(&self, id: Uuid) -> Result<serde_json::Value, String> {
+        let dir = self.root.join(id.to_string());
+        let meta = read_meta(&dir).map_err(|_| "terminal session not found".to_string())?;
+        if meta.boot_id != self.boot_id {
+            return Err("terminal belongs to a previous machine boot".into());
+        }
+        if is_terminal_status(&meta.status) {
+            return Ok(serde_json::json!({"ok": true, "session_id": id, "already_closed": true}));
+        }
+        match self.control(id, |token| ControlRequest::Close { token }) {
+            Ok(value) => Ok(value),
+            Err(error) => match read_meta(&dir) {
+                Ok(latest) if is_terminal_status(&latest.status) => {
+                    Ok(serde_json::json!({"ok": true, "session_id": id, "already_closed": true}))
+                }
+                _ => Err(error),
+            },
         }
     }
 
@@ -639,6 +657,10 @@ fn append_and_compact(output_path: &Path, session_dir: &Path, bytes: &[u8]) -> a
     Ok(())
 }
 
+fn is_terminal_status(status: &str) -> bool {
+    matches!(status, "closed" | "completed" | "failed")
+}
+
 fn read_meta(dir: &Path) -> anyhow::Result<SessionMeta> {
     Ok(serde_json::from_slice(&fs::read(
         dir.join("session.json"),
@@ -659,7 +681,14 @@ fn bounded_length(length: Option<usize>) -> usize {
         .clamp(1, MAX_READ_LIMIT)
 }
 fn process_alive(pid: u32) -> bool {
-    System::new_all().process(Pid::from_u32(pid)).is_some()
+    let pid = Pid::from_u32(pid);
+    let mut system = System::new();
+    system.refresh_processes_specifics(
+        ProcessesToUpdate::Some(&[pid]),
+        true,
+        ProcessRefreshKind::nothing(),
+    );
+    system.process(pid).is_some()
 }
 fn now_ms() -> u64 {
     SystemTime::now()

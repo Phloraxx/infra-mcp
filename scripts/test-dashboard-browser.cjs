@@ -11,8 +11,8 @@ const jobId = '00000000-0000-4000-8000-000000000002';
 const transferId = '00000000-0000-4000-8000-000000000003';
 const badName = '<img src=x onerror="window.xss=1">';
 const devices = [
-  {device_id:'online',device_name:badName,platform:'linux',arch:'aarch64',agent_version:'test',online:true,capabilities:['exec','files','terminal','jobs','transfer'],active_terminals:1,last_seen_unix_ms:Date.now()},
-  {device_id:'offline',device_name:'Rose',platform:'windows',arch:'x86_64',agent_version:'test',online:false,capabilities:['terminal'],last_seen_unix_ms:Date.now()-90000}
+  {device_id:'online',device_name:badName,platform:'linux',arch:'aarch64',agent_version:'test',online:true,capabilities:['exec','files','terminal','jobs','transfer','desktop'],active_terminals:1,last_seen_unix_ms:Date.now()},
+  {device_id:'offline',device_name:'Rose',platform:'windows',arch:'x86_64',agent_version:'test',online:false,connection_state:'reconnecting',last_disconnect_reason:'heartbeat_timeout',capabilities:['terminal'],last_seen_unix_ms:Date.now()-90000}
 ];
 let sessions = [
   {id:terminalId,kind:'terminal',status:'running',device_id:'online',device_name:badName,device_online:true,started_at_unix_ms:Date.now()},
@@ -30,7 +30,13 @@ const server=http.createServer(async(req,res)=>{
   }
   if(req.url.startsWith('/api/')){
     if(!authenticated)return send({error:'Authentication required'},401);
+    if(req.url==='/api/devices/online/rename'&&req.method==='POST'){let body='';for await(const chunk of req)body+=chunk;devices[0].device_name=JSON.parse(body).name||badName;return send({ok:true});}
+    if(req.url==='/api/pair/requests'&&req.method==='GET')return send([{request_id:'00000000-0000-4000-8000-000000000004',device_name:'Windows Test PC',platform:'windows',arch:'x86_64',verification_code:'482731'}]);
+    if(req.url==='/api/pair/00000000-0000-4000-8000-000000000004/approve'&&req.method==='POST')return send({state:'approved',device_id:'paired-fixture'});
+    if(req.url==='/api/pair/00000000-0000-4000-8000-000000000004/reject'&&req.method==='POST')return send({ok:true});
+    if(req.url==='/api/enrollments'&&req.method==='POST')return send({code:'fixture-5-minute-code',expires_at_unix_ms:Date.now()+300000});
     if(req.url==='/api/events'){res.writeHead(200,{'Content-Type':'text/event-stream'});res.write(': connected\n\n');streams.add(res);res.on('close',()=>streams.delete(res));return;}
+    if(req.url==='/api/overview')return send({devices,sessions,activity:[]});
     if(req.url==='/api/devices')return send(devices);
     if(req.url==='/api/sessions')return send(sessions);
     if(req.url==='/api/activity')return send([]);
@@ -39,6 +45,7 @@ const server=http.createServer(async(req,res)=>{
       const op=JSON.parse(body);operations.push(op);const a=op.action;
       const ok=value=>send({status:'ok',body:value});
       if(op.op==='status')return ok({pid:100,protocol:1});
+      if(op.op==='desktop'&&a.action==='permissions')return ok({accessibility:{granted:false},screen_recording:{granted:true},ready:false});
       if(op.op==='terminal'){
         if(a.action==='read'){
           if(failRead)return send({error:'network unavailable'},503);
@@ -83,22 +90,106 @@ const server=http.createServer(async(req,res)=>{
     page.on('pageerror',e=>errors.push(e.message));
     page.on('console',msg=>{if(msg.type()==='error'&&msg.text().includes('Content Security Policy'))errors.push(msg.text());});
     await page.goto(base);await page.locator('#login-submit:not([disabled])').waitFor();
-    if(process.env.INFRA_QA_LOGIN_SCREENSHOT)await page.screenshot({path:process.env.INFRA_QA_LOGIN_SCREENSHOT,fullPage:true});
+    const darkMetrics=await page.evaluate(()=>{
+      const rgb=selector=>{
+        const value=getComputedStyle(document.querySelector(selector)).backgroundColor;
+        return value.match(/[0-9.]+/g).slice(0,3).map(Number);
+      };
+      return {mode:getComputedStyle(document.documentElement).colorScheme,
+        page:rgb('body'),login:rgb('#signin'),input:rgb('#login-password')};
+    });
+    assert.equal(darkMetrics.mode,'dark');
+    assert(darkMetrics.page.every(channel=>channel<40),'Page is not dark');
+    assert(darkMetrics.login.every(channel=>channel<40),'Login is not dark');
+    assert(darkMetrics.input.every(channel=>channel<55),'Login input is not dark');
+
+    if(process.env.INFRA_QA_LOGIN_SCREENSHOT){await page.waitForTimeout(650);await page.screenshot({path:process.env.INFRA_QA_LOGIN_SCREENSHOT,fullPage:true});}
     assert.equal(await page.locator('#app-shell').isVisible(),false);
     await page.locator('#login-username').fill('owner');await page.locator('#login-password').fill('wrong');await page.locator('#login-submit').click();
     await page.waitForFunction(()=>document.querySelector('#login-error').textContent.includes('Incorrect'));assert.equal(await page.locator('#app-shell').isVisible(),false);
     await page.locator('#login-password').fill('fixture-password-123');await page.locator('#login-submit').click();
     await page.locator('#overview-devices [data-device="online"]').waitFor();
+    assert.equal(await page.locator('#overview-devices .device-avatar svg.ui-icon').count(),2);
+    assert.equal(await page.locator('#summary .metric-icon svg.ui-icon').count(),4);
+    assert.equal(await page.locator('#overview-sessions .session-kind-icon svg.ui-icon').count(),3);
+    assert.equal(await page.locator('#overview-devices .device-row').count(),2);
+    assert.match(await page.locator('#summary').textContent(),/Connected/);
+    if(process.env.INFRA_QA_OVERVIEW_SCREENSHOT||process.env.INFRA_QA_MOBILE_OVERVIEW_SCREENSHOT){
+      // Public design previews use readable sample labels; the functional
+      // tests below still exercise the original hostile-name/XSS fixture.
+      const saved=[devices.map(d=>d.device_name),sessions.map(item=>item.device_name)];
+      devices[0].device_name='Studio MacBook';
+      devices[1].device_name='Windows Workstation';
+      sessions.forEach(item=>item.device_name='Studio MacBook');
+      await page.reload();
+      await page.locator('#overview-devices .device-row').first().waitFor();
+      await page.waitForTimeout(500);
+      if(process.env.INFRA_QA_OVERVIEW_SCREENSHOT)
+        await page.screenshot({path:process.env.INFRA_QA_OVERVIEW_SCREENSHOT,fullPage:true});
+      if(process.env.INFRA_QA_MOBILE_OVERVIEW_SCREENSHOT){
+        await page.setViewportSize({width:390,height:844});
+        await page.evaluate(()=>scrollTo(0,0));
+        await page.waitForTimeout(200);
+        await page.screenshot({path:process.env.INFRA_QA_MOBILE_OVERVIEW_SCREENSHOT,fullPage:true});
+        await page.setViewportSize({width:1280,height:900});
+      }
+      devices.forEach((d,i)=>d.device_name=saved[0][i]);
+      sessions.forEach((item,i)=>item.device_name=saved[1][i]);
+      await page.reload();
+      await page.locator('#overview-devices [data-device="online"]').waitFor();
+    }
+    await page.goto(base+'/#add-device');
+    await page.locator('#enroll-dialog[open]').waitFor();
+    assert(await page.locator('#enroll-dialog').evaluate(node=>{
+      const rgb=getComputedStyle(node).backgroundColor.match(/[0-9.]+/g).slice(0,3).map(Number);
+      return rgb.every(value=>value<50);
+    }),'Pairing dialog contains a light surface');
+
+    await page.locator('#enroll-dialog').evaluate(element=>element.close());
+    await page.goto(base);
+    await page.locator('#overview-devices [data-device="online"]').waitFor();
+    await page.locator('#add-device').click();
+    await page.waitForFunction(()=>document.querySelector('#pending-pairs').textContent.includes('Windows Test PC'));
+    assert.match(await page.locator('#pending-pairs').textContent(),/482731/);
+    await page.locator('#pending-pairs [data-pair-action="approve"]').click();
+    await page.waitForFunction(()=>document.querySelector('#pair-result').textContent.includes('Approved'));
+    await page.locator('.legacy-enrollment summary').click();
+    await page.locator('#create-enrollment').click();
+    await page.waitForFunction(()=>document.querySelector('#enrollment-code').textContent.includes('fixture-5-minute-code'));
+    await page.locator('[data-platform="windows"]').click();
+    assert.match(await page.locator('#install-command').textContent(),/Invoke-WebRequest -UseBasicParsing -Uri/);
+    assert.match(await page.locator('#install-command').textContent(),/fixture-5-minute-code/);
+    await page.locator('#enroll-dialog').evaluate(element=>element.close());
+
     assert.equal(await page.locator('#summary .summary-card').nth(2).locator('strong').textContent(),'3');
     await page.locator('#overview-devices [data-device="online"]').click();
     await page.waitForFunction(()=>document.querySelector('#device-detail').classList.contains('active'));
     assert.equal(await page.locator('#view-title').textContent(),badName);
     assert.equal(await page.locator('#device-summary img').count(),0);
+    assert.equal(await page.locator('#device-summary .device-hero-avatar svg.ui-icon').count(),1);
+    assert.equal(await page.locator('#device-capabilities .cap-icon svg.ui-icon').count(),11);
+    await page.locator('#device-rename').click();
+    await page.locator('#device-rename-name').fill('Developer Mac');
+    await page.locator('#device-rename-form button[type="submit"]').click();
+    await page.waitForFunction(()=>document.querySelector('#device-rename-form').classList.contains('hidden'));
+    assert.equal(await page.locator('#view-title').textContent(),'Developer Mac');
     await page.locator('#device-status').click();await page.locator('#device-status-output').waitFor();
     assert.match(await page.locator('#device-status-output').textContent(),/PID: 100/);
+    devices[0].device_name=badName;
+    await page.locator('#device-permissions').click();
+    await page.waitForFunction(()=>document.querySelector('#device-status-output').textContent.includes('Needs permission'));
     await page.locator('[data-device-tab="files"]').click();await page.locator('#files-browse button').first().click();
-    await page.locator('[data-file-path]').waitFor();await page.locator('[data-file-path]').click();await page.locator('#file-preview:not(.hidden)').waitFor();
+    await page.locator('[data-file-path]').waitFor();
+    assert.equal(await page.locator('#files-list [data-file-path] svg.ui-icon').count(),1);await page.locator('[data-file-path]').click();await page.locator('#file-preview:not(.hidden)').waitFor();
     assert.equal(await page.locator('#file-content').textContent(),'<script>window.xss=2</script>');assert.equal(await page.evaluate(()=>window.xss),undefined);
+    await page.locator('[data-view="devices"]').click();
+    await page.locator('#device-search').fill('no-such-device');
+    assert.equal(await page.locator('#all-devices .device-row:not(.hidden)').count(),0);
+    assert.match(await page.locator('#device-search-empty').textContent(),/No matching devices/);
+    await page.locator('#device-search').fill('windows');
+    assert.equal(await page.locator('#all-devices .device-row:not(.hidden)').count(),1);
+    await page.locator('#device-search').fill('');
+    assert.equal(await page.locator('#all-devices .device-row:not(.hidden)').count(),2);
     await page.locator('[data-view="sessions"]').click();await page.locator('#session-kind').selectOption('job');
     assert.equal(await page.locator('#all-sessions .session-row').count(),1);
     await page.locator('#session-kind').selectOption('transfer');await page.locator('#all-sessions [data-session]').click();
@@ -109,6 +200,10 @@ const server=http.createServer(async(req,res)=>{
     await page.locator('[data-view="sessions"]').click();
     await page.locator('#session-kind').selectOption('terminal');await page.locator('#all-sessions [data-session]').click();
     await page.locator('.xterm-screen').waitFor();await page.waitForFunction(()=>document.querySelector('#session-read-state').textContent.includes('bytes read'));
+    assert(await page.locator('#terminal-screen').evaluate(node=>
+      getComputedStyle(node).backgroundColor.match(/[0-9.]+/g).slice(0,3).map(Number).every(value=>value<30)
+    ),'Terminal is not near-black');
+
     await page.locator('.xterm-helper-textarea').focus();await page.keyboard.type('abc');
     await page.waitForFunction(()=>document.querySelector('.xterm-screen').textContent.includes('abc'));
     assert.equal(operations.filter(o=>o.op==='terminal'&&o.action.action==='open').length,0);
@@ -126,16 +221,39 @@ const server=http.createServer(async(req,res)=>{
     failWrite=false;await page.locator('#session-resume').click();await page.locator('.xterm-helper-textarea').focus();await page.keyboard.type('Z');await page.waitForTimeout(150);
     assert.equal(operations.filter(o=>o.action?.action==='write').at(-1).action.data,'Z');
     await page.locator('[data-view="devices"]').click();assert.equal(operations.filter(o=>o.action?.action==='close').length,0);
-    await page.locator('#all-devices [data-device="offline"]').click();await page.locator('[data-device-tab="terminal"]').click();assert(await page.locator('#terminal-open button').isDisabled());
+    await page.locator('#all-devices [data-device="offline"]').click();
+    await page.waitForFunction(()=>document.querySelector('#device-summary').textContent.includes('No heartbeat was received'));
+    assert.match(await page.locator('#device-summary').textContent(),/No heartbeat was received/);
+    assert.match(await page.locator('#device-summary .status').textContent(),/reconnecting/);await page.locator('[data-device-tab="terminal"]').click();assert(await page.locator('#terminal-open button').isDisabled());
     await page.goto(`${base}/#session/online/job/${jobId}`);await page.locator('#session-output').waitFor();
     await page.waitForFunction(()=>document.querySelector('#session-output').textContent.includes('fixture job output'));
     page.once('dialog',dialog=>dialog.accept());await page.locator('#session-stop').click();await page.waitForTimeout(100);
     assert(operations.some(o=>o.op==='jobs'&&o.action.action==='cancel'&&o.action.job_id===jobId));
     await page.setViewportSize({width:390,height:844});await page.goto(base);await page.locator('#overview-devices [data-device="online"]').waitFor();
     await page.locator('#overview-devices [data-device="online"]').click();
-    if(process.env.INFRA_QA_SCREENSHOT)await page.screenshot({path:process.env.INFRA_QA_SCREENSHOT,fullPage:true});
+    if(process.env.INFRA_QA_SCREENSHOT){await page.waitForTimeout(300);await page.screenshot({path:process.env.INFRA_QA_SCREENSHOT,fullPage:true});}
     assert(await page.evaluate(()=>document.documentElement.scrollWidth<=window.innerWidth),JSON.stringify(await page.evaluate(()=>[...document.querySelectorAll('body *')].filter(e=>e.getBoundingClientRect().right>innerWidth+1).map(e=>[e.tagName,e.id,e.className,e.getBoundingClientRect().right]).slice(0,15))));
     if(process.env.INFRA_QA_SCREENSHOT)await page.screenshot({path:process.env.INFRA_QA_SCREENSHOT,fullPage:true});
+    // Global responsive gate, including tiny phones and dark OS preference.
+    for(const width of [320,390,768,1280]){
+      await page.setViewportSize({width,height:810});
+      await page.goto(base+'/#overview');
+      await page.locator('#overview-devices .device-row').first().waitFor();
+      assert(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth+1),'Overview overflowed at '+width+'px: '+JSON.stringify(await page.evaluate(()=>[...document.querySelectorAll('body *')].filter(e=>e.getBoundingClientRect().right>innerWidth+1).slice(0,16).map(e=>[e.tagName,e.id,e.className,Math.round(e.getBoundingClientRect().right),e.parentElement?.outerHTML.slice(0,260)]))));
+      await page.goto(base+'/#devices');
+      await page.locator('#all-devices .device-row').first().waitFor();
+      assert(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth+1),'Devices inventory overflowed at '+width+'px');
+    }
+    await page.emulateMedia({colorScheme:'dark'});
+    await page.goto(base+'/#overview');
+    await page.locator('#overview-devices .device-row').first().waitFor();
+    assert.equal(await page.evaluate(()=>getComputedStyle(document.documentElement).colorScheme),'dark');
+    await page.emulateMedia({colorScheme:'light'});
+    await page.goto(base+'/#overview');
+    await page.locator('#overview-devices .device-row').first().waitFor();
+    assert.equal(await page.evaluate(()=>getComputedStyle(document.documentElement).colorScheme),'dark');
+
+    await page.setViewportSize({width:1280,height:900});
     await page.locator('[data-view="settings"]').click();await page.locator('#logout-session').click();
     await page.waitForFunction(()=>document.querySelector('#all-devices').textContent.includes('No devices'));
     assert.equal(await page.locator('#app-shell').isVisible(),false);assert.equal(await page.locator('#signin').isVisible(),true);

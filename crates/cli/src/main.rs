@@ -1,3 +1,4 @@
+mod release_verify;
 mod startup;
 
 use anyhow::{Context, anyhow};
@@ -93,6 +94,7 @@ async fn run() -> anyhow::Result<ExitCode> {
             })
         }
         "install" => install_command(&state_dir, args).await,
+        "setup" => setup_command(&state_dir, args).await,
         "repair" => {
             ensure_no_args(&args)?;
             let previous_runtime = read_runtime(&state_dir).ok().flatten();
@@ -164,6 +166,84 @@ async fn run() -> anyhow::Result<ExitCode> {
         }
         other => Err(anyhow!("unknown command {other:?}; run `infra help`")),
     }
+}
+
+// The native setup command is the single lifecycle entry point. The thin
+// platform scripts will eventually download/verify binaries and invoke it.
+async fn setup_command(state_dir: &Path, mut args: Vec<String>) -> anyhow::Result<ExitCode> {
+    let supplied_gateway =
+        take_option(&mut args, "--gateway").or_else(|| std::env::var("INFRA_GATEWAY_URL").ok());
+    let agent = take_option(&mut args, "--agent")
+        .map(PathBuf::from)
+        .unwrap_or(startup::sibling_agent_binary()?);
+    let no_startup = take_flag(&mut args, "--no-startup");
+    ensure_no_args(&args)?;
+    if !agent.is_file() {
+        return Err(anyhow!(
+            "Infra device agent was not installed at {}; download both verified binaries first",
+            agent.display()
+        ));
+    }
+    let previous = read_config(state_dir)?;
+    let gateway = match (supplied_gateway, previous.as_ref()) {
+        (Some(next), Some(config))
+            if next != config.gateway_url && identity_path(state_dir).exists() =>
+        {
+            return Err(anyhow!(
+                "This computer is already paired to a different gateway. Setup will not silently move its identity. Use the explicit gateway migration flow."
+            ));
+        }
+        (Some(url), _) => url,
+        (None, Some(config)) => config.gateway_url.clone(),
+        (None, None) => {
+            return Err(anyhow!(
+                "Infra control endpoint is not configured. Start setup from the dashboard's verified installer or supply --gateway for development."
+            ));
+        }
+    };
+    // Repair must preserve an intentional name override on older installs.
+    // Brand-new installs leave it unset so the agent detects its OS hostname.
+    let previous_name = previous
+        .as_ref()
+        .and_then(|config| config.device_name.clone());
+    let next_config = LocalConfig::new(gateway.clone(), previous_name)?;
+    if !identity_path(state_dir).is_file() {
+        println!("Infra setup — pairing this computer using its system name.");
+        let status = Command::new(&agent)
+            .args(["--pair-only", "--state-dir"])
+            .arg(state_dir)
+            .env("INFRA_GATEWAY_URL", &gateway)
+            .status()
+            .with_context(|| "start signed pairing agent")?;
+        if !status.success() {
+            return Err(anyhow!(
+                "Pairing was not completed. Your pending device identity is safe; run the same Infra setup command to retry."
+            ));
+        }
+    }
+    if previous.as_ref() != Some(&next_config) {
+        // Preserve the old configuration until pairing succeeds. New setup does
+        // not replace a healthy existing gateway or any signing key.
+        write_config(state_dir, &next_config)?;
+    }
+    if no_startup {
+        println!("Infra paired and configured; automatic startup skipped.");
+        return Ok(ExitCode::SUCCESS);
+    }
+    let previous_runtime = read_runtime(state_dir).ok().flatten();
+    startup::install(&agent, state_dir)
+        .context("Infra paired, but automatic startup needs repair; run infra doctor")?;
+    let runtime = wait_for_online_reconnect(
+        state_dir,
+        previous_runtime.as_ref(),
+        Duration::from_secs(35),
+    ).await.context("Infra is installed and paired, but the agent did not confirm an online connection. Run infra doctor.")?;
+    println!(
+        "Infra connected: {} (signed connection generation {}).",
+        runtime.device_name.as_deref().unwrap_or("this computer"),
+        runtime.connection_generation.unwrap_or_default(),
+    );
+    Ok(ExitCode::SUCCESS)
 }
 
 async fn install_command(state_dir: &Path, mut args: Vec<String>) -> anyhow::Result<ExitCode> {
@@ -262,6 +342,22 @@ async fn update_command(state_dir: &Path, mut args: Vec<String>) -> anyhow::Resu
     let repo = take_option(&mut args, "--repo").unwrap_or_else(|| "Phloraxx/infra-mcp".into());
     let version = take_option(&mut args, "--version").unwrap_or_else(|| "latest".into());
     let base_url = take_option(&mut args, "--base-url");
+    let explicitly_trusted = take_option(&mut args, "--trusted-update-key")
+        .or_else(|| std::env::var("INFRA_RELEASE_PUBLIC_KEY_B64").ok())
+        .filter(|key| !key.trim().is_empty());
+    let pinned = option_env!("INFRA_RELEASE_PUBLIC_KEY_B64").filter(|key| !key.trim().is_empty());
+    if let (Some(pinned), Some(supplied)) = (pinned, &explicitly_trusted)
+        && pinned != supplied.trim()
+    {
+        return Err(anyhow!(
+            "this Infra binary has a pinned update key; a different key cannot override it"
+        ));
+    }
+    let public_key = pinned.map(str::to_owned)
+        .or(explicitly_trusted)
+        .ok_or_else(|| anyhow!(
+            "updates require an Ed25519 release trust key (set --trusted-update-key or compile with INFRA_RELEASE_PUBLIC_KEY_B64); refusing unsigned update"
+        ))?;
     ensure_no_args(&args)?;
 
     let config =
@@ -300,14 +396,46 @@ async fn update_command(state_dir: &Path, mut args: Vec<String>) -> anyhow::Resu
         .timeout(Duration::from_secs(90))
         .build()?;
 
+    // Signature is checked before any staged executable is written.
+    let manifest_bytes = client
+        .get(format!("{base}/infra-release.json"))
+        .send()
+        .await?
+        .error_for_status()?
+        .bytes()
+        .await?;
+    let manifest_signature = client
+        .get(format!("{base}/infra-release.json.sig"))
+        .send()
+        .await?
+        .error_for_status()?
+        .text()
+        .await?;
+    let manifest =
+        release_verify::verify_manifest(&manifest_bytes, &manifest_signature, &public_key)?;
+    if version != "latest" && manifest.version != version {
+        return Err(anyhow!(
+            "signed release version {} does not match requested {version}",
+            manifest.version
+        ));
+    }
+
     let staged_cli = install_dir.join(format!(".infra.update.{}{}", std::process::id(), extension));
     let staged_agent = install_dir.join(format!(
         ".infra-agent.update.{}{}",
         std::process::id(),
         extension
     ));
-    download_verified_release_asset(&client, &base, "infra", &asset, extension, &staged_cli)
-        .await?;
+    download_verified_release_asset(
+        &client,
+        &base,
+        "infra",
+        &asset,
+        extension,
+        &staged_cli,
+        &manifest,
+    )
+    .await?;
     if let Err(error) = download_verified_release_asset(
         &client,
         &base,
@@ -315,6 +443,7 @@ async fn update_command(state_dir: &Path, mut args: Vec<String>) -> anyhow::Resu
         &asset,
         extension,
         &staged_agent,
+        &manifest,
     )
     .await
     {
@@ -623,6 +752,7 @@ async fn download_verified_release_asset(
     asset: &str,
     extension: &str,
     destination: &Path,
+    manifest: &release_verify::ReleaseManifest,
 ) -> anyhow::Result<()> {
     let name = format!("{binary}-{asset}{extension}");
     let bytes = client
@@ -632,23 +762,12 @@ async fn download_verified_release_asset(
         .error_for_status()?
         .bytes()
         .await?;
-    let sidecar = client
-        .get(format!("{base}/{name}.sha256"))
-        .send()
-        .await?
-        .error_for_status()?
-        .text()
-        .await?;
-    let expected = sidecar
-        .split_whitespace()
-        .next()
-        .ok_or_else(|| anyhow!("empty SHA-256 sidecar for {name}"))?
-        .to_ascii_lowercase();
-    if expected.len() != 64 || !expected.chars().all(|ch| ch.is_ascii_hexdigit()) {
-        return Err(anyhow!("invalid SHA-256 sidecar for {name}"));
-    }
+    let expected = manifest
+        .assets
+        .get(&name)
+        .ok_or_else(|| anyhow!("asset {name} is missing from the signed release manifest"))?;
     let actual = format!("{:x}", Sha256::digest(&bytes));
-    if actual != expected {
+    if actual != *expected {
         return Err(anyhow!(
             "SHA-256 mismatch for {name}: expected {expected}, got {actual}"
         ));
@@ -1193,7 +1312,7 @@ fn yes_no(value: bool) -> &'static str {
 fn print_help() {
     println!(
         "Infra device CLI\n\n\
-Usage:\n  infra status [--json] [--state-dir PATH]\n  infra doctor [--json] [--state-dir PATH]\n  infra install --gateway WS_URL [--code CODE] [--name NAME] [--agent PATH] [--no-startup] [--state-dir PATH]\n  infra repair [--state-dir PATH]\n  infra reconnect [--state-dir PATH]\n  infra update [--version TAG] [--repo OWNER/REPO] [--base-url URL] [--state-dir PATH]\n  infra uninstall [--remove-state] [--state-dir PATH]\n"
+Usage:\n  infra status [--json] [--state-dir PATH]\n  infra doctor [--json] [--state-dir PATH]\n  infra setup [--gateway WS_URL] [--agent PATH] [--no-startup] [--state-dir PATH]\n  infra install --gateway WS_URL [--code CODE] [--name NAME] [--agent PATH] [--no-startup] [--state-dir PATH]\n  infra repair [--state-dir PATH]\n  infra reconnect [--state-dir PATH]\n  infra update [--version TAG] [--repo OWNER/REPO] [--base-url URL] [--trusted-update-key BASE64] [--state-dir PATH]\n  infra uninstall [--remove-state] [--state-dir PATH]\n"
     );
 }
 

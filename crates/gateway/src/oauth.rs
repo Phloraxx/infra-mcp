@@ -269,8 +269,17 @@ pub fn scope_contains(scope: &str, needle: &str) -> bool {
 
 fn validate_redirect_uri(uri: &str) -> Result<(), &'static str> {
     let parsed = url::Url::parse(uri).map_err(|_| "invalid redirect_uri")?;
-    if parsed.scheme() != "https" || parsed.host_str().is_none() || parsed.fragment().is_some() {
-        return Err("redirect_uri must be an HTTPS URL without a fragment");
+    if parsed.host_str().is_none() || parsed.fragment().is_some() {
+        return Err("redirect_uri must include a host and no fragment");
+    }
+    let loopback = match parsed.host() {
+        Some(url::Host::Ipv4(addr)) => addr.is_loopback(),
+        Some(url::Host::Ipv6(addr)) => addr.is_loopback(),
+        Some(url::Host::Domain(domain)) => domain.eq_ignore_ascii_case("localhost"),
+        None => false,
+    };
+    if parsed.scheme() != "https" && !(parsed.scheme() == "http" && loopback) {
+        return Err("redirect_uri must use HTTPS unless the host is loopback");
     }
     Ok(())
 }
@@ -382,5 +391,33 @@ mod tests {
         let challenge = URL_SAFE_NO_PAD.encode(Sha256::digest(verifier.as_bytes()));
         assert!(verify_pkce(verifier, &challenge));
         assert!(!verify_pkce(verifier, "wrong"));
+    }
+}
+
+#[cfg(test)]
+mod redirect_uri_tests {
+    use super::validate_redirect_uri;
+
+    #[test]
+    fn accepts_https() {
+        assert!(validate_redirect_uri("https://chatgpt.com/oauth/callback").is_ok());
+    }
+
+    #[test]
+    fn accepts_http_loopback() {
+        assert!(validate_redirect_uri("http://127.0.0.1:8085/callback").is_ok());
+        assert!(validate_redirect_uri("http://localhost:8085/callback").is_ok());
+        assert!(validate_redirect_uri("http://[::1]:8085/callback").is_ok());
+    }
+
+    #[test]
+    fn rejects_http_non_loopback() {
+        assert!(validate_redirect_uri("http://example.com/callback").is_err());
+    }
+
+    #[test]
+    fn rejects_fragments() {
+        assert!(validate_redirect_uri("https://example.com/callback#x").is_err());
+        assert!(validate_redirect_uri("http://127.0.0.1:8085/callback#x").is_err());
     }
 }

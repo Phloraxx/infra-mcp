@@ -91,3 +91,46 @@ Implement outbound Android `wss://.../agent` using Infra's existing signed Ed255
 **Tradeoffs:** maintain a small cross-language wire adapter + golden tests instead of introducing Rust/JNI packaging complexity now; rely on Android OS/background limits instead of promising persistent availability; use per-device strong signing identity rather than perpetual bearer token; use user's SAF selection instead of blanket storage privileges.
 
 See [ANDROID_AGENT_PLAN.md](ANDROID_AGENT_PLAN.md), [ANDROID_PROTOCOL_ADAPTER.md](ANDROID_PROTOCOL_ADAPTER.md) and [ANDROID_SECURITY_AND_TESTS.md](ANDROID_SECURITY_AND_TESTS.md).
+
+## D012 — Public outbound WSS with no required VPN (2026-10-23)
+
+**Status:** Preferred staging experiment; production cutover not approved.
+
+Keep the Rust gateway, existing signed agent protocol and SQLite. A public HTTPS/WSS hostname on port 443 terminates at an existing gateway ingress, with the Rust gateway bound to loopback, while native/Android devices make outbound signed WSS connections. Default enrollment must not require Tailscale or an inbound port on devices.
+
+First test the existing Cloudflare Tunnel. It already exists, supports WebSockets, and avoids a new public origin listener. Benchmark against an existing direct HTTPS reverse proxy if the edge dominates warmed operations or causes unacceptable reconnect churn. Tailscale remains an optional recovery/maintenance path. Neither Cloudflare Access cookie challenges nor broad anonymous MCP permissions may be added to the signed agent path.
+
+Do not replace with QUIC/WebRTC, run a new persistent relay service, or change current production endpoints before staging/rollback acceptance. See [CURRENT_REALITY.md](CURRENT_REALITY.md) and [NEXT_STEPS.md](NEXT_STEPS.md).
+
+## D013 — UX and observability before another rewrite (2026-10-23)
+
+**Status:** Locked direction.
+
+One pairing flow, one unique human-readable device alias, actionable diagnostic states, structured errors, bounded outputs and resumable handles. Avoid a new SPA/runtime, a tray app, and extra tool families unless measured model/tool performance requires them. Use existing Rust tracing, SQLite, native agents and the embedded dashboard.
+
+Do not conflate an OS capability advertisement with runtime permission, or a disconnected client with a remotely repairable process. Treat `outcome_unknown` as a first-class UX state that blocks blind mutation retries.
+
+## D014 — Signed updates are a staged security feature (2026-10-23)
+
+**Status:** Code exists in feature branch; release trust root/first-install bootstrap incomplete.
+
+Feature code can verify Ed25519-signed update manifests and asset hashes, but neither private release-signing key provisioning nor signed bootstrap authenticity and downgrade protection are complete. Public distribution and unattended update are **not** ready until their own security and OS acceptance gates pass. See [RELEASE_SIGNING.md](RELEASE_SIGNING.md).
+
+
+## D015 — Rebuild first-run onboarding, preserve native execution core (2026-10-24)
+
+**Status:** Product direction proposed for implementation; not deployed.
+
+The current dashboard name field, one-time code before installation, multi-flag PowerShell command, and "installed" message without actual signed online readiness fail the expected nontechnical owner journey. The verified Windows trial hit a null-valued script download and an unreachable installer host. Further first-run patches cannot repair the basic workflow shape.
+
+Use a **signed per-user Windows MSI** as the first supported primary installation surface (after a real release/publisher trust root exists), plus the existing Rust CLI to open a browser-based, device-initiated, owner-approved pairing flow. Detect OS hostname locally, allow renaming as a separate server-side alias later. Keep a text bootstrap only under Advanced/headless. Stop claiming completion before signed agent handshake and status probe. Pairing must resume without reinstall.
+
+Preserve existing Rust gateway, Ed25519 identities, SQLite, MCP and PTY/job/transfer logic. Do **not** add Electron/Tauri, a second gateway, or a new always-running onboarding service. Pair approval lives in the existing gateway and SQLite; the CLI can temporarily handle pending enrollment and open the browser. Implement the independent local verification code with the lightest safe UI proven by a Windows prototype, not an elevated MSI custom dialog by assumption.
+
+Detailed protocol, threat model, UX storyboard, migration and acceptance tests: [ONBOARDING_REDESIGN.md](ONBOARDING_REDESIGN.md).
+
+## D016 — Make one-command setup the first release priority (2026-10-24)
+
+**Status:** Proposed; supersedes the MSI-first sequence of D015, not the pairing security model.
+
+Use small Windows PowerShell and POSIX adapters to verify a published release, then run one shared Rust setup/repair lifecycle. Detect hostname automatically. Require authenticated owner approval and proven signed agent readiness before displaying Connected. Preserve identity and the previous binary on failures. MSI/PKG packaging is optional later. See [ONE_COMMAND_SETUP.md](ONE_COMMAND_SETUP.md).

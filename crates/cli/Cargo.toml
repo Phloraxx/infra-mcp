@@ -10,6 +10,8 @@ name = "infra"
 path = "src/main.rs"
 
 [dependencies]
+base64.workspace = true
+ed25519-dalek.workspace = true
 anyhow.workspace = true
 infra-local-state = { path = "../local-state" }
 infra-platform = { path = "../platform" }
