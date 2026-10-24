@@ -114,7 +114,7 @@ download() {
   url=$1
   destination=$2
   if command -v curl >/dev/null 2>&1; then
-    curl -fL --retry 3 --retry-all-errors --connect-timeout 10 "$url" -o "$destination"
+    curl -fL --retry 3 --connect-timeout 10 "$url" -o "$destination"
   elif command -v wget >/dev/null 2>&1; then
     wget --tries=3 --timeout=20 -O "$destination" "$url"
   else
