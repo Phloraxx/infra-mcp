@@ -113,7 +113,7 @@ public class MainActivity extends Activity {
         button(advanced,"Open developer controls",0xff3365E8,()->
             startActivity(new Intent(this,DevToolsActivity.class)));
         if(BuildConfig.DEBUG)button(advanced,"Local ADB pairing lab (experimental)",0xff293C5E,()->
-            startActivity(new Intent().setClassName(getPackageName(),getPackageName()+".AdbProbeActivity")));
+            startActivity(new Intent().setClassName(this,"com.phloraxx.infraphone.AdbProbeActivity")));
         CheckBox reboot=new CheckBox(this);
         reboot.setText("Reconnect signed gateway after phone reboot (opt-in)");
         reboot.setTextColor(fg);
