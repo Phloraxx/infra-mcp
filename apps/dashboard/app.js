@@ -198,12 +198,12 @@ function powershellInstallerCommand(url, args=''){
 // The primary onboarding command is independent of legacy enrollment codes.
 function updateQuickInstall(){
   const base=location.origin;
-  if(state.platform==='windows'){
-    $('#quick-install-command').textContent=powershellInstallerCommand(base+'/install.ps1');
-  }else{
-    $('#quick-install-command').textContent=
-      '(f=$(mktemp) && curl -fsSLo "$f" '+shellQuote(base+'/install.sh')+' && sh "$f"; r=$?; [ -z "$f" ] || rm -f "$f"; exit "$r")';
-  }
+  // The remote script owns preflight, integrity checks, installation and repair.
+  // Keep the copy command tiny; the detailed download-first path remains available
+  // for restricted machines that prohibit direct remote-script execution.
+  $('#quick-install-command').textContent=state.platform==='windows'
+    ? 'irm '+psQuote(base+'/install.ps1')+' | iex'
+    : 'curl -fsSL '+shellQuote(base+'/install.sh')+' | sh';
 }
 $$('[data-quick-platform]').forEach(tab=>tab.addEventListener('click',()=>{
   state.platform=tab.dataset.quickPlatform;
