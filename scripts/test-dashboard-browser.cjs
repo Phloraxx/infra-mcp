@@ -91,7 +91,7 @@ const server=http.createServer(async(req,res)=>{
     page.on('console',msg=>{if(msg.type()==='error'&&msg.text().includes('Content Security Policy'))errors.push(msg.text());});
     await page.goto(base);await page.locator('#login-submit:not([disabled])').waitFor();
     assert(await page.locator('.signin-showcase-brand img.brand-mark').evaluate(img=>img.complete&&img.naturalWidth>0),'Infra logo did not load');
-    assert.equal(await page.locator('.signin-showcase-brand img.brand-mark').getAttribute('src'),'/logo.png');
+    assert.equal(await page.locator('.signin-showcase-brand img.brand-mark').getAttribute('src'),'/assets/logo.png');
     assert.equal(await page.locator('.signin-main .brand-mark').count(),1);
 
 
