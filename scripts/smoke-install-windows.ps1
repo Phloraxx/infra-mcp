@@ -141,7 +141,7 @@ try {
     if ($PairProcess.HasExited -and $null -ne $PairProcess.ExitCode -and $PairProcess.ExitCode -ne 0) {
       throw "Native Windows owner pairing exited early: $(Get-Content (Join-Path $TempRoot 'pair.err') -Raw)"
     }
-    $Pending = @(Invoke-RestMethod -Uri "$Base/api/pair/requests" -Headers $Headers)
+    $Pending = @(Invoke-RestMethod -Uri "$Base/api/pair/requests" -Headers $Headers | Where-Object { $null -ne $_ -and $_.request_id -and $_.verification_code -and $_.device_name })
     if ($Pending.Count -gt 0) { $PendingPair = $Pending[0]; break }
   }
   if ($null -eq $PendingPair) { throw "Native Windows agent did not request owner pairing" }
