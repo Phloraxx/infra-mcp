@@ -157,8 +157,23 @@ try {
     $GatewayMatches = [string]::IsNullOrWhiteSpace($Gateway) -or
       ($null -ne $CurrentStatus -and $null -ne $CurrentStatus.config -and
        $CurrentStatus.config.gateway_url -eq $Gateway)
+    # A legacy running task is NOT healthy: default Windows task settings
+    # stop on battery, terminate after 72 hours, and never restart on crash.
+    $StartupResilient = $false
+    try {
+      $Task = Get-ScheduledTask -TaskName "Infra MCP Agent" -ErrorAction Stop
+      $TaskSettings = $Task.Settings
+      $HasLogon = @($Task.Triggers | Where-Object { $_.CimClass.CimClassName -eq "MSFT_TaskLogonTrigger" }).Count -gt 0
+      $HasRetry = @($Task.Triggers | Where-Object {
+        $_.CimClass.CimClassName -eq "MSFT_TaskTimeTrigger" -and $_.Repetition.Interval -eq "PT5M"
+      }).Count -gt 0
+      $StartupResilient = $HasLogon -and $HasRetry -and
+        ($TaskSettings.ExecutionTimeLimit -eq "PT0S") -and ($TaskSettings.RestartCount -gt 0) -and
+        (-not $TaskSettings.DisallowStartIfOnBatteries) -and
+        (-not $TaskSettings.StopIfGoingOnBatteries) -and $TaskSettings.StartWhenAvailable
+    } catch { Write-Host "Infra startup task is missing or unreadable; attempting repair." }
     if ($null -ne $CurrentStatus -and $CurrentStatus.configured -and $CurrentStatus.enrolled -and
-        $CurrentStatus.process_alive -and $CurrentStatus.startup.installed -and
+        $CurrentStatus.process_alive -and $CurrentStatus.startup.installed -and $StartupResilient -and
         $CurrentStatus.runtime.state -eq "online" -and $GatewayMatches) {
       Write-Host "Infra is already paired, running and connected; nothing to repair."
       return
@@ -167,7 +182,9 @@ try {
     if (-not [string]::IsNullOrWhiteSpace($Gateway)) { $RepairArgs += @("--gateway", $Gateway) }
     if ($NoStartup) { $RepairArgs += "--no-startup" }
     & $ExistingCli @RepairArgs
-    if ($LASTEXITCODE -ne 0) { throw "Existing Infra setup needs repair. Run $ExistingCli doctor." }
+    if ($LASTEXITCODE -ne 0) {
+      throw "Existing Infra startup needs repair (exit $LASTEXITCODE). If this is an administrator-owned Windows Scheduled Task, run the installer once as Administrator. Device enrollment was retained; see infra doctor for details."
+    }
     return
   }
   $CliStage = Stage-InfraBinary "infra"

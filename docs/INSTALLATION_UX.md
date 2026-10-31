@@ -117,3 +117,26 @@ The repository now implements the first complete onboarding path rather than onl
 - The isolated installer/dashboard smoke test proves the configure/enroll/reconnect/status/doctor path without registering a real startup service.
 
 Still required before the UX is considered production-ready: real-device startup/reboot acceptance tests on all primary OSes, better phase-specific installer progress/error codes, native package installers where useful, eliminating/encrypting the explicit headless-Linux credential-file fallback plus broader Windows ACL hardening, `infra update` with staged rollback, permission onboarding, and standards-compatible public OAuth/TLS. Private-mode dashboard/MCP authentication and native Keychain/Credential Manager/Secret Service signing-key storage are already implemented.
+
+
+## Windows startup and automatic update caveats (2026-10-31)
+
+A running Task Scheduler entry alone is not proof of a resilient install.
+Windows logon tasks must explicitly allow battery operation, have no execution
+time limit, restart after transient process exit, and have a periodic recovery
+trigger. A pre-existing administrator-owned task cannot be replaced by a
+non-elevated user; the CLI must report that limitation without destroying
+the signed device identity. A non-elevated per-user startup recovery fallback
+may be installed for an already-enrolled laptop while waiting for an elevated
+Scheduled Task repair. It does not provide pre-login service operation.
+
+Automatic binary updates must use the signed release manifest and staged
+health-checked rollback, not just download GitHub's latest arbitrary EXE.
+As of this change, only v0.1.0-rc.1 is published, marked prerelease.
+GitHub releases/latest excludes prereleases; a missing stable release must be
+reported clearly, not silently replaced with a prerelease. Do not schedule
+unattended production updates until a stable signed release exists, an
+installed-version/no-op check is implemented, and Windows real-device
+rollback acceptance passes. Manual, deliberate testing may pin
+--version v0.1.0-rc.1. Bootstrap checksum sidecars alone do not prove the
+publisher identity.

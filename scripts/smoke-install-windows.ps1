@@ -124,7 +124,24 @@ try {
     }
   }
   if (-not $Online) { throw "Windows signed agent never came online" }
-  Write-Host "Windows bootstrap smoke PASS: verified preflight, spaces in paths, signed enrollment, Scheduled Task launch, CLI status and live agent handshake"
+  # Test that the task will stay running on laptops and recover after a crash.
+  $Task = Get-ScheduledTask -TaskName "Infra MCP Agent" -ErrorAction Stop
+  $TaskSettings = $Task.Settings
+  if ($TaskSettings.ExecutionTimeLimit -ne "PT0S" -or
+      $TaskSettings.RestartCount -lt 1 -or
+      $TaskSettings.DisallowStartIfOnBatteries -or
+      $TaskSettings.StopIfGoingOnBatteries -or
+      -not $TaskSettings.StartWhenAvailable) {
+    throw "Windows Infra Scheduled Task lacks durable restart/battery/runtime settings"
+  }
+  $Logon = @($Task.Triggers | Where-Object { $_.CimClass.CimClassName -eq "MSFT_TaskLogonTrigger" })
+  $Periodic = @($Task.Triggers | Where-Object {
+    $_.CimClass.CimClassName -eq "MSFT_TaskTimeTrigger" -and $_.Repetition.Interval -eq "PT5M"
+  })
+  if ($Logon.Count -ne 1 -or $Periodic.Count -ne 1) {
+    throw "Windows Infra Scheduled Task lacks logon or periodic process recovery"
+  }
+  Write-Host "Windows bootstrap smoke PASS: verified preflight, spaces in paths, signed enrollment, resilient Scheduled Task launch, CLI status and live agent handshake"
 
   # New happy path: no code or friendly name. Pair a second local test profile
   # through the same compiled native CLI and an authenticated owner action.
