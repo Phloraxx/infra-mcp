@@ -1,4 +1,4 @@
-mod command_runner;
+use infra_platform::command_runner;
 mod container_ops;
 mod desktop_ops;
 mod files;
@@ -67,6 +67,13 @@ struct StartupArgs {
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let args = std::env::args().collect::<Vec<_>>();
+    if args.get(1).map(String::as_str) == Some("--build-info") {
+        println!(
+            "{}",
+            serde_json::json!({"component":"infra-agent","activation_protocol":1,"version":env!("CARGO_PKG_VERSION")})
+        );
+        return Ok(());
+    }
     if args.get(1).map(String::as_str) == Some("--job-worker") {
         let dir = args
             .get(2)
