@@ -79,7 +79,8 @@ fn owned(install: &Path, id: Uuid, part: &str) -> PathBuf {
 }
 fn copy_synced(from: &Path, to: &Path) -> Result<()> {
     fs::copy(from, to)?;
-    fs::File::open(to)?.sync_all()?;
+    // Windows FlushFileBuffers requires a handle opened for writing.
+    fs::OpenOptions::new().write(true).open(to)?.sync_all()?;
     Ok(())
 }
 fn write_new<T: Serialize>(path: &Path, value: &T) -> Result<()> {
