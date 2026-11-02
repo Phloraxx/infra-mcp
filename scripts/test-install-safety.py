@@ -84,12 +84,27 @@ def main():
             for component in ('infra','infra-agent'):
                 shutil.copy2(candidate/(component+EXT),release/f'{component}-windows-{arch}.exe')
             public=run(['cargo','run','--manifest-path',ROOT/'Cargo.toml','--quiet','--locked','-p','infra-cli','--example','sign_fixture_release','--',release],timeout=120).stdout.strip()
+            requests=[]
             class Handler(http.server.SimpleHTTPRequestHandler):
                 def log_message(self,*_): pass
+                def do_GET(self):
+                    requests.append(self.path)
+                    super().do_GET()
             server=http.server.ThreadingHTTPServer(('127.0.0.1',0),functools.partial(Handler,directory=str(release)))
             thread=threading.Thread(target=server.serve_forever,daemon=True);thread.start()
             try:
-                queued=run([target/CLI,'update','--version','v-fixture','--base-url',f'http://127.0.0.1:{server.server_port}','--trusted-update-key',public,'--state-dir',profile],timeout=40)
+                try:
+                    queued=run([target/CLI,'update','--version','v-fixture','--base-url',f'http://127.0.0.1:{server.server_port}','--trusted-update-key',public,'--state-dir',profile],timeout=40)
+                except subprocess.TimeoutExpired as error:
+                    print('Updater timeout output:',repr(error.stdout),repr(error.stderr),flush=True)
+                    print('Fixture HTTP requests:',requests,flush=True)
+                    print('Install entry names:',sorted(p.name for p in target.iterdir()),flush=True)
+                    for receipt_path in (profile/'updates').glob('*.json'):
+                        try:
+                            receipt=json.loads(receipt_path.read_text())
+                            print('Update receipt:',receipt.get('phase'),receipt.get('detail'),flush=True)
+                        except (OSError,ValueError): pass
+                    raise
                 assert 'pending' in queued.stdout,queued.stdout
                 assert not list(target.glob('.infra.update.*'))
                 assert not list(target.glob('.infra-agent.update.*'))
