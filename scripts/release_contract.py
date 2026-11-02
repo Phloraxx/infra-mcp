@@ -81,8 +81,10 @@ def main():
     parser.add_argument('--tag')
     parser.add_argument('--binaries', type=Path)
     args = parser.parse_args()
+    if args.tag is None and args.binaries is None:
+        parser.error('provide --tag and/or --binaries; no release was checked')
     try:
-        if args.tag:
+        if args.tag is not None:
             validate_tag(args.tag)
         if args.binaries:
             verify_native_pair(args.binaries)

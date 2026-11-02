@@ -80,7 +80,8 @@ dependency are used; no production key is needed for the fixture tests.
 
 The historical `v0.1.0-rc.1` tag used package version `0.1.0` and predates these
 checks. Do not retag it or treat it as a conforming new candidate. Choose the next
-release's package version deliberately before tagging; a prerelease tag must also
+release's package version deliberately before tagging, and refresh
+`RELEASE_CANDIDATE.md` with the matching version and actual acceptance matrix; a prerelease tag must also
 be the actual Cargo prerelease version. The bootstrap default stays gated until
 compatible authenticated distribution and physical acceptance exist.
 
