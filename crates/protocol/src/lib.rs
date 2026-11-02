@@ -12,6 +12,20 @@ pub const FILE_LIST_PAGINATION_CAPABILITY: &str = "files.list_page";
 pub const MAX_DIRECTORY_PAGE_SIZE: usize = 1000;
 pub const MAX_DIRECTORY_ENTRIES: usize = 100_000;
 pub const MAX_DIRECTORY_PAGE_BYTES: usize = 512 * 1024;
+pub const CONNECTION_READINESS_CAPABILITY: &str = "connection.readiness_v1";
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ConnectionProbe {
+    pub nonce: Uuid,
+    pub generation: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ConnectionProbeReply {
+    pub probe: ConnectionProbe,
+    pub pid: u32,
+    pub protocol: u16,
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct DeviceHello {
@@ -573,6 +587,7 @@ pub enum AgentToGateway {
     LegacyHello(LegacyDeviceHello),
     Response(AgentResponse),
     Reconcile(ReconcileSnapshot),
+    ConnectionProbeReply(ConnectionProbeReply),
     Pong,
 }
 
@@ -582,6 +597,8 @@ pub enum GatewayToAgent {
     AuthChallenge(AuthChallenge),
     HelloAck(HelloAck),
     Request(AgentRequest),
+    ConnectionProbe(ConnectionProbe),
+    ConnectionReady(ConnectionProbeReply),
     Ping,
 }
 
@@ -596,6 +613,49 @@ pub struct ExecOutput {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn readiness_frames_roundtrip_without_changing_legacy_heartbeats() {
+        assert_eq!(
+            serde_json::to_value(GatewayToAgent::Ping).unwrap(),
+            serde_json::json!({"type":"ping"})
+        );
+        assert_eq!(
+            serde_json::to_value(AgentToGateway::Pong).unwrap(),
+            serde_json::json!({"type":"pong"})
+        );
+        let probe = ConnectionProbe {
+            nonce: Uuid::new_v4(),
+            generation: 7,
+        };
+        let reply = ConnectionProbeReply {
+            probe: probe.clone(),
+            pid: 42,
+            protocol: PROTOCOL_VERSION,
+        };
+        for message in [
+            GatewayToAgent::ConnectionProbe(probe),
+            GatewayToAgent::ConnectionReady(reply.clone()),
+        ] {
+            let value = serde_json::to_value(&message).unwrap();
+            assert_eq!(
+                serde_json::from_value::<GatewayToAgent>(value).unwrap(),
+                message
+            );
+        }
+        let response = AgentToGateway::ConnectionProbeReply(reply);
+        assert_eq!(
+            serde_json::from_value::<AgentToGateway>(serde_json::to_value(&response).unwrap())
+                .unwrap(),
+            response
+        );
+        assert!(
+            serde_json::from_value::<GatewayToAgent>(
+                serde_json::json!({"type":"connection_probe","body":{"generation":7}})
+            )
+            .is_err()
+        );
+    }
 
     #[test]
     fn android_files_operation_uses_nested_action_json() {

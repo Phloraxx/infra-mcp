@@ -7,6 +7,7 @@ mod identity;
 mod jobs;
 mod network_ops;
 mod processes;
+mod readiness;
 mod search;
 mod service_ops;
 mod system_ops;
@@ -184,10 +185,11 @@ async fn main() -> anyhow::Result<()> {
         transfers: Transfers::new(&state_dir, platform.boot_id.clone())?,
     };
 
+    let proof_writer = readiness::proof_writer(state_dir.clone());
     let mut delay = Duration::from_secs(1);
     loop {
         update_runtime(&state_dir, "connecting", None, None, None, None);
-        match run_connection(config.clone(), context.clone(), &state_dir).await {
+        match run_connection(config.clone(), context.clone(), &state_dir, &proof_writer).await {
             Ok(()) => {
                 warn!("gateway connection ended; reconnecting");
                 update_runtime(&state_dir, "reconnecting", None, None, None, None);
@@ -252,6 +254,10 @@ fn update_runtime(
     runtime.pid = std::process::id();
     runtime.state = state.into();
     runtime.updated_unix_ms = now_ms();
+    if state != "online" {
+        runtime.gateway_epoch = None;
+        runtime.agent_instance_id = None;
+    }
     if let Some(error) = last_error {
         runtime.last_error = Some(error);
     } else if matches!(state, "online" | "connecting" | "enrolled") {
@@ -274,12 +280,21 @@ fn update_runtime(
     }
 }
 
-fn mark_credential_verified(state_dir: &std::path::Path, storage: &str) {
+fn mark_connection_identity(
+    state_dir: &std::path::Path,
+    storage: Option<&str>,
+    gateway_epoch: Uuid,
+    instance: Uuid,
+) {
     let Ok(Some(mut runtime)) = infra_local_state::read_runtime(state_dir) else {
         return;
     };
-    runtime.credential_storage = Some(storage.to_string());
-    runtime.credential_verified_unix_ms = Some(now_ms());
+    runtime.gateway_epoch = Some(gateway_epoch);
+    runtime.agent_instance_id = Some(instance);
+    if let Some(storage) = storage {
+        runtime.credential_storage = Some(storage.to_string());
+        runtime.credential_verified_unix_ms = Some(now_ms());
+    }
     runtime.updated_unix_ms = now_ms();
     if let Err(error) = write_runtime(state_dir, &runtime) {
         warn!(%error, "failed to record credential verification state");
@@ -290,6 +305,7 @@ async fn run_connection(
     config: Config,
     context: AgentContext,
     state_dir: &std::path::Path,
+    proof_writer: &tokio::sync::watch::Sender<Option<infra_local_state::ConnectionProof>>,
 ) -> anyhow::Result<()> {
     let platform = platform_identity();
     let agent_instance_id = Uuid::new_v4();
@@ -306,6 +322,7 @@ async fn run_connection(
     let capabilities = {
         let capabilities = vec![
             "status".into(),
+            infra_protocol::CONNECTION_READINESS_CAPABILITY.into(),
             "exec".into(),
             "files".into(),
             infra_protocol::FILE_LIST_PAGINATION_CAPABILITY.into(),
@@ -402,9 +419,16 @@ async fn run_connection(
         Some(hello.device_name.clone()),
         Some(ack.connection_generation),
     );
-    if let Some(identity) = &config.identity {
-        mark_credential_verified(state_dir, identity.storage_label());
-    }
+    mark_connection_identity(
+        state_dir,
+        config
+            .identity
+            .as_ref()
+            .map(|identity| identity.storage_label()),
+        ack.gateway_epoch,
+        agent_instance_id,
+    );
+    let mut readiness = readiness::Exchange::default();
 
     let (out_tx, mut out_rx) = mpsc::channel::<AgentToGateway>(64);
     let (heartbeat_tx, mut heartbeat_rx) = mpsc::channel::<AgentToGateway>(8);
@@ -439,6 +463,35 @@ async fn run_connection(
         match frame {
             Message::Text(text) => {
                 match serde_json::from_str::<GatewayToAgent>(text.as_str()) {
+                    Ok(GatewayToAgent::ConnectionProbe(probe)) => {
+                        if config.identity.is_some()
+                            && let Some(reply) = readiness.reply(probe, ack.connection_generation)
+                        {
+                            heartbeat_tx
+                                .try_send(AgentToGateway::ConnectionProbeReply(reply))
+                                .map_err(|_| {
+                                    anyhow!("readiness response queue full; reconnecting")
+                                })?;
+                            let _ = out_tx
+                                .try_send(AgentToGateway::Reconcile(reconcile_snapshot(&context)));
+                        }
+                    }
+                    Ok(GatewayToAgent::ConnectionReady(reply)) => {
+                        if config.identity.is_some() && readiness.confirmed(&reply) {
+                            let _ = proof_writer.send(Some(infra_local_state::ConnectionProof {
+                                version: infra_local_state::CONNECTION_PROOF_VERSION,
+                                pid: std::process::id(),
+                                device_id: device_id.clone(),
+                                gateway_fingerprint: infra_local_state::gateway_fingerprint(
+                                    &config.gateway_url,
+                                ),
+                                gateway_epoch: ack.gateway_epoch,
+                                agent_instance_id,
+                                connection_generation: ack.connection_generation,
+                                verified_unix_ms: now_ms(),
+                            }));
+                        }
+                    }
                     Ok(GatewayToAgent::Request(request)) => {
                         // Never await a worker permit in the WebSocket receive loop: when
                         // all slots are busy, that would block Ping/Pong for up to a whole

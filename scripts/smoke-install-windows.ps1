@@ -131,6 +131,21 @@ try {
       -not $TaskStatus.startup.reliable) {
     throw "Native structured startup status did not confirm the running recovery-enabled task"
   }
+  if (-not $TaskStatus.connection.verified) { throw "Windows startup did not confirm a signed status roundtrip" }
+  $PreviousProof = $TaskStatus.connection.verified_unix_ms
+  $PreviousPid = $TaskStatus.runtime.pid
+  $PreviousGeneration = $TaskStatus.runtime.connection_generation
+  & (Join-Path $Install "infra.exe") setup --agent (Join-Path $Install "infra-agent.exe") --state-dir $State
+  if ($LASTEXITCODE -ne 0) { throw "Healthy Windows native setup rerun failed" }
+  $VerifiedText = & (Join-Path $Install "infra.exe") status --verify --json --state-dir $State
+  if ($LASTEXITCODE -ne 0) { throw "Fresh Windows connection verification failed" }
+  $Verified = $VerifiedText | ConvertFrom-Json
+  if (-not $Verified.connection.verified -or $null -ne $Verified.startup -or
+      $Verified.connection.verified_unix_ms -le $PreviousProof -or
+      $Verified.runtime.pid -ne $PreviousPid -or
+      $Verified.runtime.connection_generation -ne $PreviousGeneration) {
+    throw "Healthy setup rerun did not preserve PID/generation with fresh signed verification"
+  }
   # Test that the task will stay running on laptops and recover after a crash.
   $Task = Get-ScheduledTask -TaskName "Infra MCP Agent" -ErrorAction Stop
   $TaskSettings = $Task.Settings

@@ -5,6 +5,7 @@ mod mcp_result;
 mod oauth;
 mod pairing;
 mod pending;
+mod readiness;
 mod store;
 
 use anyhow::Context;
@@ -2943,6 +2944,11 @@ async fn handle_agent(mut socket: WebSocket, state: AppState) {
         }
     };
     let hello = auth.hello;
+    let supports_readiness = auth.public_key.is_some()
+        && hello
+            .capabilities
+            .iter()
+            .any(|cap| cap == infra_protocol::CONNECTION_READINESS_CAPABILITY);
     let generation = state.next_generation.fetch_add(1, Ordering::Relaxed);
     let (out_tx, mut out_rx) = mpsc::channel::<GatewayToAgent>(64);
     let (retire_tx, mut retire_rx) = mpsc::channel::<()>(1);
@@ -2985,6 +2991,12 @@ async fn handle_agent(mut socket: WebSocket, state: AppState) {
     // `interval` ticks immediately once. Consume that first tick so a newly authenticated
     // connection gets a full interval before its first protocol heartbeat.
     heartbeat.tick().await;
+    let mut readiness = readiness::ProbeState::default();
+    if supports_readiness {
+        let _ = out_tx.try_send(GatewayToAgent::ConnectionProbe(
+            readiness.challenge(generation),
+        ));
+    }
     let mut last_inbound = Instant::now();
     let mut disconnect_reason = "connection_closed";
     loop {
@@ -2995,7 +3007,10 @@ async fn handle_agent(mut socket: WebSocket, state: AppState) {
                     disconnect_reason = "heartbeat_timeout";
                     break;
                 }
-                if out_tx.try_send(GatewayToAgent::Ping).is_err() {
+                let heartbeat_message = if supports_readiness {
+                    GatewayToAgent::ConnectionProbe(readiness.challenge(generation))
+                } else { GatewayToAgent::Ping };
+                if out_tx.try_send(heartbeat_message).is_err() {
                     warn!(device_id=%hello.device_id,generation,"agent heartbeat queue unavailable");
                     disconnect_reason = "heartbeat_queue_full";
                     break;
@@ -3026,6 +3041,22 @@ async fn handle_agent(mut socket: WebSocket, state: AppState) {
                             }
                             let _ = state.store.record_reconcile(&hello.device_id, &snapshot);
                             state.emit("sessions_changed", Some(hello.device_id.clone()));
+                        },
+                        Ok(AgentToGateway::ConnectionProbeReply(reply)) => {
+                            if supports_readiness && readiness.accept(&reply) {
+                                // Hold the routing read lock until confirmation is queued;
+                                // a cached/superseded socket cannot certify itself as active.
+                                let devices = state.devices.read().await;
+                                if devices.get(&hello.device_id).is_some_and(|device| device.generation == generation) {
+                                    if out_tx.try_send(GatewayToAgent::ConnectionReady(reply)).is_err() {
+                                        disconnect_reason = "readiness_queue_full";
+                                        break;
+                                    }
+                                } else {
+                                    disconnect_reason = "superseded";
+                                    break;
+                                }
+                            }
                         },
                         Ok(AgentToGateway::Pong)=>{}, Ok(_)=>warn!(device_id=%hello.device_id,"unexpected post-auth agent frame"), Err(e)=>warn!(device_id=%hello.device_id,error=%e,"invalid agent frame")
                     }
@@ -3281,6 +3312,211 @@ mod tests {
             capabilities: vec!["exec".into()],
             metadata: BTreeMap::new(),
         }
+    }
+
+    type TestSocket = tokio_tungstenite::WebSocketStream<
+        tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+    >;
+    async fn next_test_message(socket: &mut TestSocket) -> GatewayToAgent {
+        let frame = tokio::time::timeout(Duration::from_secs(2), socket.next())
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        let ClientMessage::Text(text) = frame else {
+            panic!("expected JSON frame")
+        };
+        serde_json::from_str(text.as_str()).unwrap()
+    }
+    fn enroll_readiness_fixture(state: &AppState) -> (String, SigningKey) {
+        let key = SigningKey::from_bytes(&[9; 32]);
+        let enrollment = state.store.create_enrollment(60_000).unwrap();
+        let enrolled = state
+            .store
+            .consume_enrollment(
+                &enrollment.code,
+                &Uuid::new_v4().to_string(),
+                "readiness-fixture",
+                &key.verifying_key().to_bytes(),
+                "linux",
+                "aarch64",
+                "test",
+            )
+            .unwrap();
+        (enrolled.device_id, key)
+    }
+    async fn connect_readiness_fixture(
+        addr: SocketAddr,
+        id: &str,
+        key: &SigningKey,
+        advertise: bool,
+    ) -> (TestSocket, HelloAck) {
+        let (mut socket, _) = connect_async(format!("ws://{addr}/agent")).await.unwrap();
+        let mut hello = test_hello(id, Uuid::new_v4());
+        if advertise {
+            hello
+                .capabilities
+                .push(infra_protocol::CONNECTION_READINESS_CAPABILITY.into());
+        }
+        socket
+            .send(ClientMessage::Text(
+                serde_json::to_string(&AgentToGateway::AuthStart(DeviceAuthStart {
+                    protocol: PROTOCOL_VERSION,
+                    device_id: id.into(),
+                    agent_instance_id: hello.agent_instance_id,
+                }))
+                .unwrap()
+                .into(),
+            ))
+            .await
+            .unwrap();
+        let GatewayToAgent::AuthChallenge(challenge) = next_test_message(&mut socket).await else {
+            panic!("expected challenge")
+        };
+        let signature = URL_SAFE_NO_PAD.encode(
+            key.sign(&signed_auth_message(
+                &challenge.nonce,
+                challenge.gateway_epoch,
+                &hello,
+            ))
+            .to_bytes(),
+        );
+        socket
+            .send(ClientMessage::Text(
+                serde_json::to_string(&AgentToGateway::SignedHello(SignedDeviceHello {
+                    hello,
+                    signature,
+                }))
+                .unwrap()
+                .into(),
+            ))
+            .await
+            .unwrap();
+        let GatewayToAgent::HelloAck(ack) = next_test_message(&mut socket).await else {
+            panic!("expected ack")
+        };
+        (socket, ack)
+    }
+
+    #[tokio::test]
+    async fn signed_readiness_status_roundtrip_rejects_nonce_replay_and_preserves_legacy_peers() {
+        let (_dir, state, addr, server) = spawn_test_gateway().await;
+        let (id, key) = enroll_readiness_fixture(&state);
+        let (mut socket, ack) = connect_readiness_fixture(addr, &id, &key, true).await;
+        let GatewayToAgent::ConnectionProbe(probe) = next_test_message(&mut socket).await else {
+            panic!("expected probe")
+        };
+        assert_eq!(probe.generation, ack.connection_generation);
+        let reply = infra_protocol::ConnectionProbeReply {
+            probe,
+            pid: 42,
+            protocol: PROTOCOL_VERSION,
+        };
+        let mut wrong = reply.clone();
+        wrong.probe.nonce = Uuid::new_v4();
+        socket
+            .send(ClientMessage::Text(
+                serde_json::to_string(&AgentToGateway::ConnectionProbeReply(wrong))
+                    .unwrap()
+                    .into(),
+            ))
+            .await
+            .unwrap();
+        assert!(
+            tokio::time::timeout(Duration::from_millis(50), socket.next())
+                .await
+                .is_err()
+        );
+        socket
+            .send(ClientMessage::Text(
+                serde_json::to_string(&AgentToGateway::ConnectionProbeReply(reply.clone()))
+                    .unwrap()
+                    .into(),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(
+            next_test_message(&mut socket).await,
+            GatewayToAgent::ConnectionReady(reply.clone())
+        );
+        socket
+            .send(ClientMessage::Text(
+                serde_json::to_string(&AgentToGateway::ConnectionProbeReply(reply))
+                    .unwrap()
+                    .into(),
+            ))
+            .await
+            .unwrap();
+        assert!(
+            tokio::time::timeout(Duration::from_millis(50), socket.next())
+                .await
+                .is_err()
+        );
+        let (mut old, _) = connect_readiness_fixture(addr, &id, &key, false).await;
+        assert!(
+            tokio::time::timeout(Duration::from_millis(50), old.next())
+                .await
+                .is_err(),
+            "non-advertising peer must not receive extension frames"
+        );
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn a_superseded_signed_connection_cannot_confirm_readiness() {
+        let (_dir, state, addr, server) = spawn_test_gateway().await;
+        let (id, key) = enroll_readiness_fixture(&state);
+        let (mut old, old_ack) = connect_readiness_fixture(addr, &id, &key, true).await;
+        let GatewayToAgent::ConnectionProbe(old_probe) = next_test_message(&mut old).await else {
+            panic!()
+        };
+        let (mut current, ack) = connect_readiness_fixture(addr, &id, &key, true).await;
+        let GatewayToAgent::ConnectionProbe(probe) = next_test_message(&mut current).await else {
+            panic!()
+        };
+        assert_ne!(old_ack.connection_generation, ack.connection_generation);
+        old.send(ClientMessage::Text(
+            serde_json::to_string(&AgentToGateway::ConnectionProbeReply(
+                infra_protocol::ConnectionProbeReply {
+                    probe: old_probe,
+                    pid: 42,
+                    protocol: PROTOCOL_VERSION,
+                },
+            ))
+            .unwrap()
+            .into(),
+        ))
+        .await
+        .unwrap();
+        let frame = tokio::time::timeout(Duration::from_secs(1), old.next())
+            .await
+            .unwrap();
+        assert!(
+            !matches!(frame, Some(Ok(ClientMessage::Text(_)))),
+            "stale socket received a readiness confirmation"
+        );
+        let reply = infra_protocol::ConnectionProbeReply {
+            probe,
+            pid: 43,
+            protocol: PROTOCOL_VERSION,
+        };
+        current
+            .send(ClientMessage::Text(
+                serde_json::to_string(&AgentToGateway::ConnectionProbeReply(reply.clone()))
+                    .unwrap()
+                    .into(),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(
+            next_test_message(&mut current).await,
+            GatewayToAgent::ConnectionReady(reply)
+        );
+        assert_eq!(
+            state.devices.read().await[&id].generation,
+            ack.connection_generation
+        );
+        server.abort();
     }
     async fn connect_legacy(
         addr: SocketAddr,
