@@ -114,6 +114,10 @@ pub async fn apply(
             "selected release does not support safe paired activation; installed files unchanged",
         );
     }
+    // The private handoff directory now owns the checked candidate pair.
+    // Windows cannot rely on the original updater surviving to clean downloads.
+    let _ = fs::remove_file(cli);
+    let _ = fs::remove_file(agent);
     let expected = serde_json::to_string(&activation::pair_hash(install_dir)?)?;
     fs::write(source.join("expected-pair.json"), &expected)?;
     record(
@@ -158,8 +162,6 @@ pub async fn apply(
         if result.is_ok() {
             let _ = fs::remove_dir_all(&source);
         }
-        let _ = fs::remove_file(cli);
-        let _ = fs::remove_file(agent);
         match result {
             Ok(output) if success => {
                 print!("{}", output.stdout);

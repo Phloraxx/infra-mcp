@@ -91,6 +91,8 @@ def main():
             try:
                 queued=run([target/CLI,'update','--version','v-fixture','--base-url',f'http://127.0.0.1:{server.server_port}','--trusted-update-key',public,'--state-dir',profile],timeout=40)
                 assert 'pending' in queued.stdout,queued.stdout
+                assert not list(target.glob('.infra.update.*'))
+                assert not list(target.glob('.infra-agent.update.*'))
                 update_id=(profile/'update-current').read_text().strip()
                 deadline=time.monotonic()+240
                 while time.monotonic()<deadline:
