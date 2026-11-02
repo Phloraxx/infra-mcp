@@ -105,11 +105,13 @@ test -x "$TMP/bin/infra-agent"
 test -f "$TMP/state/config.json"
 test -f "$TMP/state/identity.json"
 STATUS="$(HOME="$TMP/home" $TMP/bin/infra status --json --state-dir "$TMP/state")"
-python3 - <<'PY' "$STATUS"
+python3 - <<'PY' "$STATUS" "$TMP/state/identity.json"
 import json,sys
 s=json.loads(sys.argv[1])
 assert s["configured"] is True, s
 assert s["enrolled"] is True, s
+with open(sys.argv[2]) as source: identity=json.load(source)
+assert identity['device_name']=='Installer Smoke Device', identity['device_name']
 PY
 
 # Start the same installed agent with no enrollment code; persisted config + identity must suffice.
@@ -118,7 +120,7 @@ AGENT_PID=$!
 DEVICE_ID=''
 for _ in $(seq 1 100); do
   DEVICES="$(curl -fsS -b "$COOKIE_JAR" "http://127.0.0.1:$PORT/api/devices")"
-  DEVICE_ID="$(python3 -c 'import json,sys; d=json.load(sys.stdin); print(next((x["device_id"] for x in d if x.get("online")), ""))' <<<"$DEVICES")"
+  DEVICE_ID="$(python3 -c 'import json,sys; d=json.load(sys.stdin); print(next((x["device_id"] for x in d if x.get("online") and x.get("device_name")=="Installer Smoke Device"), ""))' <<<"$DEVICES")"
   [ -z "$DEVICE_ID" ] || break
   sleep .05
 done

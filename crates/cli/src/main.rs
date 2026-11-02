@@ -342,12 +342,17 @@ async fn install_command(state_dir: &Path, mut args: Vec<String>) -> anyhow::Res
         let code = code.ok_or_else(|| {
             anyhow!("device is not enrolled; provide the one-time dashboard code with --code")
         })?;
-        let status = Command::new(&agent)
+        let mut enrollment = Command::new(&agent);
+        enrollment
             .arg("--state-dir")
             .arg(state_dir)
             .arg("--enroll-only")
             .env("INFRA_GATEWAY_URL", &config.gateway_url)
-            .env("INFRA_ENROLLMENT_CODE", code)
+            .env("INFRA_ENROLLMENT_CODE", code);
+        if let Some(name) = &config.device_name {
+            enrollment.env("INFRA_DEVICE_NAME", name);
+        }
+        let status = enrollment
             .status()
             .with_context(|| format!("run {} enrollment", agent.display()))?;
         if !status.success() {
