@@ -55,6 +55,14 @@ results must be recorded separately; local macOS success is not Windows proof.
 
 ## Remaining gates
 
+The following stacked MCP-contract slice is implemented in source: action enums,
+field/shell/limit descriptions, native MCP failure flags and recovery fields,
+native screenshot image blocks with JSON compatibility, malformed-exec response
+classification, and rejection of ineffective directory-list pagination options.
+An added HTTP smoke verifies discovery and error results using disposable local
+state. Full pagination, granular capability metadata and actual client-side image
+acceptance remain open.
+
 MCP schema/error/discovery ergonomics, pagination/images, native setup readiness,
 localized Windows task status, update/rollback acceptance, bounded dashboard
 requests, cross-client coverage, and physical sleep/login/reboot tests remain

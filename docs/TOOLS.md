@@ -1,5 +1,34 @@
 # MCP tool model
 
+## Current stabilization contract — 2 November 2026
+
+The MCP-contract branch adds typed action enums and argument descriptions to the
+existing tool families. Conditional required fields are still checked by the
+gateway rather than a deeply nested schema. Unknown actions are rejected during
+deserialization. The raw gateway exposes 15 tools including cross-device `copy`;
+a host/connector may need its catalog refreshed before showing that tool.
+
+Tool failures now use `isError: true` and structured `error_code`, `retryable`, and
+`next_action` fields. Existing `status`, request IDs, stdout/stderr, exit code and
+legacy error strings are retained. Nonzero one-shot command exit codes are tool
+failures even when the dispatch succeeded. An `outcome_unknown` result is never
+retryable automatically; explicit pre-execution `agent_busy` rejection is.
+Offline/missing devices and invalid arguments have distinct codes.
+
+Successful screenshots include native MCP image content plus concise metadata
+text. The structured JSON retains image bytes for existing consumers. This is
+wire-format support, not certification of every multimodal client.
+
+Desktop Windows exec/jobs use `cmd.exe`; Unix uses `/bin/sh`. Android exec remains
+restricted. Use jobs for lengthy work, terminals for interactive/stateful work,
+and preserve handles/byte offsets across reconnects. File-list `offset`/`length`
+pagination is not implemented: such requests now fail with an actionable error
+instead of silently ignoring limits. Use bounded search or a narrower directory.
+
+`scripts/smoke-mcp-contract.py` checks the actual HTTP tool list, schemas, shell
+guidance, and structured errors against an isolated loopback fixture. The older
+conceptual/future lists below are not the callable API contract.
+
 Infra should expose a compact, predictable MCP surface. Tool design is optimized for model selection and low call count rather than mirroring every OS command.
 
 The names below are conceptual; exact MCP schema details may evolve.

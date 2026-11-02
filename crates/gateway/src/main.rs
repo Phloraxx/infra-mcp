@@ -1,5 +1,7 @@
 mod auth;
 mod copy;
+mod mcp_actions;
+mod mcp_result;
 mod oauth;
 mod pairing;
 mod pending;
@@ -33,9 +35,10 @@ use infra_protocol::{
     SystemRequest, TerminalAction, TerminalRequest, TransferAction, TransferRequest,
     signed_auth_message,
 };
+use mcp_actions::*;
+use mcp_result::{ToolError, ToolJson as McpJson};
 use pending::PendingRequests;
 use rmcp::{
-    Json as McpJson,
     handler::server::wrapper::Parameters,
     tool, tool_router,
     transport::streamable_http_server::{
@@ -305,11 +308,15 @@ enum DispatchError {
 
 #[derive(Debug, Deserialize, JsonSchema)]
 struct McpExecInput {
+    /// Stable device ID or unique name from devices. Check online state and capabilities first.
     device: String,
+    /// Command to execute. Desktop Windows uses cmd.exe, Unix uses /bin/sh; Android is restricted. Use terminal for interactive state.
     command: String,
     #[serde(default)]
+    /// Working directory for this operation only. Omit to use the agent default; it does not change later calls.
     cwd: Option<String>,
     #[serde(default)]
+    /// Execution timeout in milliseconds: default 30000, clamped to 100..120000. Output is bounded; use jobs for long work.
     timeout_ms: Option<u64>,
 }
 #[derive(Debug, Serialize, JsonSchema)]
@@ -330,111 +337,164 @@ struct McpExecOutput {
 
 #[derive(Debug, Deserialize, JsonSchema)]
 struct McpFilesInput {
+    /// Stable device ID or unique name from devices. Check online state and capabilities first.
     device: String,
-    action: String,
+    /// Choose an allowed action. Only that action is executed; provide its required fields.
+    action: FileActionName,
     #[serde(default)]
+    /// Target path. Desktop paths follow the remote OS; Android paths must stay inside its authorized workspace.
     path: Option<String>,
     #[serde(default)]
+    /// Required destination path for copy/move on the same device; use the copy tool for another device.
     destination: Option<String>,
     #[serde(default)]
+    /// Required UTF-8 content for write/append. These actions can mutate files.
     content: Option<String>,
     #[serde(default)]
+    /// Byte offset for range/output/chunk reads; preserve the returned next offset rather than counting characters.
     offset: Option<u64>,
     #[serde(default)]
+    /// Maximum bytes for read/output/chunk actions, subject to agent caps. Does not limit directory list.
     length: Option<usize>,
     #[serde(default)]
+    /// Allow recursive behavior for the selected directory action. Permanent deletion is consequential.
     recursive: Option<bool>,
     #[serde(default)]
+    /// Create missing parent directories for the selected write/upload action; default false.
     create_parents: Option<bool>,
     #[serde(default)]
+    /// Required exact source text for exact_edit; matching is literal.
     old: Option<String>,
     #[serde(default)]
+    /// Required replacement text for exact_edit.
     new: Option<String>,
     #[serde(default)]
+    /// Expected exact_edit match count. Use this to reject unexpected file changes.
     expected_replacements: Option<usize>,
 }
 #[derive(Debug, Deserialize, JsonSchema)]
 struct McpSearchInput {
+    /// Stable device ID or unique name from devices. Check online state and capabilities first.
     device: String,
+    /// Known remote directory to search. Bound the root to the relevant project.
     root: String,
+    /// Search/filter text. Content search uses regex unless literal is true.
     query: String,
-    mode: String,
+    /// files searches path names; content searches UTF-8 text. Binary and large files may be skipped.
+    mode: SearchModeName,
     #[serde(default)]
+    /// Treat search query as literal text instead of regex.
     literal: Option<bool>,
     #[serde(default)]
+    /// Use case-insensitive matching; default false.
     ignore_case: Option<bool>,
     #[serde(default)]
+    /// Include hidden paths; default false. Git-ignore rules still apply.
     include_hidden: Option<bool>,
     #[serde(default)]
+    /// Optional glob to restrict matching file names or relative paths.
     file_pattern: Option<String>,
     #[serde(default)]
+    /// Maximum search hits; default 100, cap 500. Inspect truncated and skipped-file counts.
     max_results: Option<usize>,
     #[serde(default)]
+    /// Context lines around content matches; cap 5.
     context_lines: Option<usize>,
 }
 #[derive(Debug, Deserialize, JsonSchema)]
 struct McpProcessesInput {
+    /// Stable device ID or unique name from devices. Check online state and capabilities first.
     device: String,
-    action: String,
+    /// Choose an allowed action. Only that action is executed; provide its required fields.
+    action: ProcessActionName,
     #[serde(default)]
+    /// Search/filter text. Content search uses regex unless literal is true.
     query: Option<String>,
     #[serde(default)]
+    /// Required target process ID for terminate; inspect the process before terminating it.
     pid: Option<u32>,
     #[serde(default)]
+    /// Request forceful termination; default false. OS permissions still apply.
     force: Option<bool>,
 }
 #[derive(Debug, Deserialize, JsonSchema)]
 struct McpJobsInput {
+    /// Stable device ID or unique name from devices. Check online state and capabilities first.
     device: String,
-    action: String,
+    /// Choose an allowed action. Only that action is executed; provide its required fields.
+    action: JobActionName,
     #[serde(default)]
+    /// Command to execute. Desktop Windows uses cmd.exe, Unix uses /bin/sh; Android is restricted. Use terminal for interactive state.
     command: Option<String>,
     #[serde(default)]
+    /// Working directory for this operation only. Omit to use the agent default; it does not change later calls.
     cwd: Option<String>,
     #[serde(default)]
+    /// Optional job execution deadline in milliseconds, clamped to 100..604800000. Omit for no job deadline.
     timeout_ms: Option<u64>,
     #[serde(default)]
+    /// Required returned job UUID for read/cancel. Reuse the ID across reconnects; do not start duplicate work.
     job_id: Option<String>,
     #[serde(default)]
+    /// Byte offset for range/output/chunk reads; preserve the returned next offset rather than counting characters.
     offset: Option<u64>,
     #[serde(default)]
+    /// Maximum bytes for read/output/chunk actions, subject to agent caps. Does not limit directory list.
     length: Option<usize>,
 }
 #[derive(Debug, Deserialize, JsonSchema)]
 struct McpTerminalInput {
+    /// Stable device ID or unique name from devices. Check online state and capabilities first.
     device: String,
-    action: String,
+    /// Choose an allowed action. Only that action is executed; provide its required fields.
+    action: TerminalActionName,
     #[serde(default)]
+    /// Command to execute. Desktop Windows uses cmd.exe, Unix uses /bin/sh; Android is restricted. Use terminal for interactive state.
     command: Option<String>,
     #[serde(default)]
+    /// Working directory for this operation only. Omit to use the agent default; it does not change later calls.
     cwd: Option<String>,
     #[serde(default)]
+    /// Required returned PTY UUID for read/write/resize/close. Reattach with the same ID.
     session_id: Option<String>,
     #[serde(default)]
+    /// Required terminal write data, including newline when needed. Never replay an uncertain write.
     data: Option<String>,
     #[serde(default)]
+    /// Terminal row count; required with cols for resize.
     rows: Option<u16>,
     #[serde(default)]
+    /// Terminal column count; required with rows for resize.
     cols: Option<u16>,
     #[serde(default)]
+    /// Byte offset for range/output/chunk reads; preserve the returned next offset rather than counting characters.
     offset: Option<u64>,
     #[serde(default)]
+    /// Maximum bytes for read/output/chunk actions, subject to agent caps. Does not limit directory list.
     length: Option<usize>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
 struct McpCopyInput {
+    /// Source device ID or unique name from devices; transfer capability is required.
     source_device: String,
+    /// Destination device ID or unique name; transfer capability is required.
     destination_device: String,
+    /// Source file path on source_device.
     source_path: String,
+    /// Destination file path on destination_device.
     destination_path: String,
     #[serde(default)]
+    /// Allow replacing an existing destination; default false.
     overwrite: Option<bool>,
     #[serde(default)]
+    /// Create missing parent directories for the selected write/upload action; default false.
     create_parents: Option<bool>,
     #[serde(default)]
+    /// Source download UUID from a previous partial copy; resume requires both transfer IDs.
     source_transfer_id: Option<String>,
     #[serde(default)]
+    /// Destination upload UUID from a previous partial copy; inspect status before retrying uncertain chunks.
     destination_transfer_id: Option<String>,
     /// Max bytes relayed this request (default 16 MiB, cap 64 MiB).
     #[serde(default)]
@@ -443,104 +503,149 @@ struct McpCopyInput {
 
 #[derive(Debug, Deserialize, JsonSchema)]
 struct McpTransferInput {
+    /// Stable device ID or unique name from devices. Check online state and capabilities first.
     device: String,
-    action: String,
+    /// Choose an allowed action. Only that action is executed; provide its required fields.
+    action: TransferActionName,
     #[serde(default)]
+    /// Target path. Desktop paths follow the remote OS; Android paths must stay inside its authorized workspace.
     path: Option<String>,
     #[serde(default)]
+    /// Required declared file size in bytes for upload_begin.
     size: Option<u64>,
     #[serde(default)]
+    /// Optional expected SHA-256 digest; upload commit verifies it before final activation.
     sha256: Option<String>,
     #[serde(default)]
+    /// Allow replacing an existing destination; default false.
     overwrite: Option<bool>,
     #[serde(default)]
+    /// Create missing parent directories for the selected write/upload action; default false.
     create_parents: Option<bool>,
     #[serde(default)]
+    /// Required returned transfer UUID for chunk/commit/status/cancel. Preserve it for resumption.
     transfer_id: Option<String>,
     #[serde(default)]
+    /// Byte offset for range/output/chunk reads; preserve the returned next offset rather than counting characters.
     offset: Option<u64>,
     #[serde(default)]
+    /// Required upload_chunk bytes encoded as base64; raw chunk cap is 256 KiB.
     data_base64: Option<String>,
     #[serde(default)]
+    /// Maximum bytes for read/output/chunk actions, subject to agent caps. Does not limit directory list.
     length: Option<usize>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
 struct McpDesktopInput {
+    /// Stable device ID or unique name from devices. Check online state and capabilities first.
     device: String,
-    action: String,
+    /// Choose an allowed action. Only that action is executed; provide its required fields.
+    action: DesktopActionName,
     #[serde(default)]
+    /// Optional display identifier returned by displays.
     display: Option<u32>,
     #[serde(default)]
+    /// Pixel x coordinate; required for click. For a screenshot region supply x, y, width and height together.
     x: Option<i32>,
     #[serde(default)]
+    /// Pixel y coordinate; required for click. Screenshot regions require all four bounds.
     y: Option<i32>,
     #[serde(default)]
+    /// Screenshot-region width in pixels; requires x, y and height.
     width: Option<u32>,
     #[serde(default)]
+    /// Screenshot-region height in pixels; requires x, y and width.
     height: Option<u32>,
     #[serde(default)]
+    /// Required application identifier/name for focus. Local desktop permission may be needed.
     app: Option<String>,
     #[serde(default)]
+    /// Required text for type_text/clipboard_set. These actions change the device UI or clipboard.
     text: Option<String>,
     #[serde(default)]
+    /// Required key name for key; combine with modifiers when needed.
     key: Option<String>,
     #[serde(default)]
+    /// Optional modifier names for key; default empty.
     modifiers: Option<Vec<String>>,
     #[serde(default)]
+    /// Optional click button; defaults to primary. Availability depends on the platform.
     button: Option<String>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
 struct McpSystemInput {
+    /// Stable device ID or unique name from devices. Check online state and capabilities first.
     device: String,
-    action: String,
+    /// Choose an allowed action. Only that action is executed; provide its required fields.
+    action: SystemActionName,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
 struct McpNetworkInput {
+    /// Stable device ID or unique name from devices. Check online state and capabilities first.
     device: String,
-    action: String,
+    /// Choose an allowed action. Only that action is executed; provide its required fields.
+    action: NetworkActionName,
     #[serde(default)]
+    /// Required hostname/IP for resolve and tcp_check.
     host: Option<String>,
     #[serde(default)]
+    /// Required TCP port for tcp_check.
     port: Option<u16>,
     #[serde(default)]
+    /// TCP connection timeout in milliseconds: default 3000, clamped to 100..30000. Used only by tcp_check.
     timeout_ms: Option<u64>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
 struct McpServiceInput {
+    /// Stable device ID or unique name from devices. Check online state and capabilities first.
     device: String,
-    action: String,
+    /// Choose an allowed action. Only that action is executed; provide its required fields.
+    action: ServiceActionName,
     #[serde(default)]
+    /// Required service name for status/start/stop/restart. Linux services are user scope.
     name: Option<String>,
     #[serde(default)]
+    /// Search/filter text. Content search uses regex unless literal is true.
     query: Option<String>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
 struct McpContainerInput {
+    /// Stable device ID or unique name from devices. Check online state and capabilities first.
     device: String,
-    action: String,
+    /// Choose an allowed action. Only that action is executed; provide its required fields.
+    action: ContainerActionName,
     #[serde(default)]
+    /// Required Docker container name/ID except for list. Docker must be available on the device.
     container: Option<String>,
     #[serde(default)]
+    /// Maximum recent log lines; ask for a bounded relevant excerpt.
     tail: Option<usize>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
 struct McpGitInput {
+    /// Stable device ID or unique name from devices. Check online state and capabilities first.
     device: String,
-    action: String,
+    /// Choose an allowed action. Only that action is executed; provide its required fields.
+    action: GitActionName,
+    /// Required remote repository directory. Git credentials must already work noninteractively.
     repo: String,
     #[serde(default)]
+    /// For diff, select staged changes; default false.
     staged: Option<bool>,
     #[serde(default)]
+    /// Maximum Git log entries, subject to the agent cap.
     limit: Option<usize>,
     #[serde(default)]
+    /// Optional Git remote name; defaults to the agent operation default.
     remote: Option<String>,
     #[serde(default)]
+    /// Optional branch for pull/push. Pull is fast-forward-only.
     branch: Option<String>,
 }
 
@@ -558,22 +663,22 @@ impl InfraMcp {
 impl InfraMcp {
     #[tool(
         name = "devices",
-        description = "List enrolled Infra devices, online state, capabilities and active persistent work."
+        description = "Discover enrolled devices, online state, capabilities and active persistent work. Select a returned unique device ID for later tools. Offline capabilities and disconnect reasons are cached history; Android capability names do not imply desktop-equivalent access."
     )]
-    async fn devices(&self) -> Result<McpJson<Vec<McpDeviceView>>, String> {
-        Ok(McpJson(
-            device_views(&self.state).await.map_err(|e| e.to_string())?,
-        ))
+    async fn devices(&self) -> Result<McpJson<Vec<McpDeviceView>>, ToolError> {
+        Ok(McpJson(device_views(&self.state).await.map_err(
+            |error| ToolError::new("device_registry_error", error.to_string()),
+        )?))
     }
 
     #[tool(
         name = "exec",
-        description = "Run a bounded one-shot command on an online Infra device as the agent user."
+        description = "Run a short noninteractive command as the device user. Windows uses cmd.exe; Unix uses /bin/sh; Android exec is restricted. Default 30s, maximum 120s. Use jobs for long work and terminal for interactive/stateful work. Inspect exit_code; never replay outcome_unknown."
     )]
     async fn exec(
         &self,
         Parameters(input): Parameters<McpExecInput>,
-    ) -> Result<McpJson<McpExecOutput>, String> {
+    ) -> Result<McpJson<McpExecOutput>, ToolError> {
         let device_id = resolve_device(&self.state, &input.device)
             .await
             .map_err(dispatch_error)?;
@@ -600,7 +705,7 @@ impl InfraMcp {
     async fn files(
         &self,
         Parameters(input): Parameters<McpFilesInput>,
-    ) -> Result<McpJson<serde_json::Value>, String> {
+    ) -> Result<McpJson<serde_json::Value>, ToolError> {
         let action = match input.action.as_str() {
             "read" => FileAction::Read {
                 path: required(input.path, "path")?,
@@ -626,9 +731,16 @@ impl InfraMcp {
             "hash" => FileAction::Hash {
                 path: required(input.path, "path")?,
             },
-            "list" => FileAction::List {
-                path: required(input.path, "path")?,
-            },
+            "list" => {
+                if input.offset.is_some() || input.length.is_some() {
+                    return Err(ToolError::invalid(
+                        "files.list does not support offset/length pagination yet; use search with a bounded max_results or a narrower directory",
+                    ));
+                }
+                FileAction::List {
+                    path: required(input.path, "path")?,
+                }
+            }
             "stat" => FileAction::Stat {
                 path: required(input.path, "path")?,
             },
@@ -669,7 +781,7 @@ impl InfraMcp {
     async fn search(
         &self,
         Parameters(input): Parameters<McpSearchInput>,
-    ) -> Result<McpJson<serde_json::Value>, String> {
+    ) -> Result<McpJson<serde_json::Value>, ToolError> {
         let mode = match input.mode.as_str() {
             "files" => SearchMode::Files,
             "content" => SearchMode::Content,
@@ -701,7 +813,7 @@ impl InfraMcp {
     async fn processes(
         &self,
         Parameters(input): Parameters<McpProcessesInput>,
-    ) -> Result<McpJson<serde_json::Value>, String> {
+    ) -> Result<McpJson<serde_json::Value>, ToolError> {
         let action = match input.action.as_str() {
             "list" => ProcessAction::List { query: input.query },
             "terminate" => ProcessAction::Terminate {
@@ -721,12 +833,12 @@ impl InfraMcp {
 
     #[tool(
         name = "jobs",
-        description = "Manage durable background command jobs. Actions: start, list, read, cancel."
+        description = "Start or inspect durable noninteractive command jobs. start requires command; read/cancel require job_id. Preserve returned IDs and byte offsets across reconnects. Windows commands use cmd.exe; Unix uses /bin/sh. Job execution status is inside the returned job metadata."
     )]
     async fn jobs(
         &self,
         Parameters(input): Parameters<McpJobsInput>,
-    ) -> Result<McpJson<serde_json::Value>, String> {
+    ) -> Result<McpJson<serde_json::Value>, ToolError> {
         let action = match input.action.as_str() {
             "start" => JobAction::Start {
                 command: required(input.command, "command")?,
@@ -755,12 +867,12 @@ impl InfraMcp {
 
     #[tool(
         name = "terminal",
-        description = "Manage persistent PTY sessions independent of the MCP request. Actions: open, list, read, write, resize, close."
+        description = "Manage persistent PTY sessions. open requires command; read/write/resize/close require session_id; write also requires data, resize requires rows and cols. Reads use byte offsets and can report expired retention. Reattach using the same ID; never replay uncertain input."
     )]
     async fn terminal(
         &self,
         Parameters(input): Parameters<McpTerminalInput>,
-    ) -> Result<McpJson<serde_json::Value>, String> {
+    ) -> Result<McpJson<serde_json::Value>, ToolError> {
         let action = match input.action.as_str() {
             "open" => TerminalAction::Open {
                 command: required(input.command, "command")?,
@@ -780,8 +892,8 @@ impl InfraMcp {
             },
             "resize" => TerminalAction::Resize {
                 session_id: parse_uuid(input.session_id, "session_id")?,
-                rows: input.rows.ok_or("rows is required")?,
-                cols: input.cols.ok_or("cols is required")?,
+                rows: required(input.rows, "rows")?,
+                cols: required(input.cols, "cols")?,
             },
             "close" => TerminalAction::Close {
                 session_id: parse_uuid(input.session_id, "session_id")?,
@@ -804,11 +916,11 @@ impl InfraMcp {
     async fn transfer(
         &self,
         Parameters(input): Parameters<McpTransferInput>,
-    ) -> Result<McpJson<serde_json::Value>, String> {
+    ) -> Result<McpJson<serde_json::Value>, ToolError> {
         let action = match input.action.as_str() {
             "upload_begin" => TransferAction::UploadBegin {
                 path: required(input.path, "path")?,
-                size: input.size.ok_or("size is required")?,
+                size: required(input.size, "size")?,
                 sha256: input.sha256,
                 overwrite: input.overwrite.unwrap_or(false),
                 create_parents: input.create_parents.unwrap_or(false),
@@ -854,7 +966,7 @@ impl InfraMcp {
     async fn copy(
         &self,
         Parameters(input): Parameters<McpCopyInput>,
-    ) -> Result<McpJson<serde_json::Value>, String> {
+    ) -> Result<McpJson<serde_json::Value>, ToolError> {
         Ok(McpJson(copy::run(&self.state, input).await?))
     }
 
@@ -865,7 +977,7 @@ impl InfraMcp {
     async fn desktop(
         &self,
         Parameters(input): Parameters<McpDesktopInput>,
-    ) -> Result<McpJson<serde_json::Value>, String> {
+    ) -> Result<McpJson<serde_json::Value>, ToolError> {
         let action = match input.action.as_str() {
             "permissions" => DesktopAction::Permissions,
             "displays" => DesktopAction::Displays,
@@ -914,7 +1026,7 @@ impl InfraMcp {
     async fn system(
         &self,
         Parameters(input): Parameters<McpSystemInput>,
-    ) -> Result<McpJson<serde_json::Value>, String> {
+    ) -> Result<McpJson<serde_json::Value>, ToolError> {
         let action = match input.action.as_str() {
             "summary" => SystemAction::Summary,
             "disks" => SystemAction::Disks,
@@ -937,7 +1049,7 @@ impl InfraMcp {
     async fn network(
         &self,
         Parameters(input): Parameters<McpNetworkInput>,
-    ) -> Result<McpJson<serde_json::Value>, String> {
+    ) -> Result<McpJson<serde_json::Value>, ToolError> {
         let action = match input.action.as_str() {
             "listeners" => NetworkAction::Listeners,
             "resolve" => NetworkAction::Resolve {
@@ -945,7 +1057,7 @@ impl InfraMcp {
             },
             "tcp_check" => NetworkAction::TcpCheck {
                 host: required(input.host, "host")?,
-                port: input.port.ok_or("port is required")?,
+                port: required(input.port, "port")?,
                 timeout_ms: input.timeout_ms,
             },
             _ => return Err("unknown network action".into()),
@@ -966,7 +1078,7 @@ impl InfraMcp {
     async fn services(
         &self,
         Parameters(input): Parameters<McpServiceInput>,
-    ) -> Result<McpJson<serde_json::Value>, String> {
+    ) -> Result<McpJson<serde_json::Value>, ToolError> {
         let action = match input.action.as_str() {
             "list" => ServiceAction::List { query: input.query },
             "status" => ServiceAction::Status {
@@ -999,7 +1111,7 @@ impl InfraMcp {
     async fn containers(
         &self,
         Parameters(input): Parameters<McpContainerInput>,
-    ) -> Result<McpJson<serde_json::Value>, String> {
+    ) -> Result<McpJson<serde_json::Value>, ToolError> {
         let action = match input.action.as_str() {
             "list" => ContainerAction::List,
             "inspect" => ContainerAction::Inspect {
@@ -1036,7 +1148,7 @@ impl InfraMcp {
     async fn git(
         &self,
         Parameters(input): Parameters<McpGitInput>,
-    ) -> Result<McpJson<serde_json::Value>, String> {
+    ) -> Result<McpJson<serde_json::Value>, ToolError> {
         let action = match input.action.as_str() {
             "status" => GitAction::Status { repo: input.repo },
             "diff" => GitAction::Diff {
@@ -1811,7 +1923,7 @@ async fn dashboard_operation(
             Ok(McpJson(value)) => Json(value).into_response(),
             Err(error) => (
                 StatusCode::SERVICE_UNAVAILABLE,
-                Json(serde_json::json!({"error":error})),
+                Json(serde_json::json!({"error":error.message,"error_code":error.code})),
             )
                 .into_response(),
         }
@@ -2526,7 +2638,7 @@ async fn tool_operation(
     device: String,
     operation: AgentOperation,
     timeout_ms: u64,
-) -> Result<McpJson<serde_json::Value>, String> {
+) -> Result<McpJson<serde_json::Value>, ToolError> {
     let action = operation_label(&operation);
     let device = resolve_device(state, &device)
         .await
@@ -2623,7 +2735,10 @@ fn exec_output(response: AgentResponse) -> McpExecOutput {
                     out.stderr = Some(v.stderr);
                     out.truncated = Some(v.truncated)
                 }
-                Err(e) => out.error = Some(format!("invalid exec response: {e}")),
+                Err(e) => {
+                    out.status = "failed".into();
+                    out.error = Some(format!("invalid exec response: {e}"));
+                }
             }
         }
         OperationResult::Failed { error } => {
@@ -2647,11 +2762,12 @@ fn exec_output(response: AgentResponse) -> McpExecOutput {
     };
     out
 }
-fn required<T>(value: Option<T>, name: &str) -> Result<T, String> {
-    value.ok_or_else(|| format!("{name} is required"))
+fn required<T>(value: Option<T>, name: &str) -> Result<T, ToolError> {
+    value.ok_or_else(|| ToolError::invalid(format!("{name} is required")))
 }
-fn parse_uuid(value: Option<String>, name: &str) -> Result<Uuid, String> {
-    Uuid::parse_str(&required(value, name)?).map_err(|_| format!("{name} must be a UUID"))
+fn parse_uuid(value: Option<String>, name: &str) -> Result<Uuid, ToolError> {
+    Uuid::parse_str(&required(value, name)?)
+        .map_err(|_| ToolError::invalid(format!("{name} must be a UUID")))
 }
 /// Accept stable IDs or unique human-friendly names. Never mistake an unknown name for
 /// an offline device. Name matching is case-insensitive only after exact matching.
@@ -3055,6 +3171,18 @@ mod tests {
             last_disconnect_reason: None,
             last_disconnect_at_unix_ms: None,
         }
+    }
+
+    #[test]
+    fn malformed_exec_payload_is_a_failure_not_a_successful_command() {
+        let output = exec_output(AgentResponse {
+            id: Uuid::new_v4(),
+            result: OperationResult::Ok {
+                body: serde_json::json!({"unexpected":"shape"}),
+            },
+        });
+        assert_eq!(output.status, "failed");
+        assert!(output.error.unwrap().contains("invalid exec response"));
     }
 
     #[test]

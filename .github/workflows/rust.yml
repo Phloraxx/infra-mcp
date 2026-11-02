@@ -47,6 +47,9 @@ jobs:
         run: ./scripts/smoke-dashboard-password.sh
       - if: matrix.os == 'ubuntu-latest'
         run: ./scripts/smoke-pairing.sh
+      - name: MCP schema and error contract smoke
+        if: matrix.os == 'ubuntu-latest'
+        run: python3 scripts/smoke-mcp-contract.py
       - name: Build native acceptance binaries
         if: matrix.os == 'macos-latest' || matrix.os == 'windows-latest'
         run: cargo build --release -p infra-agent -p infra-cli
