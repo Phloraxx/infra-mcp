@@ -157,6 +157,12 @@ const server=http.createServer(async(req,res)=>{
     await page.goto(base);
     await page.locator('#overview-devices [data-device="online"]').waitFor();
     await page.locator('#add-device').click();
+    await page.locator('[data-quick-platform="windows"]').click();
+    const quickCommand=await page.locator('#quick-install-command').textContent();
+    assert.match(quickCommand,/Invoke-WebRequest[\s\S]*-UseBasicParsing[\s\S]*-OutFile/);
+    assert.match(quickCommand,/guid/);
+    assert.match(quickCommand,/LASTEXITCODE/);
+    assert.match(quickCommand,/finally[\s\S]*Remove-Item/);
     await page.waitForFunction(()=>document.querySelector('#pending-pairs').textContent.includes('Windows Test PC'));
     assert.match(await page.locator('#pending-pairs').textContent(),/482731/);
     await page.locator('#pending-pairs [data-pair-action="approve"]').click();
