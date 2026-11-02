@@ -72,8 +72,16 @@ Tests cover traversal beyond the old cap, byte-shortened continuation, invalid
 limits, symlinks, Linux lossy filename collisions, legacy wire shape and stale
 registry capabilities. Product smoke exercises actual signed-agent MCP pages.
 Broader granular capability/readiness metadata and actual client-side image
-acceptance remain open; Android pagination and dashboard page navigation are not
-implemented by this slice.
+acceptance remain open; Android pagination is not implemented by this slice.
+
+The dashboard pagination slice uses 100-entry requests when `files.list_page`
+is advertised, with Previous/Next history built from actual continuation
+offsets. It renders one page at a time, retains the last confirmed page on error,
+ignores responses from old routes/devices and clears paths/history on sign-out
+or device switch. Old agents retain a no-options list with an honest incomplete
+listing message. Browser tests cover keyboard/mobile controls, byte-shortened
+pages, failure/recovery, capability loss, stale responses and private-state
+clearing. These offsets still are not directory snapshots.
 
 The dashboard-recovery slice adds a ten-second budget covering API response
 headers and body reads, visibly stale last-confirmed data, and explicit uncertainty

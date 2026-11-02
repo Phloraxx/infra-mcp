@@ -1,4 +1,4 @@
-const state={devices:[],sessions:[],activity:[],platform:'unix',enrollment:null,device:null,tab:'overview',attachment:null,file:null,routeVersion:0,authEpoch:0,authenticated:false,loginMethod:'password',events:null,streamHealthy:false,refreshPromise:null,refreshPending:false,refreshTimer:null,lastRefresh:0};
+const state={devices:[],sessions:[],activity:[],platform:'unix',enrollment:null,device:null,tab:'overview',attachment:null,file:null,listing:null,routeVersion:0,authEpoch:0,authenticated:false,loginMethod:'password',events:null,streamHealthy:false,refreshPromise:null,refreshPending:false,refreshTimer:null,lastRefresh:0};
 const $=s=>document.querySelector(s);const $$=s=>[...document.querySelectorAll(s)];
 const esc=s=>String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 // Local, literal SVGs. No CDN/icon font and no interpolated user markup.
@@ -337,7 +337,7 @@ function route(){
     showView('devices','Devices','Reachability and capability across your fleet.');
     if(!$('#enroll-dialog').open)$('#add-device').click();
   }else if(parts[0]==='device'&&parts[1]){
-    if(state.device!==parts[1]){state.file=null;$('#file-content').textContent='';$('#file-preview').classList.add('hidden');$('#files-list').replaceChildren();$('#files-path').value='.';$('#device-status-output').classList.add('hidden');}
+    if(state.device!==parts[1]){state.file=null;clearFileListing();$('#file-content').textContent='';$('#file-preview').classList.add('hidden');$('#device-status-output').classList.add('hidden');}
     state.device=parts[1];state.tab=['overview','terminal','files','sessions','activity'].includes(parts[2])?parts[2]:'overview';
     showView('device-detail',currentDevice()?.device_name||'Device','Device health and persistent work.');renderDevice();
   }else if(parts[0]==='session'&&parts.length===4&&['terminal','job','transfer'].includes(parts[2])){
@@ -407,7 +407,7 @@ function renderDevice(){
   $('#device-capabilities').innerHTML=defs.map(([name,cap,iconName])=>{const iconSvg=icon(iconName);const advertised=caps.has(cap),availableNow=advertised&&d.online;return `<div class="capability-card ${availableNow?'available':''}"><div class="cap-icon">${iconSvg}</div><strong>${name}</strong><p>${advertised?(d.online?(cap==='desktop'?'Permission check needed':'Available'):'Device offline'):'Not advertised'}</p></div>`;}).join('');
   $$('#device-tabs .tab').forEach(t=>t.classList.toggle('active',t.dataset.deviceTab===state.tab));
   $$('.device-pane').forEach(p=>p.classList.toggle('hidden',p.id!==`device-${state.tab}`));
-  $('#terminal-open button').disabled=!available();$('#device-status').disabled=!available();$('#device-permissions').classList.toggle('hidden',!caps.has('desktop'));$('#device-permissions').disabled=!available();$$('#files-browse button').forEach(b=>b.disabled=!available());
+  $('#terminal-open button').disabled=!available();$('#device-status').disabled=!available();$('#device-permissions').classList.toggle('hidden',!caps.has('desktop'));$('#device-permissions').disabled=!available();$$('#files-browse button').forEach(b=>b.disabled=!available()||fileBrowseBusy);renderFilePaging();
   if(!$('#terminal-command').value||$('#terminal-command').dataset.device!==d.device_id){$('#terminal-command').value=d.platform==='windows'?'powershell.exe -NoLogo':d.platform==='macos'||d.platform==='darwin'?'/bin/zsh -l':'/bin/sh -i';$('#terminal-command').dataset.device=d.device_id;}
   const sessions=state.sessions.filter(s=>s.device_id===d.device_id);
   $('#device-sessions').innerHTML=sessions.length?sessions.map(sessionRow).join(''):emptyState('No sessions on this device.','terminal');
@@ -449,6 +449,7 @@ $('#terminal-open').addEventListener('submit',event=>{
 
 function clearPrivateViews(){
   state.authEpoch++;state.refreshPending=false;state.devices=[];state.sessions=[];state.activity=[];state.file=null;state.enrollment=null;detachSession();
+  clearFileListing();
   ['#file-content','#files-list','#session-output','#device-status-output','#enrollment-code','#install-command'].forEach(s=>$(s).replaceChildren());
   $('#file-preview').classList.add('hidden');$('#enroll-dialog').close();render();
 }
@@ -522,17 +523,38 @@ $('#session-stop').addEventListener('click',async()=>{
   catch(error){sessionError(a,error);if(!a.disposed)$('#session-stop').disabled=false;}
 });
 
-let fileRequest=0;
-async function browseFiles(path){
-  const request=++fileRequest,device=state.device,version=state.routeVersion;$('#device-error').textContent='';$('#files-note').textContent='Loading…';
-  try{
-    const result=await operation(device,{op:'files',action:{action:'list',path}});
-    if(request!==fileRequest||version!==state.routeVersion)return;
-    $('#files-path').value=result.path;$('#files-note').textContent=`${result.entries.length} entries${result.truncated?' · Listing limited to 1,000 entries. Open a smaller directory.':''}`;
-    const entries=[...result.entries].sort((a,b)=>(a.kind==='directory'?0:1)-(b.kind==='directory'?0:1)||a.name.localeCompare(b.name));
-    $('#files-list').innerHTML=entries.length?entries.map(e=>`<div class="file-row"><button class="device-link" data-file-path="${esc(e.path)}" data-file-kind="${esc(e.kind)}">${icon(e.kind==='directory'?'folder':'file')}${esc(e.name)}</button><span class="muted">${esc(e.kind)}</span><span class="muted">${e.size==null?'':`${e.size.toLocaleString()} B`}</span></div>`).join(''):emptyState('This directory is empty.','folder');
-  }catch(error){if(request===fileRequest&&version===state.routeVersion){$('#files-note').textContent='';$('#files-list').replaceChildren();$('#device-error').textContent=error.message;}}
+let fileRequest=0,fileBrowseBusy=false;
+function clearFileListing(){
+  fileRequest++;fileBrowseBusy=false;state.listing=null;$('#files-list').replaceChildren();$('#files-note').textContent='';$('#files-path').value='.';renderFilePaging();
 }
+function renderFilePaging(){
+  const listing=state.listing,visible=listing?.device===state.device&&listing.paging;
+  $('#files-pagination').classList.toggle('hidden',!visible);
+  const enabled=visible&&available()&&!fileBrowseBusy&&(currentDevice()?.capabilities||[]).includes('files.list_page');
+  $('#files-previous').disabled=!enabled||!listing?.history.length;
+  $('#files-next').disabled=!enabled||!listing?.hasMore;
+}
+async function browseFiles(path,page={offset:0,history:[]}){
+  const request=++fileRequest,device=state.device,version=state.routeVersion;
+  const paging=(currentDevice()?.capabilities||[]).includes('files.list_page');
+  fileBrowseBusy=true;$('#device-error').textContent='';$('#files-note').textContent='Loading…';renderDevice();
+  try{
+    const action={action:'list',path};if(paging){action.offset=page.offset;action.length=100;}
+    const result=await operation(device,{op:'files',action});
+    if(request!==fileRequest||version!==state.routeVersion)return;
+    const entries=[...result.entries],offset=Number.isSafeInteger(result.offset)?result.offset:page.offset;
+    const next=result.next_offset,canContinue=paging&&result.pagination_supported===true&&Number.isSafeInteger(next)&&next>offset&&next<=100000;
+    state.listing={device,path:result.path,offset,history:page.history,next,hasMore:canContinue&&result.has_more===true,paging};
+    const range=entries.length?`${offset+1}–${offset+entries.length}`:'0';
+    $('#files-path').value=result.path;
+    $('#files-note').textContent=paging?`Showing ${range}${Number.isSafeInteger(result.total_entries)?` of ${result.total_entries}`:''} entries. Browse again to refresh changed directories.${result.truncated&&!canContinue?' More entries exist, but continuation is unavailable; check the agent version.':''}`:`${entries.length} entries${result.truncated?' · Listing incomplete. Update this agent for page navigation or open a smaller directory.':''}`;
+    if(!paging)entries.sort((a,b)=>(a.kind==='directory'?0:1)-(b.kind==='directory'?0:1)||a.name.localeCompare(b.name));
+    $('#files-list').innerHTML=entries.length?entries.map(e=>`<div class="file-row"><button class="device-link" data-file-path="${esc(e.path)}" data-file-kind="${esc(e.kind)}">${icon(e.kind==='directory'?'folder':'file')}${esc(e.name)}</button><span class="muted">${esc(e.kind)}</span><span class="muted">${e.size==null?'':`${e.size.toLocaleString()} B`}</span></div>`).join(''):emptyState(offset?'No entries at this position. Browse again if the directory changed.':'This directory is empty.','folder');
+  }catch(error){if(request===fileRequest&&version===state.routeVersion){$('#files-note').textContent=state.listing?`Showing the last confirmed page for ${state.listing.path}.`:'Directory listing unavailable.';$('#device-error').textContent=error.message;}}
+  finally{if(request===fileRequest){fileBrowseBusy=false;if(version!==state.routeVersion)$('#files-note').textContent=state.listing?`Showing the last confirmed page for ${state.listing.path}. Browse again to refresh.`:'';renderDevice();}}
+}
+$('#files-next').addEventListener('click',()=>{const listing=state.listing;if(!fileBrowseBusy&&listing?.hasMore)browseFiles(listing.path,{offset:listing.next,history:[...listing.history,listing.offset]});});
+$('#files-previous').addEventListener('click',()=>{const listing=state.listing;if(!fileBrowseBusy&&listing?.history.length)browseFiles(listing.path,{offset:listing.history.at(-1),history:listing.history.slice(0,-1)});});
 $('#files-browse').addEventListener('submit',event=>{event.preventDefault();browseFiles($('#files-path').value);});
 $('#files-up').addEventListener('click',()=>{const path=$('#files-path').value,separator=path.includes('\\')?'\\':'/';browseFiles(path.replace(/[\\/]$/,'')+separator+'..');});
 $('#files-list').addEventListener('click',event=>{const b=event.target.closest('[data-file-path]');if(!b)return;if(b.dataset.fileKind==='directory')browseFiles(b.dataset.filePath);else{state.file={device:state.device,path:b.dataset.filePath,offset:0};previewFile(state.file);}});
