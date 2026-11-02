@@ -2,6 +2,21 @@
 
 # Installation and onboarding UX
 
+## Windows task-state inspection — 2 November 2026
+
+Startup status now queries Task Scheduler once through `Get-ScheduledTask` and
+parses a small JSON snapshot containing numeric state and recovery readiness.
+It no longer searches localized `schtasks` text for an English word. Native
+`TASK_STATE_RUNNING` is 4; running and reliable recovery settings are independent
+signals. An unreadable/malformed query cannot claim a healthy task and explains
+that the task may be missing or inaccessible.
+
+The Windows installer smoke requires the native CLI to report the running,
+recovery-enabled task after signed agent readiness. Local cross-platform parsing
+tests cover a non-English label, a misleading description containing "running",
+running-but-unreliable state, and malformed responses. Physical login/reboot and
+restricted-user acceptance remain separate from hosted Windows CI.
+
 ## Desired first-run flow
 
 From the dashboard:

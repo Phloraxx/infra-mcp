@@ -241,52 +241,68 @@ pub fn status() -> StartupStatus {
 
 #[cfg(windows)]
 pub fn status() -> StartupStatus {
-    let output = Command::new("schtasks")
-        .args(["/Query", "/TN", WINDOWS_TASK, "/FO", "LIST"])
+    // Query task state and recovery settings once, as typed JSON. Human-readable
+    // schtasks output is localized and can contain unrelated "running" text.
+    let output = Command::new("powershell.exe")
+        .args([
+            "-NoProfile",
+            "-NonInteractive",
+            "-Command",
+            WINDOWS_STATUS_SCRIPT,
+        ])
         .output();
-    let installed = output.as_ref().is_ok_and(|output| output.status.success());
-    let text = output
-        .ok()
-        .map(|output| String::from_utf8_lossy(&output.stdout).to_string())
-        .unwrap_or_default();
-    let active = installed && text.to_ascii_lowercase().contains("running");
-    let reliable = installed && windows_task_has_recovery();
+    if let Ok(output) = output
+        && output.status.success()
+        && let Ok(status) = windows_status_from_json(&output.stdout)
+    {
+        return status;
+    }
     StartupStatus {
         mechanism: "scheduled-task",
-        installed,
-        active,
-        reliable,
-        detail: if installed && !reliable {
-            "task lacks crash/battery/runtime recovery; run infra repair from Administrator PowerShell if the task is administrator-owned"
-        } else if active {
-            "scheduled task running with periodic recovery"
-        } else if installed {
-            "scheduled task installed with recovery but not running"
-        } else {
-            "scheduled task not installed"
-        }
-        .into(),
+        installed: false,
+        active: false,
+        reliable: false,
+        detail: "unable to verify the startup task; it may be missing or inaccessible. Run infra doctor under the intended user account".into(),
     }
 }
 
 #[cfg(windows)]
-fn windows_task_has_recovery() -> bool {
-    // A legacy task can be running now but fail forever after battery or 72h.
-    const SCRIPT: &str = r#"
+const WINDOWS_STATUS_SCRIPT: &str = r#"
+$ErrorActionPreference='Stop'
 $t=Get-ScheduledTask -TaskName 'Infra MCP Agent' -ErrorAction Stop
 $s=$t.Settings
 $logon=@($t.Triggers | Where-Object { $_.CimClass.CimClassName -eq 'MSFT_TaskLogonTrigger' }).Count -gt 0
 $retry=@($t.Triggers | Where-Object { $_.CimClass.CimClassName -eq 'MSFT_TaskTimeTrigger' -and $_.Repetition.Interval -eq 'PT5M' }).Count -gt 0
-if ($logon -and $retry -and $s.ExecutionTimeLimit -eq 'PT0S' -and
+$reliable=[bool]($logon -and $retry -and $s.ExecutionTimeLimit -eq 'PT0S' -and
     $s.RestartCount -ge 1 -and -not $s.DisallowStartIfOnBatteries -and
-    -not $s.StopIfGoingOnBatteries -and $s.StartWhenAvailable) { 'OK' } else { 'UNSAFE' }
+    -not $s.StopIfGoingOnBatteries -and $s.StartWhenAvailable)
+[pscustomobject]@{state=[int]$t.State;reliable=$reliable} | ConvertTo-Json -Compress
 "#;
-    Command::new("powershell.exe")
-        .args(["-NoProfile", "-NonInteractive", "-Command", SCRIPT])
-        .output()
-        .is_ok_and(|output| {
-            output.status.success() && String::from_utf8_lossy(&output.stdout).trim() == "OK"
-        })
+
+#[cfg(any(windows, test))]
+fn windows_status_from_json(bytes: &[u8]) -> serde_json::Result<StartupStatus> {
+    #[derive(serde::Deserialize)]
+    struct TaskSnapshot {
+        state: u32,
+        reliable: bool,
+    }
+    let task: TaskSnapshot = serde_json::from_slice(bytes)?;
+    // TASK_STATE_RUNNING=4 is the native Task Scheduler enum value, independent
+    // of display language: learn.microsoft.com/windows/win32/api/taskschd/ne-taskschd-task_state
+    let active = task.state == 4;
+    Ok(StartupStatus {
+        mechanism: "scheduled-task",
+        installed: true,
+        active,
+        reliable: task.reliable,
+        detail: if !task.reliable {
+            "task lacks crash/battery/runtime recovery; run infra repair from Administrator PowerShell if the task is administrator-owned"
+        } else if active {
+            "scheduled task running with periodic recovery"
+        } else {
+            "scheduled task installed with recovery but not running"
+        }.into(),
+    })
 }
 
 #[cfg(target_os = "linux")]
@@ -402,6 +418,25 @@ fn xml_escape(value: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn windows_status_uses_numeric_state_instead_of_localized_text() {
+        let running =
+            windows_status_from_json(br#"{"state":4,"reliable":true,"label":"En cours"}"#).unwrap();
+        assert!(running.installed && running.active && running.reliable);
+        let ready = windows_status_from_json(br#"{"state":3,"reliable":true,"description":"running is only a word in this description"}"#).unwrap();
+        assert!(ready.installed && !ready.active);
+    }
+
+    #[test]
+    fn windows_status_keeps_running_separate_from_startup_reliability() {
+        let task = windows_status_from_json(br#"{"state":4,"reliable":false}"#).unwrap();
+        assert!(task.active);
+        assert!(!task.reliable);
+        assert!(task.detail.contains("lacks"));
+        assert!(windows_status_from_json(br#"{"reliable":true}"#).is_err());
+        assert!(windows_status_from_json(b"Running").is_err());
+    }
 
     #[cfg(target_os = "linux")]
     #[test]
