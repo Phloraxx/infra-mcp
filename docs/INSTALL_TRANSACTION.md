@@ -63,7 +63,14 @@ pair fingerprint prevents stale handoffs overwriting a different pair.
 Unix waits for native activation. Windows cannot replace its currently executing
 CLI reliably, so a small local PowerShell relay waits for that parent to exit,
 runs the same locked native operation, records the result and cleans the source
-directory. It does not implement another swap/rollback state machine.
+directory. A bounded short launcher uses the ordinary `Open` shell verb to start
+the relay without inherited capture pipes; it does not request elevation. Only
+that launcher uses root-process ownership because the relay deliberately outlives
+it. Normal execution/startup commands retain process-tree ownership. See
+[Start-Process](https://learn.microsoft.com/en-us/powershell/module/microsoft.powershell.management/start-process?view=powershell-5.1).
+Direct Rust spawning with null stdio still inherits other inheritable Windows
+handles ([Rust 1.99 source](https://github.com/rust-lang/rust/blob/1.99.0/library/std/src/sys/process/windows.rs));
+CI exposed the resulting capture-EOF wait after the updater had printed pending. It does not implement another swap/rollback state machine.
 
 Windows returns **pending**, not completed. `infra status --json` adds
 `update_status` for the latest request. Per-request receipts live under
@@ -93,7 +100,9 @@ cleanup, absent candidates, foreign profiles, unrelated files and config/identit
 preservation. Hosted Windows acceptance additionally holds a CLI file open to
 force a real second-swap failure and drives a fixture-signed bad update through
 the deferred helper to check both restored hashes, stable identity and fresh
-signed operation. Record hosted results separately from physical-device tests.
+signed operation. The captured caller must return while the receipt is still
+pending, so finishing a background update before pipe EOF cannot mask a leaked
+handle. Record hosted results separately from physical-device tests.
 
 No live host, daily-use profile or excluded production gateway is used by these
 tests. Physical Windows standard-user/login/reboot/sleep/network, permissions,

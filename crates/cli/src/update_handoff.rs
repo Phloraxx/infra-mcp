@@ -3,7 +3,6 @@ use anyhow::{Context, Result};
 #[cfg(not(windows))]
 use anyhow::{anyhow, bail};
 use serde::{Deserialize, Serialize};
-#[cfg(not(windows))]
 use std::time::Duration;
 use std::{fs, path::Path, process::ExitCode};
 use uuid::Uuid;
@@ -203,39 +202,55 @@ try {{
 "#
         );
         fs::write(&script, text)?;
-        let spawned = std::process::Command::new("powershell.exe")
-            .args([
-                "-NoLogo",
-                "-NoProfile",
-                "-NonInteractive",
-                "-ExecutionPolicy",
-                "Bypass",
-                "-File",
-            ])
-            .arg(&script)
-            .stdin(std::process::Stdio::null())
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .spawn();
-        if let Ok(child) = &spawned {
-            record_owner(
-                state,
-                id,
-                "pending",
-                "Waiting for native pair activation; not yet complete.",
-                child.id(),
-            )?;
-        }
-        drop(guard);
-        if let Err(error) = spawned {
+        // ShellExecute starts the relay without inheriting arbitrary capture
+        // handles from this CLI. Stdio::null alone does not prevent that on
+        // Windows. The short launcher is owned; the relay has its own lifetime.
+        let launcher_script = format!(
+            "$ErrorActionPreference='Stop';$p=Start-Process -FilePath 'powershell.exe' -ArgumentList @('-NoLogo','-NoProfile','-NonInteractive','-ExecutionPolicy','Bypass','-File','\"{}\"') -Verb Open -WindowStyle Hidden -PassThru;$p.Id",
+            quote(&script)
+        );
+        let mut launcher = tokio::process::Command::new("powershell.exe");
+        launcher.args([
+            "-NoLogo",
+            "-NoProfile",
+            "-NonInteractive",
+            "-Command",
+            &launcher_script,
+        ]);
+        let launched = infra_platform::command_runner::run_detached_launcher(
+            launcher,
+            Duration::from_secs(15),
+            4096,
+        )
+        .await;
+        let owner_pid = match launched {
+            Ok(output) if output.exit_code == Some(0) && !output.truncated => output
+                .stdout
+                .trim()
+                .parse::<u32>()
+                .ok()
+                .filter(|pid| *pid > 0),
+            _ => None,
+        };
+        let Some(owner_pid) = owner_pid else {
             record(
                 state,
                 id,
-                "failed",
-                "Could not launch the activation helper; installed pair unchanged.",
+                "outcome_unknown",
+                "No reliable relay PID was returned; inspect the receipt and pair before retrying.",
             )?;
-            return Err(error).context("start native activation handoff");
-        }
+            return Err(anyhow::anyhow!(
+                "activation handoff outcome unknown; recovery files retained"
+            ));
+        };
+        record_owner(
+            state,
+            id,
+            "pending",
+            "Waiting for native pair activation; not yet complete.",
+            owner_pid,
+        )?;
+        drop(guard);
         println!(
             "Update {id} is pending. This command must exit before Windows can replace the CLI. Use infra status to inspect complete/failed; success is not yet confirmed."
         );

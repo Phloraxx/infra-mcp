@@ -109,6 +109,8 @@ def main():
                 assert not list(target.glob('.infra.update.*'))
                 assert not list(target.glob('.infra-agent.update.*'))
                 update_id=(profile/'update-current').read_text().strip()
+                initial=json.loads((profile/'updates'/f'{update_id}.json').read_text())
+                assert initial['phase']=='pending', ('caller waited for background activation instead of returning pending',initial)
                 deadline=time.monotonic()+240
                 while time.monotonic()<deadline:
                     try: receipt=json.loads((profile/'updates'/f'{update_id}.json').read_text())
