@@ -11,7 +11,8 @@ CLI for native setup; explicit version requests bypass that fast path.
 The older pinned `v0.1.0-rc.1` artifact predates `--build-info`/native activation;
 it is rejected before installed files are changed. Development uses `--source-dir`
 or `-SourceDir`. Download SHA-256 sidecars remain integrity checks; first-install
-publisher authentication, OS signing and downgrade policy remain separate gates.
+publisher authentication and OS signing remain separate gates. Signed update
+version rules are documented in [RELEASE_SIGNING.md](RELEASE_SIGNING.md).
 
 ## Exclusion and recovery
 
@@ -58,7 +59,11 @@ The updater still verifies signed manifest/hash metadata before staging. It then
 delegates to the candidate native CLI. Matching package versions are required
 within the new pair, while upgrades may change the package version. Releases
 without activation protocol 1 fail before installed changes. An expected prior
-pair fingerprint prevents stale handoffs overwriting a different pair.
+pair fingerprint prevents stale handoffs overwriting a different pair. Signed
+updates reject versions older than the running CLI and require both candidate
+build-info versions to match the manifest before activation; same-version repair
+remains allowed. This does not impose a persistent version floor on manual repair
+or change internal transaction rollback.
 
 Unix waits for native activation. Windows cannot replace its currently executing
 CLI reliably, so a small local PowerShell relay waits for that parent to exit,

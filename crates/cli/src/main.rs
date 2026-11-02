@@ -522,7 +522,7 @@ async fn update_command(
         && using_default_release_url
     {
         return Err(anyhow!(
-            "No stable Infra release is published. GitHub /releases/latest excludes prereleases; this is not an update or network repair failure. Use an explicitly tested signed prerelease tag such as --version v0.1.0-rc.1 for a manual update; unattended updates should remain disabled until a stable release passes Windows rollback acceptance."
+            "No stable Infra release is published. GitHub /releases/latest excludes prereleases; this is not an update or network repair failure. Use --version <compatible-tag> only for a tested signed prerelease that supports native activation and is not older than this CLI; no update was applied."
         ));
     }
     let manifest_bytes = manifest_response.error_for_status()?.bytes().await?;
@@ -535,12 +535,11 @@ async fn update_command(
         .await?;
     let manifest =
         release_verify::verify_manifest(&manifest_bytes, &manifest_signature, &public_key)?;
-    if version != "latest" && manifest.version != version {
-        return Err(anyhow!(
-            "signed release version {} does not match requested {version}",
-            manifest.version
-        ));
-    }
+    let release_version = release_verify::authorize_update_version(
+        &manifest.version,
+        env!("CARGO_PKG_VERSION"),
+        &version,
+    )?;
 
     let staged_cli = install_dir.join(format!(".infra.update.{}{}", std::process::id(), extension));
     let staged_agent = install_dir.join(format!(
@@ -575,7 +574,15 @@ async fn update_command(
     make_executable_like(&staged_cli, &cli_path)?;
     make_executable_like(&staged_agent, &agent_path)?;
 
-    update_handoff::apply(state_dir, install_dir, &staged_cli, &staged_agent, guard).await
+    update_handoff::apply(
+        state_dir,
+        install_dir,
+        &staged_cli,
+        &staged_agent,
+        &release_version,
+        guard,
+    )
+    .await
 }
 
 fn release_asset_descriptor() -> anyhow::Result<(String, &'static str)> {
@@ -607,6 +614,10 @@ async fn download_verified_release_asset(
     manifest: &release_verify::ReleaseManifest,
 ) -> anyhow::Result<()> {
     let name = format!("{binary}-{asset}{extension}");
+    let expected = manifest
+        .assets
+        .get(&name)
+        .ok_or_else(|| anyhow!("asset {name} is missing from the signed release manifest"))?;
     let bytes = client
         .get(format!("{base}/{name}"))
         .send()
@@ -614,10 +625,6 @@ async fn download_verified_release_asset(
         .error_for_status()?
         .bytes()
         .await?;
-    let expected = manifest
-        .assets
-        .get(&name)
-        .ok_or_else(|| anyhow!("asset {name} is missing from the signed release manifest"))?;
     let actual = format!("{:x}", Sha256::digest(&bytes));
     if actual != *expected {
         return Err(anyhow!(

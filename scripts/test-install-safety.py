@@ -94,7 +94,7 @@ def main():
             thread=threading.Thread(target=server.serve_forever,daemon=True);thread.start()
             try:
                 try:
-                    queued=run([target/CLI,'update','--version','v-fixture','--base-url',f'http://127.0.0.1:{server.server_port}','--trusted-update-key',public,'--state-dir',profile],timeout=40)
+                    queued=run([target/CLI,'update','--version','v'+info['version'],'--base-url',f'http://127.0.0.1:{server.server_port}','--trusted-update-key',public,'--state-dir',profile],timeout=40)
                 except subprocess.TimeoutExpired as error:
                     print('Updater timeout output:',repr(error.stdout),repr(error.stderr),flush=True)
                     print('Fixture HTTP requests:',requests,flush=True)

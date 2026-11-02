@@ -3,6 +3,7 @@
 use anyhow::{Context, Result, anyhow, bail};
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use ed25519_dalek::{Signature, VerifyingKey};
+use semver::Version;
 use serde::Deserialize;
 use std::collections::HashMap;
 
@@ -10,6 +11,44 @@ use std::collections::HashMap;
 pub struct ReleaseManifest {
     pub version: String,
     pub assets: HashMap<String, String>,
+}
+
+fn release_version(value: &str) -> Result<Version> {
+    Version::parse(value.strip_prefix('v').unwrap_or(value))
+        .with_context(|| format!("invalid_release_version: expected SemVer, received {value:?}"))
+}
+
+/// A valid old signature does not authorize a downgrade of this running CLI.
+/// Same-version repair is allowed; build metadata does not raise precedence.
+pub fn authorize_update_version(release: &str, current: &str, requested: &str) -> Result<String> {
+    let release = release_version(release)?;
+    let current = Version::parse(current).context("invalid running CLI package version")?;
+    if requested != "latest" && release != release_version(requested)? {
+        bail!(
+            "update_version_mismatch: signed release {release} does not match requested {requested}"
+        );
+    }
+    if release.cmp_precedence(&current).is_lt() {
+        bail!(
+            "update_downgrade_blocked: release {release} is older than running CLI {current}; automatic downgrade is not supported"
+        );
+    }
+    Ok(release.to_string())
+}
+
+pub fn verify_binary_versions(release: &str, cli: &str, agent: &str) -> Result<()> {
+    let expected = release_version(release)?;
+    for (component, actual) in [("infra", cli), ("infra-agent", agent)] {
+        let actual = Version::parse(actual).with_context(|| {
+            format!("update_binary_version_mismatch: invalid {component} package version")
+        })?;
+        if actual != expected {
+            bail!(
+                "update_binary_version_mismatch: signed release {expected}, {component} reports {actual}; installed pair unchanged"
+            );
+        }
+    }
+    Ok(())
 }
 
 pub fn verify_manifest(
@@ -48,6 +87,48 @@ pub fn verify_manifest(
 mod tests {
     use super::*;
     use ed25519_dalek::{Signer, SigningKey};
+    #[test]
+    fn update_precedence_rejects_replay_and_handles_prereleases_and_build_metadata() {
+        for (target, current) in [
+            ("v1.9.9", "2.0.0"),
+            ("v2.0.0-rc.9", "2.0.0"),
+            ("v2.0.0-rc.2", "2.0.0-rc.10"),
+        ] {
+            assert!(
+                authorize_update_version(target, current, "latest")
+                    .unwrap_err()
+                    .to_string()
+                    .starts_with("update_downgrade_blocked:")
+            );
+        }
+        for (target, current) in [
+            ("v2.0.0", "2.0.0-rc.10"),
+            ("v2.0.0-rc.10", "2.0.0-rc.2"),
+            ("v2.0.0+old", "2.0.0+new"),
+            ("v2.0.0", "2.0.0"),
+        ] {
+            assert!(authorize_update_version(target, current, "latest").is_ok());
+        }
+        assert!(authorize_update_version("v2.0.0", "1.0.0", "2.0.0").is_ok());
+        assert!(authorize_update_version("v2.0.0+one", "1.0.0", "v2.0.0+two").is_err());
+        for invalid in [
+            "v-fixture",
+            "v1",
+            "01.0.0",
+            "v1.0.0-01",
+            " 1.0.0",
+            "vv1.0.0",
+        ] {
+            assert!(authorize_update_version(invalid, "1.0.0", "latest").is_err());
+        }
+    }
+    #[test]
+    fn both_binaries_must_match_the_signed_version_including_build_metadata() {
+        assert!(verify_binary_versions("v2.0.0+one", "2.0.0+one", "2.0.0+one").is_ok());
+        assert!(verify_binary_versions("v2.0.0", "1.0.0", "1.0.0").is_err());
+        assert!(verify_binary_versions("v2.0.0", "2.0.0", "2.0.1").is_err());
+        assert!(verify_binary_versions("v2.0.0+one", "2.0.0+two", "2.0.0+one").is_err());
+    }
     #[test]
     fn signatures_pin_exact_manifest_bytes() {
         let signer = SigningKey::from_bytes(&[11u8; 32]);

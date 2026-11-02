@@ -129,3 +129,13 @@ acceptance, compatible-release requirements and unresolved physical-device gates
 The installer slice passes 106 local workspace tests, strict Clippy, formatting,
 the disposable installer/dashboard smoke and owned-file rollback acceptance.
 Hosted Windows rollback and combined-candidate results must be recorded separately.
+
+
+## Release version integrity
+
+The follow-up release slice rejects signed update downgrades relative to the
+running CLI and requires manifest/request/binary version agreement. Same-version
+repair and internal transaction rollback remain supported. Release automation
+checks tags/build metadata and exact platform inventory/checksums before signing,
+and records the tagged source commit. See [RELEASE_SIGNING.md](RELEASE_SIGNING.md)
+for replay limits, fixture acceptance and first-install distribution gates.
