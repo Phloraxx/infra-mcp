@@ -129,8 +129,9 @@
         <div id="device-files" class="device-pane panel panel-large files-workspace hidden">
           <div class="section-head"><div><h2>Browse files</h2><p>Inspect directories and preview bounded text files.</p></div></div>
           <form id="files-browse" class="files-toolbar"><label><span>Path</span><input id="files-path" value="." required></label><button class="secondary">Browse</button><button id="files-up" type="button" class="ghost-button">↑ Parent</button></form>
-          <p id="files-note" class="muted small"></p>
-          <div class="file-table-head"><span>Name</span><span>Size</span><span>Type</span></div><div id="files-list" class="files-list"></div>
+          <p id="files-note" class="muted small" role="status" aria-live="polite"></p>
+          <div class="file-table-head"><span>Name</span><span>Type</span><span>Size</span></div><div id="files-list" class="files-list"></div>
+          <nav id="files-pagination" class="preview-footer hidden" aria-label="Directory pages"><button id="files-previous" type="button" class="secondary" disabled>Previous page</button><button id="files-next" type="button" class="secondary" disabled>Next page</button></nav>
           <section id="file-preview" class="file-preview hidden"><div class="section-head"><div><h2 id="file-name"></h2></div><button id="file-close" class="ghost-button">Close</button></div><pre id="file-content"></pre><div class="preview-footer"><p id="file-range" class="muted small"></p><button id="file-next" class="secondary hidden">Next 32 KB</button></div></section>
         </div>
 
