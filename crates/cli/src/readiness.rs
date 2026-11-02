@@ -10,6 +10,7 @@ pub struct ConnectionStatus {
     pub code: &'static str,
     pub detail: &'static str,
     pub verified_unix_ms: Option<u64>,
+    pub probe_started_unix_ms: Option<u64>,
     pub age_ms: Option<u64>,
 }
 
@@ -35,6 +36,7 @@ fn problem(code: &'static str, detail: &'static str) -> ConnectionStatus {
         code,
         detail,
         verified_unix_ms: None,
+        probe_started_unix_ms: None,
         age_ms: None,
     }
 }
@@ -76,6 +78,12 @@ fn evaluate(
             "The receipt belongs to a different process, gateway or connection. Wait for fresh verification.",
         );
     }
+    if proof.probe_started_unix_ms > proof.verified_unix_ms {
+        return problem(
+            "connection_clock_invalid",
+            "Connection receipt predates its probe. Check the system clock and wait for fresh verification.",
+        );
+    }
     let Some(age) = now.checked_sub(proof.verified_unix_ms) else {
         return problem(
             "connection_clock_invalid",
@@ -88,6 +96,7 @@ fn evaluate(
             code: "connection_verified",
             detail: "Signed status roundtrip verified within the last 30 seconds.",
             verified_unix_ms: None,
+            probe_started_unix_ms: None,
             age_ms: None,
         }
     } else {
@@ -97,6 +106,7 @@ fn evaluate(
         )
     };
     result.verified_unix_ms = Some(proof.verified_unix_ms);
+    result.probe_started_unix_ms = Some(proof.probe_started_unix_ms);
     result.age_ms = Some(age);
     result
 }
@@ -122,6 +132,7 @@ mod tests {
             gateway_epoch: epoch,
             agent_instance_id: instance,
             connection_generation: 7,
+            probe_started_unix_ms: 99_999,
             verified_unix_ms: 100_000,
         };
         (config, runtime, proof)

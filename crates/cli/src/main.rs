@@ -355,7 +355,7 @@ async fn wait_for_verified_runtime(
             if tokio::time::Instant::now() < deadline
                 && connection.verified
                 && connection
-                    .verified_unix_ms
+                    .probe_started_unix_ms
                     .is_some_and(|time| time > started_unix_ms)
             {
                 return Ok(runtime);
@@ -1481,6 +1481,7 @@ mod tests {
             gateway_epoch: runtime.gateway_epoch.unwrap(),
             agent_instance_id: runtime.agent_instance_id.unwrap(),
             connection_generation: 7,
+            probe_started_unix_ms: infra_local_state::now_ms().saturating_sub(100),
             verified_unix_ms: infra_local_state::now_ms().saturating_sub(100),
         };
         infra_local_state::write_connection_proof(dir.path(), &proof).unwrap();
@@ -1490,9 +1491,25 @@ mod tests {
                 .is_err()
         );
         let path = dir.path().to_owned();
+        // A delayed confirmation of a pre-check probe cannot certify a new check.
+        let delayed = proof.clone();
+        let delayed_path = path.clone();
+        let delayed_writer = tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+            let mut delayed = delayed;
+            delayed.verified_unix_ms = infra_local_state::now_ms();
+            infra_local_state::write_connection_proof(&delayed_path, &delayed).unwrap();
+        });
+        assert!(
+            wait_for_verified_runtime(dir.path(), None, Duration::from_millis(80), |_| true)
+                .await
+                .is_err()
+        );
+        delayed_writer.await.unwrap();
         let writer = tokio::spawn(async move {
             tokio::time::sleep(Duration::from_millis(25)).await;
             proof.verified_unix_ms = infra_local_state::now_ms();
+            proof.probe_started_unix_ms = proof.verified_unix_ms;
             infra_local_state::write_connection_proof(&path, &proof).unwrap();
         });
         let current = wait_for_verified_runtime(dir.path(), None, Duration::from_secs(2), |_| true)

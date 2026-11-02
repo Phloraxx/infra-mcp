@@ -8,7 +8,7 @@ use std::{
 use tokio::sync::watch;
 
 #[derive(Default)]
-pub struct Exchange(Option<(ConnectionProbeReply, Instant)>);
+pub struct Exchange(Option<(ConnectionProbeReply, Instant, u64)>);
 impl Exchange {
     pub fn reply(
         &mut self,
@@ -23,17 +23,18 @@ impl Exchange {
             pid: std::process::id(),
             protocol: PROTOCOL_VERSION,
         };
-        self.0 = Some((reply.clone(), Instant::now()));
+        self.0 = Some((reply.clone(), Instant::now(), infra_local_state::now_ms()));
         Some(reply)
     }
-    pub fn confirmed(&mut self, reply: &ConnectionProbeReply) -> bool {
-        let valid = self.0.as_ref().is_some_and(|(expected, issued)| {
+    pub fn confirmed(&mut self, reply: &ConnectionProbeReply) -> Option<u64> {
+        let valid = self.0.as_ref().is_some_and(|(expected, issued, _)| {
             *expected == *reply && issued.elapsed() <= Duration::from_secs(10)
         });
         if valid {
-            self.0 = None;
+            self.0.take().map(|(_, _, started)| started)
+        } else {
+            None
         }
-        valid
     }
 }
 
@@ -75,17 +76,17 @@ mod tests {
         let reply = exchange.reply(probe.clone(), 7).unwrap();
         let mut wrong = reply.clone();
         wrong.pid += 1;
-        assert!(!exchange.confirmed(&wrong));
+        assert!(exchange.confirmed(&wrong).is_none());
         wrong = reply.clone();
         wrong.protocol = 0;
-        assert!(!exchange.confirmed(&wrong));
+        assert!(exchange.confirmed(&wrong).is_none());
         wrong = reply.clone();
         wrong.probe.nonce = Uuid::new_v4();
-        assert!(!exchange.confirmed(&wrong));
+        assert!(exchange.confirmed(&wrong).is_none());
         exchange.0.as_mut().unwrap().1 = Instant::now() - Duration::from_secs(11);
-        assert!(!exchange.confirmed(&reply));
+        assert!(exchange.confirmed(&reply).is_none());
         exchange.reply(probe, 7);
-        assert!(exchange.confirmed(&reply));
-        assert!(!exchange.confirmed(&reply));
+        assert!(exchange.confirmed(&reply).is_some());
+        assert!(exchange.confirmed(&reply).is_none());
     }
 }

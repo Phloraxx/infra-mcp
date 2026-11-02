@@ -24,6 +24,7 @@ pub struct ConnectionProof {
     pub gateway_epoch: Uuid,
     pub agent_instance_id: Uuid,
     pub connection_generation: u64,
+    pub probe_started_unix_ms: u64,
     pub verified_unix_ms: u64,
 }
 
@@ -268,6 +269,7 @@ mod tests {
             gateway_epoch: Uuid::new_v4(),
             agent_instance_id: Uuid::new_v4(),
             connection_generation: 7,
+            probe_started_unix_ms: 1,
             verified_unix_ms: 1,
         };
         assert!(read_connection_proof(dir.path()).unwrap().is_none());

@@ -36,7 +36,7 @@ does not certify desktop permissions, all tool capabilities or job availability.
 
 `connection-proof.json` is a versioned diagnostic receipt. It contains PID,
 device ID, gateway epoch, agent-instance ID, connection generation, endpoint
-SHA-256 fingerprint and verification time. It contains no key/token and does not
+SHA-256 fingerprint, probe start time and verification time. It contains no key/token and does not
 copy the configured endpoint URL. It is local user state, not an independent OS
 attestation; a process running as that user can alter local diagnostics.
 
@@ -48,14 +48,14 @@ Its timestamp must not be in the future and must be at most 30 seconds old.
 - `infra status --json` remains a snapshot with the normal startup inspection.
   Its new `connection` object distinguishes verified, stale, missing, unreadable,
   mismatched and offline evidence. Plain output labels runtime state as recorded.
-- `infra status --verify --json` waits for a confirmation newer than this check.
+- `infra status --verify --json` waits for a probe begun after this check and its matching confirmation.
   Default wait: 15 seconds; `--timeout-ms` accepts 1..60000. Failure exits nonzero
   with `connection.verified: false` and `connection_verification_failed`.
   This mode skips external startup inspection and returns `startup: null`;
   ordinary status still returns its existing startup object. Local filesystem
   and OS process-query failure limits are not a whole-machine deadline guarantee.
 - Setup, startup-enabled legacy install and repair require a newly confirmed
-  receipt. Healthy Windows reruns can keep the same PID and generation while
+  receipt from a probe begun after the check starts. Healthy Windows reruns can keep the same PID and generation while
   waiting for its next roundtrip. `--no-startup` still only configures/pairs and
   explicitly skips startup; it does not claim an online connection.
 - Reconnect/update waits additionally require a changed process/connection.
