@@ -125,6 +125,20 @@ mod tests {
             "contending operation must not recreate a removed profile"
         );
         drop(first);
-        assert!(LifecycleLocks::acquire(&install, &state).is_ok());
+        // A parallel test may fork while the guard exists; inherited handles
+        // close on exec. Require bounded release, not zero scheduling delay.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        let _reacquired = loop {
+            match LifecycleLocks::acquire(&install, &state) {
+                Ok(guard) => break guard,
+                Err(error)
+                    if error.to_string().starts_with("installation_busy:")
+                        && std::time::Instant::now() < deadline =>
+                {
+                    std::thread::sleep(std::time::Duration::from_millis(10));
+                }
+                Err(error) => panic!("lock did not release after dropping owner: {error:#}"),
+            }
+        };
     }
 }
