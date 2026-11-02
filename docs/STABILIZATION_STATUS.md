@@ -58,10 +58,30 @@ results must be recorded separately; local macOS success is not Windows proof.
 The following stacked MCP-contract slice is implemented in source: action enums,
 field/shell/limit descriptions, native MCP failure flags and recovery fields,
 native screenshot image blocks with JSON compatibility, malformed-exec response
-classification, and rejection of ineffective directory-list pagination options.
+classification, and validation of directory-list pagination options.
 An added HTTP smoke verifies discovery and error results using disposable local
-state. Full pagination, granular capability metadata and actual client-side image
-acceptance remain open.
+state.
+
+The following pagination slice adds native entry-offset pages, a deterministic
+whole-directory filename order, continuation/count metadata, a 1,000-entry page
+cap, a 512 KiB response cap and a 100,000-name scan cap. Explicit pagination is
+gated on `files.list_page` from the exact live connection, so legacy/Android
+agents cannot silently ignore the new optional wire fields. Their no-options
+list remains supported. Offsets are not snapshots under directory mutation.
+Tests cover traversal beyond the old cap, byte-shortened continuation, invalid
+limits, symlinks, Linux lossy filename collisions, legacy wire shape and stale
+registry capabilities. Product smoke exercises actual signed-agent MCP pages.
+Broader granular capability/readiness metadata and actual client-side image
+acceptance remain open; Android pagination is not implemented by this slice.
+
+The dashboard pagination slice uses 100-entry requests when `files.list_page`
+is advertised, with Previous/Next history built from actual continuation
+offsets. It renders one page at a time, retains the last confirmed page on error,
+ignores responses from old routes/devices and clears paths/history on sign-out
+or device switch. Old agents retain a no-options list with an honest incomplete
+listing message. Browser tests cover keyboard/mobile controls, byte-shortened
+pages, failure/recovery, capability loss, stale responses and private-state
+clearing. These offsets still are not directory snapshots.
 
 The dashboard-recovery slice adds a ten-second budget covering API response
 headers and body reads, visibly stale last-confirmed data, and explicit uncertainty

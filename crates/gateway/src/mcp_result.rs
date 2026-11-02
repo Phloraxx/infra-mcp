@@ -87,6 +87,7 @@ impl From<String> for ToolError {
             | "device_revoked"
             | "device_registry_error"
             | "device_connection_closed"
+            | "unsupported"
             | "agent_busy" => prefix,
             _ => "operation_failed",
         };
