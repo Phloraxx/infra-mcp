@@ -54,7 +54,7 @@ fn git(
         .args(args)
         .env("GIT_TERMINAL_PROMPT", "0")
         .env("GCM_INTERACTIVE", "Never");
-    require_success(run(&mut command, timeout, OUTPUT_LIMIT)?)
+    require_success(run(command, timeout, OUTPUT_LIMIT)?)
 }
 
 fn status(repo: &str) -> Result<serde_json::Value, String> {
@@ -302,7 +302,7 @@ mod tests {
         init.args(["init", "-q"]).current_dir(dir.path());
         // Fixture setup is not a latency assertion; allow slow CI process startup.
         // Production Git deadlines remain unchanged.
-        require_success(run(&mut init, Duration::from_secs(30), 4096).unwrap()).unwrap();
+        require_success(run(init, Duration::from_secs(30), 4096).unwrap()).unwrap();
         let value = status(dir.path().to_str().unwrap()).unwrap();
         assert_eq!(value["clean"], true);
     }

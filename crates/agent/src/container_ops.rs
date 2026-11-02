@@ -34,7 +34,7 @@ fn docker(
 ) -> Result<crate::command_runner::CommandOutput, String> {
     let mut command = Command::new("docker");
     command.args(args);
-    require_success(run(&mut command, timeout, limit)?)
+    require_success(run(command, timeout, limit)?)
 }
 
 fn list() -> Result<serde_json::Value, String> {
