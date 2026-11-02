@@ -60,3 +60,18 @@ localized Windows task status, update/rollback acceptance, bounded dashboard
 requests, cross-client coverage, and physical sleep/login/reboot tests remain
 separate work. No claim of production readiness or deployed incident resolution
 follows from these code changes.
+
+## Fresh connection readiness
+
+The separate readiness slice replaces cached-online/PID success with a fresh
+nonce/status roundtrip on the exact signed connection selected by the gateway.
+Native receipts bind process/device, epoch, instance, generation and endpoint
+fingerprint. They expire after 30 seconds; lifecycle waits require confirmation
+after the check starts. A single coalescing disk writer stays outside the socket
+loop. `status --verify` skips external startup queries and returns a failing
+connection result if no fresh receipt arrives. Ordinary status/doctor separate
+connection evidence from startup, credential history and HTTP health.
+
+Older/non-advertising peers retain legacy heartbeats. Strict checks need both
+gateway and native agent support; rollout order and pre-extension rollback
+compatibility remain explicit gates. See [CONNECTION_READINESS.md](CONNECTION_READINESS.md).

@@ -201,6 +201,11 @@ Rules:
 - incompatible semantics require a new negotiated protocol version.
 - agents should fail with a clear `protocol_mismatch` rather than connecting partially.
 
+The opt-in `connection.readiness_v1` extension adds nonce/status probe and
+confirmation frames only for signed agents advertising support. It preserves
+legacy Ping/Pong and protocol version 1; see [connection readiness](CONNECTION_READINESS.md)
+for frame semantics, bounded state, receipt binding and compatibility limits.
+
 ## 14. Reconnect and resume
 
 After reconnect:

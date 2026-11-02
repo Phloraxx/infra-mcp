@@ -1,5 +1,6 @@
 use anyhow::{Context, anyhow};
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use std::{
     fs,
     path::{Path, PathBuf},
@@ -9,6 +10,26 @@ use uuid::Uuid;
 
 pub const CONFIG_VERSION: u8 = 1;
 pub const RUNTIME_VERSION: u8 = 1;
+pub const CONNECTION_PROOF_VERSION: u8 = 1;
+pub const MAX_CONNECTION_PROOF_AGE_MS: u64 = 30_000;
+
+/// A local receipt of a fresh nonce/status roundtrip over the signed socket.
+/// This contains no credentials and is not an OS/publisher attestation.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ConnectionProof {
+    pub version: u8,
+    pub pid: u32,
+    pub device_id: String,
+    pub gateway_fingerprint: String,
+    pub gateway_epoch: Uuid,
+    pub agent_instance_id: Uuid,
+    pub connection_generation: u64,
+    pub verified_unix_ms: u64,
+}
+
+pub fn gateway_fingerprint(url: &str) -> String {
+    format!("{:x}", Sha256::digest(url.as_bytes()))
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct LocalConfig {
@@ -52,6 +73,10 @@ pub struct RuntimeStatus {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub connection_generation: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gateway_epoch: Option<Uuid>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_instance_id: Option<Uuid>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_connected_unix_ms: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub credential_storage: Option<String>,
@@ -71,6 +96,8 @@ impl RuntimeStatus {
             device_id: None,
             device_name: None,
             connection_generation: None,
+            gateway_epoch: None,
+            agent_instance_id: None,
             last_connected_unix_ms: None,
             credential_storage: None,
             credential_verified_unix_ms: None,
@@ -134,6 +161,19 @@ pub fn read_runtime(state_dir: &Path) -> anyhow::Result<Option<RuntimeStatus>> {
 pub fn write_runtime(state_dir: &Path, status: &RuntimeStatus) -> anyhow::Result<()> {
     ensure_state_dir(state_dir)?;
     atomic_json(&state_dir.join("runtime.json"), status)
+}
+
+pub fn read_connection_proof(state_dir: &Path) -> anyhow::Result<Option<ConnectionProof>> {
+    read_optional_json(
+        &state_dir.join("connection-proof.json"),
+        CONNECTION_PROOF_VERSION,
+        |value: &ConnectionProof| value.version,
+    )
+}
+
+pub fn write_connection_proof(state_dir: &Path, proof: &ConnectionProof) -> anyhow::Result<()> {
+    ensure_state_dir(state_dir)?;
+    atomic_json(&state_dir.join("connection-proof.json"), proof)
 }
 
 pub fn identity_path(state_dir: &Path) -> PathBuf {
@@ -213,6 +253,33 @@ pub fn now_ms() -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn connection_receipts_are_versioned_and_optional_for_old_runtime_state() {
+        let dir = tempfile::tempdir().unwrap();
+        let legacy = serde_json::json!({"version":1,"pid":42,"state":"online","updated_unix_ms":1});
+        let runtime: RuntimeStatus = serde_json::from_value(legacy).unwrap();
+        assert!(runtime.gateway_epoch.is_none() && runtime.agent_instance_id.is_none());
+        let mut proof = ConnectionProof {
+            version: CONNECTION_PROOF_VERSION,
+            pid: 42,
+            device_id: "fixture".into(),
+            gateway_fingerprint: gateway_fingerprint("ws://127.0.0.1:12345/agent"),
+            gateway_epoch: Uuid::new_v4(),
+            agent_instance_id: Uuid::new_v4(),
+            connection_generation: 7,
+            verified_unix_ms: 1,
+        };
+        assert!(read_connection_proof(dir.path()).unwrap().is_none());
+        write_connection_proof(dir.path(), &proof).unwrap();
+        assert_eq!(
+            read_connection_proof(dir.path()).unwrap(),
+            Some(proof.clone())
+        );
+        proof.version += 1;
+        write_connection_proof(dir.path(), &proof).unwrap();
+        assert!(read_connection_proof(dir.path()).is_err());
+    }
     use tempfile::tempdir;
 
     #[test]
