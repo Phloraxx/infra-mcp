@@ -201,6 +201,11 @@ Rules:
 - incompatible semantics require a new negotiated protocol version.
 - agents should fail with a clear `protocol_mismatch` rather than connecting partially.
 
+The opt-in `connection.readiness_v1` extension adds nonce/status probe and
+confirmation frames only for signed agents advertising support. It preserves
+legacy Ping/Pong and protocol version 1; see [connection readiness](CONNECTION_READINESS.md)
+for frame semantics, bounded state, receipt binding and compatibility limits.
+
 ## 14. Reconnect and resume
 
 After reconnect:
@@ -235,3 +240,20 @@ The current PTY/job streams use byte-offset reads over typed RPC rather than the
 ### Current transfer RPC mapping
 
 The first implementation maps resumable transfer semantics onto bounded control RPCs: `upload_begin`, `upload_chunk`, `upload_commit`, `download_begin`, `download_chunk`, `status`, `list`, and `cancel`. Chunks are capped so their base64 representation remains comfortably below the control-frame limit. The persistent transfer ID and byte offsets provide resume semantics now; a later dedicated binary stream transport may replace base64 chunks without changing the higher-level lifecycle.
+
+## 17. Additive directory-list pagination (2 November 2026)
+
+`FileAction::List` retains `{"action":"list","path":"..."}`. Optional
+`offset` (u64 entry index) and `length` (entry count) are omitted on serialization
+when absent. Older JSON remains decodable and the protocol version stays 1.
+Both gateway and native agent validate explicit bounds (offset <=100,000;
+length 1..1,000). The agent also limits scan count and serialized page bytes.
+
+Because an old parser may silently ignore added optional fields, the gateway
+must check `files.list_page` on the exact live connection selected for dispatch
+before sending either field. Cached registry capabilities do not authorize it.
+Missing capability yields a non-retryable `unsupported` tool error before queue
+admission; no request or pending waiter is created. Requests without either
+field retain the old operation. New results add continuation/count/order fields
+without removing `entries` or `truncated`. No new session, spool, daemon or
+automatic retry is introduced; normal cancellation/generation rules apply.

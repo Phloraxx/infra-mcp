@@ -8,6 +8,7 @@ TMP="$(mktemp -d)"
 GW_PID=''
 AGENT_PID=''
 cleanup() {
+  [ -z "$AGENT_PID" ] || kill -CONT "$AGENT_PID" 2>/dev/null || true
   [ -z "$AGENT_PID" ] || kill "$AGENT_PID" 2>/dev/null || true
   [ -z "$GW_PID" ] || kill "$GW_PID" 2>/dev/null || true
   [ -z "$AGENT_PID" ] || wait "$AGENT_PID" 2>/dev/null || true
@@ -45,7 +46,7 @@ curl -fsS "http://127.0.0.1:$PORT/app.js" -o "$TMP/dashboard.js"
 grep -q 'create-enrollment' "$TMP/dashboard.js"
 grep -q 'powershellInstallerCommand' "$TMP/dashboard.js"
 ! grep -q "' | iex'" "$TMP/dashboard.js"
-grep -q 'UseBasicParsing -OutFile' "$TMP/dashboard.js"
+grep -q 'UseBasicParsing' "$TMP/dashboard.js"
 grep -q "' | sh'" "$TMP/dashboard.js"
 ! grep -qi 'scriptblock.*create' "$TMP/dashboard.js"
 curl -fsS "http://127.0.0.1:$PORT/install.sh" | grep -q 'Infra installer'
@@ -104,11 +105,13 @@ test -x "$TMP/bin/infra-agent"
 test -f "$TMP/state/config.json"
 test -f "$TMP/state/identity.json"
 STATUS="$(HOME="$TMP/home" $TMP/bin/infra status --json --state-dir "$TMP/state")"
-python3 - <<'PY' "$STATUS"
+python3 - <<'PY' "$STATUS" "$TMP/state/identity.json"
 import json,sys
 s=json.loads(sys.argv[1])
 assert s["configured"] is True, s
 assert s["enrolled"] is True, s
+with open(sys.argv[2]) as source: identity=json.load(source)
+assert identity['device_name']=='Installer Smoke Device', identity['device_name']
 PY
 
 # Start the same installed agent with no enrollment code; persisted config + identity must suffice.
@@ -117,11 +120,33 @@ AGENT_PID=$!
 DEVICE_ID=''
 for _ in $(seq 1 100); do
   DEVICES="$(curl -fsS -b "$COOKIE_JAR" "http://127.0.0.1:$PORT/api/devices")"
-  DEVICE_ID="$(python3 -c 'import json,sys; d=json.load(sys.stdin); print(next((x["device_id"] for x in d if x.get("online")), ""))' <<<"$DEVICES")"
+  DEVICE_ID="$(python3 -c 'import json,sys; d=json.load(sys.stdin); print(next((x["device_id"] for x in d if x.get("online") and x.get("device_name")=="Installer Smoke Device"), ""))' <<<"$DEVICES")"
   [ -z "$DEVICE_ID" ] || break
   sleep .05
 done
 [ -n "$DEVICE_ID" ] || { cat "$TMP/agent.log" >&2; exit 1; }
+
+# Verification reads only this fixture's receipts/runtime, without invoking OS
+# startup inspection. A live PID plus cached online state must not pass a new
+# check when the controller is paused and cannot finish a status roundtrip.
+"$TMP/bin/infra" status --verify --json --state-dir "$TMP/state" > "$TMP/verified-status.json"
+python3 - "$TMP/bin/infra" "$TMP/state" "$AGENT_PID" "$TMP/verified-status.json" <<'PYREADY'
+import json,os,signal,subprocess,sys
+cli,state,pid,report=sys.argv[1:]
+with open(report) as source: ready=json.load(source)
+assert ready['connection']['verified'] and ready['startup'] is None, ready
+assert ready['connection']['age_ms'] <= 30000, ready
+os.kill(int(pid),signal.SIGSTOP)
+try:
+    check=subprocess.run([cli,'status','--verify','--timeout-ms','200','--json','--state-dir',state],capture_output=True,text=True,timeout=10)
+    assert check.returncode==1, check.returncode
+    failed=json.loads(check.stdout)
+    assert failed['process_alive'] and failed['runtime']['state']=='online', failed
+    assert not failed['connection']['verified'], failed
+    assert failed['connection']['code']=='connection_verification_failed', failed
+finally:
+    os.kill(int(pid),signal.SIGCONT)
+PYREADY
 
 # Dashboard session/activity APIs are live and activity is persisted.
 curl -fsS -b "$COOKIE_JAR" "http://127.0.0.1:$PORT/api/sessions" | python3 -c 'import json,sys; assert isinstance(json.load(sys.stdin), list)'
@@ -171,6 +196,7 @@ checks={x["name"]:x for x in r["checks"]}
 assert checks["config"]["status"] == "ok", r
 assert checks["identity"]["status"] == "ok", r
 assert checks["agent_process"]["status"] == "ok", r
+assert checks["connection"]["status"] == "ok", r
 assert checks["gateway"]["status"] == "ok", r
 # Startup is intentionally skipped in this isolated smoke environment.
 assert checks["startup"]["status"] == "problem", r

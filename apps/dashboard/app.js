@@ -1,4 +1,4 @@
-const state={devices:[],sessions:[],activity:[],platform:'unix',enrollment:null,device:null,tab:'overview',attachment:null,file:null,routeVersion:0,authEpoch:0,authenticated:false,loginMethod:'password',events:null,streamHealthy:false,refreshPromise:null,refreshPending:false,refreshTimer:null,lastRefresh:0};
+const state={devices:[],sessions:[],activity:[],platform:'unix',enrollment:null,device:null,tab:'overview',attachment:null,file:null,listing:null,routeVersion:0,authEpoch:0,authenticated:false,loginMethod:'password',events:null,streamHealthy:false,refreshPromise:null,refreshPending:false,refreshTimer:null,lastRefresh:0};
 const $=s=>document.querySelector(s);const $$=s=>[...document.querySelectorAll(s)];
 const esc=s=>String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 // Local, literal SVGs. No CDN/icon font and no interpolated user markup.
@@ -69,17 +69,46 @@ function decorateStaticIcons(){
   $$('.section-head .text-button span').forEach(element=>element.innerHTML=icon('right'));
 }
 decorateStaticIcons();
-async function jsonFetch(url,options={}){const response=await fetch(url,{...options,credentials:'same-origin',headers:{'Content-Type':'application/json','X-Infra-CSRF':'1',...(options.headers||{})}});if(response.status===401){clearPrivateViews();showSignedOut();const error=new Error('Your session ended. Sign in again.');error.status=401;throw error;}if(!response.ok){const text=await response.text();let message=text;try{message=JSON.parse(text).error||text;}catch{}throw new Error(message||`HTTP ${response.status}`);}return response.status===204?null:response.json();}
+const REQUEST_TIMEOUT_MS=10000;
+// The budget includes response-body reads. No request, especially a mutation, is
+// automatically replayed after timeout: the server may already have acted.
+async function requestWithDeadline(url,options,consume){
+  const controller=new AbortController();
+  const external=options.signal;
+  const abort=()=>controller.abort();
+  if(external?.aborted)abort();else external?.addEventListener('abort',abort,{once:true});
+  let expired=false;
+  const timer=setTimeout(()=>{expired=true;controller.abort();},REQUEST_TIMEOUT_MS);
+  try{return await consume(await fetch(url,{...options,signal:controller.signal}));}
+  catch(error){
+    if(expired){
+      const timeout=new Error('Request timed out. Its outcome may be unknown; check current state before repeating an action.');
+      timeout.code='request_timeout';throw timeout;
+    }
+    throw error;
+  }finally{clearTimeout(timer);external?.removeEventListener('abort',abort);}
+}
+async function jsonFetch(url,options={}){
+  const epoch=state.authEpoch;
+  return requestWithDeadline(url,{...options,credentials:'same-origin',headers:{'Content-Type':'application/json','X-Infra-CSRF':'1',...(options.headers||{})}},async response=>{
+    if(response.status===401){
+      if(epoch===state.authEpoch){clearPrivateViews();showSignedOut();}
+      const error=new Error('Your session ended. Sign in again.');error.status=401;throw error;
+    }
+    if(!response.ok){const text=await response.text();let message=text;try{message=JSON.parse(text).error||text;}catch{}throw new Error(message||`HTTP ${response.status}`);}
+    return response.status===204?null:response.json();
+  });
+}
 function showSignedOut(){state.authenticated=false;state.events?.close();state.events=null;state.streamHealthy=false;clearTimeout(state.refreshTimer);state.refreshTimer=null;$('#app-shell').classList.add('hidden');$('#signin').classList.remove('hidden');$('#login-submit').disabled=false;$('#login-submit').textContent='Sign in';}
 function showSignedIn(){state.authenticated=true;$('#signin').classList.add('hidden');$('#app-shell').classList.remove('hidden');}
 async function authStatus(){
-  try{const response=await fetch('/api/auth/session',{credentials:'same-origin'});if(!response.ok)throw new Error('Authentication status unavailable');const v=await response.json();state.loginMethod=v.login_method||'password';$('#username-label').classList.toggle('hidden',state.loginMethod!=='password');$('#login-username').required=state.loginMethod==='password';$('#password-label').textContent=state.loginMethod==='password'?'Password':'Admin credential';$('#password-change').classList.toggle('hidden',state.loginMethod!=='password');$('#auth-state').textContent=v.authenticated?'Signed in':'Signed out';if(v.authenticated)showSignedIn();else showSignedOut();return !!v.authenticated;}
+  try{const v=await requestWithDeadline('/api/auth/session',{credentials:'same-origin'},async response=>{if(!response.ok)throw new Error('Authentication status unavailable');return response.json();});state.loginMethod=v.login_method||'password';$('#username-label').classList.toggle('hidden',state.loginMethod!=='password');$('#login-username').required=state.loginMethod==='password';$('#password-label').textContent=state.loginMethod==='password'?'Password':'Admin credential';$('#password-change').classList.toggle('hidden',state.loginMethod!=='password');$('#auth-state').textContent=v.authenticated?'Signed in':'Signed out';if(v.authenticated)showSignedIn();else showSignedOut();return !!v.authenticated;}
   catch(error){showSignedOut();$('#login-error').textContent='Cannot reach Infra. Try again shortly.';return false;}
 }
 $('#login-form').addEventListener('submit',async event=>{
   event.preventDefault();const button=$('#login-submit');button.disabled=true;button.textContent='Signing in…';$('#login-error').textContent='';
   const password=$('#login-password').value;const body=state.loginMethod==='password'?{username:$('#login-username').value,password}:{token:password};
-  try{const response=await fetch('/api/auth/session',{method:'POST',credentials:'same-origin',headers:{'Content-Type':'application/json','X-Infra-CSRF':'1'},body:JSON.stringify(body)});if(!response.ok)throw new Error((await response.text())||'Sign-in failed.');$('#login-password').value='';if(await authStatus()){await refresh();route();connectEvents();}}
+  try{await requestWithDeadline('/api/auth/session',{method:'POST',credentials:'same-origin',headers:{'Content-Type':'application/json','X-Infra-CSRF':'1'},body:JSON.stringify(body)},async response=>{if(!response.ok)throw new Error((await response.text())||'Sign-in failed.');});$('#login-password').value='';if(await authStatus()){await refresh();route();connectEvents();}}
   catch(error){$('#login-error').textContent=error.message;}
   finally{button.disabled=false;button.textContent='Sign in';}
 });
@@ -149,6 +178,7 @@ async function refresh(){
       state.lastRefresh=Date.now();
       $('#gateway-dot').classList.add('online');
       $('#gateway-label').textContent='Gateway online';
+      $('#gateway-label').removeAttribute('title');
       render();
       if(location.hash.startsWith('#session/')&&!state.attachment)route();
     }catch(error){
@@ -158,7 +188,8 @@ async function refresh(){
         $('#gateway-label').textContent='Sign in required';
         $('#auth-state').textContent='Signed out';showSignedOut();
       }else{
-        $('#gateway-label').textContent='Gateway unavailable';
+        $('#gateway-label').textContent=state.lastRefresh?'Connection lost · showing last confirmed data':'Gateway unavailable';
+        $('#gateway-label').title=error.message;
         console.error(error);
       }
     }
@@ -203,8 +234,7 @@ function updateQuickInstall(){
   // otherwise fails as a meaningless null-argument exception. Put the payload
   // on disk and terminate the whole block if downloading fails.
   // Only the downloaded file runs with process-scoped execution-policy bypass.
-  const windows=`&{$ErrorActionPreference='Stop';$p="$env:TEMP\\infra.ps1";iwr `+
-    psQuote(base+'/install.ps1')+` -UseBasicParsing -OutFile $p;powershell.exe -NoProfile -EP Bypass -File $p}`;
+  const windows=powershellInstallerCommand(base+'/install.ps1');
   $('#quick-install-command').textContent=state.platform==='windows'
     ? windows
     : 'curl -fsSL '+shellQuote(base+'/install.sh')+' | sh';
@@ -291,7 +321,7 @@ $('#device-rename-form').addEventListener('submit',async event=>{
   }catch(error){$('#device-rename-error').textContent=error.message;}
   finally{button.disabled=false;}
 });
-$('#logout-session').addEventListener('click',async()=>{try{await fetch('/api/auth/session',{method:'DELETE',credentials:'same-origin',headers:{'X-Infra-CSRF':'1'}});}finally{clearPrivateViews();$('#login-password').value='';$('#password-change').reset();showSignedOut();}});
+$('#logout-session').addEventListener('click',async()=>{let failure='';try{await requestWithDeadline('/api/auth/session',{method:'DELETE',credentials:'same-origin',headers:{'X-Infra-CSRF':'1'}},async response=>{if(!response.ok)throw new Error('Sign-out could not be confirmed.');});}catch(error){failure='Local view cleared; server sign-out could not be confirmed. '+error.message;}finally{clearPrivateViews();$('#login-password').value='';$('#password-change').reset();showSignedOut();$('#login-error').textContent=failure;}});
 
 function currentDevice(id=state.device){return state.devices.find(d=>d.device_id===id);}
 function available(id){const d=currentDevice(id);return !!d?.online&&!d.revoked;}
@@ -307,7 +337,7 @@ function route(){
     showView('devices','Devices','Reachability and capability across your fleet.');
     if(!$('#enroll-dialog').open)$('#add-device').click();
   }else if(parts[0]==='device'&&parts[1]){
-    if(state.device!==parts[1]){state.file=null;$('#file-content').textContent='';$('#file-preview').classList.add('hidden');$('#files-list').replaceChildren();$('#files-path').value='.';$('#device-status-output').classList.add('hidden');}
+    if(state.device!==parts[1]){state.file=null;clearFileListing();$('#file-content').textContent='';$('#file-preview').classList.add('hidden');$('#device-status-output').classList.add('hidden');}
     state.device=parts[1];state.tab=['overview','terminal','files','sessions','activity'].includes(parts[2])?parts[2]:'overview';
     showView('device-detail',currentDevice()?.device_name||'Device','Device health and persistent work.');renderDevice();
   }else if(parts[0]==='session'&&parts.length===4&&['terminal','job','transfer'].includes(parts[2])){
@@ -377,7 +407,7 @@ function renderDevice(){
   $('#device-capabilities').innerHTML=defs.map(([name,cap,iconName])=>{const iconSvg=icon(iconName);const advertised=caps.has(cap),availableNow=advertised&&d.online;return `<div class="capability-card ${availableNow?'available':''}"><div class="cap-icon">${iconSvg}</div><strong>${name}</strong><p>${advertised?(d.online?(cap==='desktop'?'Permission check needed':'Available'):'Device offline'):'Not advertised'}</p></div>`;}).join('');
   $$('#device-tabs .tab').forEach(t=>t.classList.toggle('active',t.dataset.deviceTab===state.tab));
   $$('.device-pane').forEach(p=>p.classList.toggle('hidden',p.id!==`device-${state.tab}`));
-  $('#terminal-open button').disabled=!available();$('#device-status').disabled=!available();$('#device-permissions').classList.toggle('hidden',!caps.has('desktop'));$('#device-permissions').disabled=!available();$$('#files-browse button').forEach(b=>b.disabled=!available());
+  $('#terminal-open button').disabled=!available();$('#device-status').disabled=!available();$('#device-permissions').classList.toggle('hidden',!caps.has('desktop'));$('#device-permissions').disabled=!available();$$('#files-browse button').forEach(b=>b.disabled=!available()||fileBrowseBusy);renderFilePaging();
   if(!$('#terminal-command').value||$('#terminal-command').dataset.device!==d.device_id){$('#terminal-command').value=d.platform==='windows'?'powershell.exe -NoLogo':d.platform==='macos'||d.platform==='darwin'?'/bin/zsh -l':'/bin/sh -i';$('#terminal-command').dataset.device=d.device_id;}
   const sessions=state.sessions.filter(s=>s.device_id===d.device_id);
   $('#device-sessions').innerHTML=sessions.length?sessions.map(sessionRow).join(''):emptyState('No sessions on this device.','terminal');
@@ -419,6 +449,7 @@ $('#terminal-open').addEventListener('submit',event=>{
 
 function clearPrivateViews(){
   state.authEpoch++;state.refreshPending=false;state.devices=[];state.sessions=[];state.activity=[];state.file=null;state.enrollment=null;detachSession();
+  clearFileListing();
   ['#file-content','#files-list','#session-output','#device-status-output','#enrollment-code','#install-command'].forEach(s=>$(s).replaceChildren());
   $('#file-preview').classList.add('hidden');$('#enroll-dialog').close();render();
 }
@@ -492,17 +523,38 @@ $('#session-stop').addEventListener('click',async()=>{
   catch(error){sessionError(a,error);if(!a.disposed)$('#session-stop').disabled=false;}
 });
 
-let fileRequest=0;
-async function browseFiles(path){
-  const request=++fileRequest,device=state.device,version=state.routeVersion;$('#device-error').textContent='';$('#files-note').textContent='Loading…';
-  try{
-    const result=await operation(device,{op:'files',action:{action:'list',path}});
-    if(request!==fileRequest||version!==state.routeVersion)return;
-    $('#files-path').value=result.path;$('#files-note').textContent=`${result.entries.length} entries${result.truncated?' · Listing limited to 1,000 entries. Open a smaller directory.':''}`;
-    const entries=[...result.entries].sort((a,b)=>(a.kind==='directory'?0:1)-(b.kind==='directory'?0:1)||a.name.localeCompare(b.name));
-    $('#files-list').innerHTML=entries.length?entries.map(e=>`<div class="file-row"><button class="device-link" data-file-path="${esc(e.path)}" data-file-kind="${esc(e.kind)}">${icon(e.kind==='directory'?'folder':'file')}${esc(e.name)}</button><span class="muted">${esc(e.kind)}</span><span class="muted">${e.size==null?'':`${e.size.toLocaleString()} B`}</span></div>`).join(''):emptyState('This directory is empty.','folder');
-  }catch(error){if(request===fileRequest&&version===state.routeVersion){$('#files-note').textContent='';$('#files-list').replaceChildren();$('#device-error').textContent=error.message;}}
+let fileRequest=0,fileBrowseBusy=false;
+function clearFileListing(){
+  fileRequest++;fileBrowseBusy=false;state.listing=null;$('#files-list').replaceChildren();$('#files-note').textContent='';$('#files-path').value='.';renderFilePaging();
 }
+function renderFilePaging(){
+  const listing=state.listing,visible=listing?.device===state.device&&listing.paging;
+  $('#files-pagination').classList.toggle('hidden',!visible);
+  const enabled=visible&&available()&&!fileBrowseBusy&&(currentDevice()?.capabilities||[]).includes('files.list_page');
+  $('#files-previous').disabled=!enabled||!listing?.history.length;
+  $('#files-next').disabled=!enabled||!listing?.hasMore;
+}
+async function browseFiles(path,page={offset:0,history:[]}){
+  const request=++fileRequest,device=state.device,version=state.routeVersion;
+  const paging=(currentDevice()?.capabilities||[]).includes('files.list_page');
+  fileBrowseBusy=true;$('#device-error').textContent='';$('#files-note').textContent='Loading…';renderDevice();
+  try{
+    const action={action:'list',path};if(paging){action.offset=page.offset;action.length=100;}
+    const result=await operation(device,{op:'files',action});
+    if(request!==fileRequest||version!==state.routeVersion)return;
+    const entries=[...result.entries],offset=Number.isSafeInteger(result.offset)?result.offset:page.offset;
+    const next=result.next_offset,canContinue=paging&&result.pagination_supported===true&&Number.isSafeInteger(next)&&next>offset&&next<=100000;
+    state.listing={device,path:result.path,offset,history:page.history,next,hasMore:canContinue&&result.has_more===true,paging};
+    const range=entries.length?`${offset+1}–${offset+entries.length}`:'0';
+    $('#files-path').value=result.path;
+    $('#files-note').textContent=paging?`Showing ${range}${Number.isSafeInteger(result.total_entries)?` of ${result.total_entries}`:''} entries. Browse again to refresh changed directories.${result.truncated&&!canContinue?' More entries exist, but continuation is unavailable; check the agent version.':''}`:`${entries.length} entries${result.truncated?' · Listing incomplete. Update this agent for page navigation or open a smaller directory.':''}`;
+    if(!paging)entries.sort((a,b)=>(a.kind==='directory'?0:1)-(b.kind==='directory'?0:1)||a.name.localeCompare(b.name));
+    $('#files-list').innerHTML=entries.length?entries.map(e=>`<div class="file-row"><button class="device-link" data-file-path="${esc(e.path)}" data-file-kind="${esc(e.kind)}">${icon(e.kind==='directory'?'folder':'file')}${esc(e.name)}</button><span class="muted">${esc(e.kind)}</span><span class="muted">${e.size==null?'':`${e.size.toLocaleString()} B`}</span></div>`).join(''):emptyState(offset?'No entries at this position. Browse again if the directory changed.':'This directory is empty.','folder');
+  }catch(error){if(request===fileRequest&&version===state.routeVersion){$('#files-note').textContent=state.listing?`Showing the last confirmed page for ${state.listing.path}.`:'Directory listing unavailable.';$('#device-error').textContent=error.message;}}
+  finally{if(request===fileRequest){fileBrowseBusy=false;if(version!==state.routeVersion)$('#files-note').textContent=state.listing?`Showing the last confirmed page for ${state.listing.path}. Browse again to refresh.`:'';renderDevice();}}
+}
+$('#files-next').addEventListener('click',()=>{const listing=state.listing;if(!fileBrowseBusy&&listing?.hasMore)browseFiles(listing.path,{offset:listing.next,history:[...listing.history,listing.offset]});});
+$('#files-previous').addEventListener('click',()=>{const listing=state.listing;if(!fileBrowseBusy&&listing?.history.length)browseFiles(listing.path,{offset:listing.history.at(-1),history:listing.history.slice(0,-1)});});
 $('#files-browse').addEventListener('submit',event=>{event.preventDefault();browseFiles($('#files-path').value);});
 $('#files-up').addEventListener('click',()=>{const path=$('#files-path').value,separator=path.includes('\\')?'\\':'/';browseFiles(path.replace(/[\\/]$/,'')+separator+'..');});
 $('#files-list').addEventListener('click',event=>{const b=event.target.closest('[data-file-path]');if(!b)return;if(b.dataset.fileKind==='directory')browseFiles(b.dataset.filePath);else{state.file={device:state.device,path:b.dataset.filePath,offset:0};previewFile(state.file);}});

@@ -1,5 +1,10 @@
+mod activation;
+mod install;
+mod lifecycle_lock;
+mod readiness;
 mod release_verify;
 mod startup;
+mod update_handoff;
 
 use anyhow::{Context, anyhow};
 use infra_local_state::{
@@ -26,9 +31,11 @@ struct LocalStatus {
     configured: bool,
     enrolled: bool,
     process_alive: bool,
-    startup: startup::StartupStatus,
+    connection: readiness::ConnectionStatus,
+    startup: Option<startup::StartupStatus>,
     config: Option<LocalConfig>,
     runtime: Option<RuntimeStatus>,
+    update_status: Option<update_handoff::UpdateStatus>,
 }
 
 #[derive(Debug, Serialize)]
@@ -68,16 +75,74 @@ async fn run() -> anyhow::Result<ExitCode> {
     };
     args.remove(0);
 
+    if command == "--build-info" {
+        ensure_no_args(&args)?;
+        println!(
+            "{}",
+            serde_json::json!({"component":"infra","activation_protocol":1,"version":env!("CARGO_PKG_VERSION")})
+        );
+        return Ok(ExitCode::SUCCESS);
+    }
+    let operation_lock = if matches!(
+        command.as_str(),
+        "setup" | "install" | "repair" | "reconnect" | "update" | "uninstall"
+    ) {
+        Some(lifecycle_lock::LifecycleLocks::acquire(
+            &lifecycle_lock::current_install_dir()?,
+            &state_dir,
+        )?)
+    } else {
+        None
+    };
+    if operation_lock.is_some() && activation::pending(&lifecycle_lock::current_install_dir()?) {
+        return Err(anyhow!(
+            "activation_recovery_required: rerun the verified installer to recover the interrupted pair"
+        ));
+    }
+
     match command.as_str() {
+        "activate" => install::activate(&state_dir, args).await,
         "status" => {
+            let verify = take_flag(&mut args, "--verify");
+            let timeout_requested = args.iter().any(|value| value == "--timeout-ms");
+            let timeout = take_option(&mut args, "--timeout-ms");
+            if timeout_requested && timeout.is_none() {
+                return Err(anyhow!("--timeout-ms requires a value"));
+            }
+            if timeout.is_some() && !verify {
+                return Err(anyhow!("--timeout-ms requires status --verify"));
+            }
+            let timeout = timeout
+                .map(|value| value.parse::<u64>())
+                .transpose()
+                .context("--timeout-ms must be an integer")?
+                .unwrap_or(15_000);
+            if !(1..=60_000).contains(&timeout) {
+                return Err(anyhow!("--timeout-ms must be between 1 and 60000"));
+            }
             ensure_no_args(&args)?;
-            let status = collect_status(&state_dir)?;
+            let verification_failed = verify
+                && wait_for_online_reconnect(&state_dir, None, Duration::from_millis(timeout))
+                    .await
+                    .is_err();
+            // Verification uses local receipts/process state only. Avoid
+            // unbounded launchctl/systemctl/PowerShell inspection in this mode.
+            let mut status = collect_status(&state_dir, !verify)?;
+            if verification_failed {
+                status.connection.verified = false;
+                status.connection.code = "connection_verification_failed";
+                status.connection.detail = "Fresh signed status verification did not complete. Run doctor and check connectivity and gateway/agent compatibility.";
+            }
             if json {
                 println!("{}", serde_json::to_string_pretty(&status)?);
             } else {
                 print_status(&status);
             }
-            Ok(ExitCode::SUCCESS)
+            Ok(if verify && !status.connection.verified {
+                ExitCode::FAILURE
+            } else {
+                ExitCode::SUCCESS
+            })
         }
         "doctor" => {
             ensure_no_args(&args)?;
@@ -97,16 +162,11 @@ async fn run() -> anyhow::Result<ExitCode> {
         "setup" => setup_command(&state_dir, args).await,
         "repair" => {
             ensure_no_args(&args)?;
-            let previous_runtime = read_runtime(&state_dir).ok().flatten();
             repair(&state_dir)?;
-            let runtime = wait_for_online_reconnect(
-                &state_dir,
-                previous_runtime.as_ref(),
-                Duration::from_secs(15),
-            )
-            .await?;
+            let runtime =
+                wait_for_online_reconnect(&state_dir, None, Duration::from_secs(15)).await?;
             println!(
-                "Infra startup registration repaired and agent is online{}.",
+                "Infra startup registration repaired; fresh signed status roundtrip verified{}.",
                 runtime
                     .connection_generation
                     .map(|generation| format!(" (generation {generation})"))
@@ -133,7 +193,14 @@ async fn run() -> anyhow::Result<ExitCode> {
             );
             Ok(ExitCode::SUCCESS)
         }
-        "update" => update_command(&state_dir, args).await,
+        "update" => {
+            update_command(
+                &state_dir,
+                args,
+                operation_lock.expect("update lock acquired"),
+            )
+            .await
+        }
         "uninstall" => {
             let remove_state = args.iter().any(|arg| arg == "--remove-state");
             let unknown = args
@@ -230,12 +297,13 @@ async fn setup_command(state_dir: &Path, mut args: Vec<String>) -> anyhow::Resul
         println!("Infra paired and configured; automatic startup skipped.");
         return Ok(ExitCode::SUCCESS);
     }
-    let previous_runtime = read_runtime(state_dir).ok().flatten();
     startup::install(&agent, state_dir)
         .context("Infra paired, but automatic startup needs repair; run infra doctor")?;
+    // An existing healthy Windows task need not create a new generation, but
+    // its next signed status roundtrip must be freshly confirmed by the gateway.
     let runtime = wait_for_online_reconnect(
         state_dir,
-        previous_runtime.as_ref(),
+        None,
         Duration::from_secs(35),
     ).await.context("Infra is installed and paired, but the agent did not confirm an online connection. Run infra doctor.")?;
     println!(
@@ -261,17 +329,30 @@ async fn install_command(state_dir: &Path, mut args: Vec<String>) -> anyhow::Res
     }
 
     let config = LocalConfig::new(gateway, name)?;
-    write_config(state_dir, &config)?;
+    if let Some(previous) = read_config(state_dir)?
+        && identity_path(state_dir).is_file()
+        && previous.gateway_url != config.gateway_url
+    {
+        return Err(anyhow!(
+            "already paired to another gateway; explicit migration is required"
+        ));
+    }
 
     if !identity_path(state_dir).exists() {
         let code = code.ok_or_else(|| {
             anyhow!("device is not enrolled; provide the one-time dashboard code with --code")
         })?;
-        let status = Command::new(&agent)
+        let mut enrollment = Command::new(&agent);
+        enrollment
             .arg("--state-dir")
             .arg(state_dir)
             .arg("--enroll-only")
-            .env("INFRA_ENROLLMENT_CODE", code)
+            .env("INFRA_GATEWAY_URL", &config.gateway_url)
+            .env("INFRA_ENROLLMENT_CODE", code);
+        if let Some(name) = &config.device_name {
+            enrollment.env("INFRA_DEVICE_NAME", name);
+        }
+        let status = enrollment
             .status()
             .with_context(|| format!("run {} enrollment", agent.display()))?;
         if !status.success() {
@@ -279,13 +360,15 @@ async fn install_command(state_dir: &Path, mut args: Vec<String>) -> anyhow::Res
         }
     }
 
+    write_config(state_dir, &config)?;
     if no_startup {
         println!("Infra configured and enrolled. Startup registration skipped.");
         return Ok(ExitCode::SUCCESS);
     }
     startup::install(&agent, state_dir)?;
+    wait_for_online_reconnect(state_dir, None, Duration::from_secs(35)).await?;
     println!(
-        "Infra installed. The agent will reconnect automatically after login/reboot where supported."
+        "Infra installed; fresh signed status roundtrip verified. Automatic startup is configured."
     );
     Ok(ExitCode::SUCCESS)
 }
@@ -295,23 +378,50 @@ async fn wait_for_online_reconnect(
     previous: Option<&RuntimeStatus>,
     timeout: Duration,
 ) -> anyhow::Result<RuntimeStatus> {
+    wait_for_verified_runtime(state_dir, previous, timeout, process_alive).await
+}
+
+async fn wait_for_verified_runtime(
+    state_dir: &Path,
+    previous: Option<&RuntimeStatus>,
+    timeout: Duration,
+    agent_alive: fn(u32) -> bool,
+) -> anyhow::Result<RuntimeStatus> {
+    let started_unix_ms = infra_local_state::now_ms();
+    let config = read_config(state_dir)?.ok_or_else(|| anyhow!("connection_unverified: config.json is missing; complete setup before connection verification"))?;
     let deadline = tokio::time::Instant::now() + timeout;
     loop {
+        if tokio::time::Instant::now() >= deadline {
+            break;
+        }
         if let Ok(Some(runtime)) = read_runtime(state_dir)
-            && runtime.state == "online"
-            && process_alive(runtime.pid)
             && runtime_is_newer(previous, &runtime)
         {
-            return Ok(runtime);
+            let connection = readiness::inspect(
+                state_dir,
+                Some(&config),
+                Some(&runtime),
+                agent_alive(runtime.pid),
+                infra_local_state::now_ms(),
+            );
+            if tokio::time::Instant::now() < deadline
+                && connection.verified
+                && connection
+                    .probe_started_unix_ms
+                    .is_some_and(|time| time > started_unix_ms)
+            {
+                return Ok(runtime);
+            }
         }
 
-        if tokio::time::Instant::now() >= deadline {
-            return Err(anyhow!(
-                "agent restart was requested but it did not return online; run `infra status` or `infra doctor`"
-            ));
-        }
-        tokio::time::sleep(Duration::from_millis(250)).await;
+        tokio::time::sleep_until(
+            deadline.min(tokio::time::Instant::now() + Duration::from_millis(250)),
+        )
+        .await;
     }
+    Err(anyhow!(
+        "connection_unverified: no fresh signed status roundtrip was confirmed before the deadline; run `infra status` or `infra doctor`, and update both gateway and agent if verification is unsupported"
+    ))
 }
 
 fn runtime_is_newer(previous: Option<&RuntimeStatus>, current: &RuntimeStatus) -> bool {
@@ -319,7 +429,8 @@ fn runtime_is_newer(previous: Option<&RuntimeStatus>, current: &RuntimeStatus) -
         return true;
     };
     current.pid != previous.pid
-        || current.updated_unix_ms > previous.updated_unix_ms
+        || current.gateway_epoch != previous.gateway_epoch
+        || current.agent_instance_id != previous.agent_instance_id
         || match (
             current.connection_generation,
             previous.connection_generation,
@@ -338,7 +449,11 @@ fn runtime_is_newer(previous: Option<&RuntimeStatus>, current: &RuntimeStatus) -
         }
 }
 
-async fn update_command(state_dir: &Path, mut args: Vec<String>) -> anyhow::Result<ExitCode> {
+async fn update_command(
+    state_dir: &Path,
+    mut args: Vec<String>,
+    guard: lifecycle_lock::LifecycleLocks,
+) -> anyhow::Result<ExitCode> {
     let repo = take_option(&mut args, "--repo").unwrap_or_else(|| "Phloraxx/infra-mcp".into());
     let version = take_option(&mut args, "--version").unwrap_or_else(|| "latest".into());
     let base_url = take_option(&mut args, "--base-url");
@@ -385,6 +500,7 @@ async fn update_command(state_dir: &Path, mut args: Vec<String>) -> anyhow::Resu
     }
 
     let (asset, extension) = release_asset_descriptor()?;
+    let using_default_release_url = base_url.is_none();
     let base = base_url.unwrap_or_else(|| {
         if version == "latest" {
             format!("https://github.com/{repo}/releases/latest/download")
@@ -397,13 +513,19 @@ async fn update_command(state_dir: &Path, mut args: Vec<String>) -> anyhow::Resu
         .build()?;
 
     // Signature is checked before any staged executable is written.
-    let manifest_bytes = client
+    let manifest_response = client
         .get(format!("{base}/infra-release.json"))
         .send()
-        .await?
-        .error_for_status()?
-        .bytes()
         .await?;
+    if manifest_response.status() == reqwest::StatusCode::NOT_FOUND
+        && version == "latest"
+        && using_default_release_url
+    {
+        return Err(anyhow!(
+            "No stable Infra release is published. GitHub /releases/latest excludes prereleases; this is not an update or network repair failure. Use an explicitly tested signed prerelease tag such as --version v0.1.0-rc.1 for a manual update; unattended updates should remain disabled until a stable release passes Windows rollback acceptance."
+        ));
+    }
+    let manifest_bytes = manifest_response.error_for_status()?.bytes().await?;
     let manifest_signature = client
         .get(format!("{base}/infra-release.json.sig"))
         .send()
@@ -453,277 +575,7 @@ async fn update_command(state_dir: &Path, mut args: Vec<String>) -> anyhow::Resu
     make_executable_like(&staged_cli, &cli_path)?;
     make_executable_like(&staged_agent, &agent_path)?;
 
-    #[cfg(windows)]
-    {
-        apply_windows_update(
-            state_dir,
-            &base,
-            &cli_path,
-            &agent_path,
-            &staged_cli,
-            &staged_agent,
-        )
-        .await
-    }
-    #[cfg(not(windows))]
-    {
-        apply_unix_update(
-            state_dir,
-            &base,
-            &cli_path,
-            &agent_path,
-            &staged_cli,
-            &staged_agent,
-        )
-        .await
-    }
-}
-
-#[cfg(not(windows))]
-async fn apply_unix_update(
-    state_dir: &Path,
-    base: &str,
-    cli_path: &Path,
-    agent_path: &Path,
-    staged_cli: &Path,
-    staged_agent: &Path,
-) -> anyhow::Result<ExitCode> {
-    let install_dir = cli_path
-        .parent()
-        .ok_or_else(|| anyhow!("infra CLI path has no parent"))?;
-    let rollback_cli = install_dir.join("infra.rollback");
-    let rollback_agent = install_dir.join("infra-agent.rollback");
-    let _ = fs::remove_file(&rollback_cli);
-    let _ = fs::remove_file(&rollback_agent);
-
-    let previous_runtime = read_runtime(state_dir).ok().flatten();
-    fs::rename(agent_path, &rollback_agent)
-        .with_context(|| format!("stage rollback copy of {}", agent_path.display()))?;
-    if let Err(error) = fs::rename(staged_agent, agent_path) {
-        let _ = fs::rename(&rollback_agent, agent_path);
-        let _ = fs::remove_file(staged_cli);
-        return Err(error).context("activate downloaded infra-agent");
-    }
-
-    let reconnect = async {
-        startup::restart()?;
-        wait_for_online_reconnect(
-            state_dir,
-            previous_runtime.as_ref(),
-            Duration::from_secs(20),
-        )
-        .await
-    }
-    .await;
-    if let Err(error) = reconnect {
-        let rollback = async {
-            let _ = fs::remove_file(agent_path);
-            fs::rename(&rollback_agent, agent_path)
-                .context("restore previous infra-agent binary")?;
-            startup::recover_after_failed_start()?;
-            wait_for_online_reconnect(state_dir, None, Duration::from_secs(20)).await?;
-            anyhow::Ok(())
-        }
-        .await;
-        let _ = fs::remove_file(staged_cli);
-        return match rollback {
-            Ok(()) => Err(anyhow!(
-                "new infra-agent failed its reconnect health check; previous agent was restored and is online: {error:#}"
-            )),
-            Err(rollback_error) => Err(anyhow!(
-                "new infra-agent failed its reconnect health check and automatic rollback did not recover the agent: update error: {error:#}; rollback error: {rollback_error:#}"
-            )),
-        };
-    }
-
-    fs::rename(cli_path, &rollback_cli)
-        .with_context(|| format!("stage rollback copy of {}", cli_path.display()))?;
-    if let Err(error) = fs::rename(staged_cli, cli_path) {
-        let _ = fs::rename(&rollback_cli, cli_path);
-        let agent_rollback = async {
-            let _ = fs::remove_file(agent_path);
-            fs::rename(&rollback_agent, agent_path)
-                .context("restore previous infra-agent after CLI activation failure")?;
-            startup::recover_after_failed_start()?;
-            wait_for_online_reconnect(state_dir, None, Duration::from_secs(20)).await?;
-            anyhow::Ok(())
-        }
-        .await;
-        return match agent_rollback {
-            Ok(()) => Err(error).context(
-                "activate downloaded infra CLI; previous agent was restored and is online",
-            ),
-            Err(rollback_error) => Err(anyhow!(
-                "activate downloaded infra CLI failed and agent rollback did not recover connectivity: CLI error: {error}; rollback error: {rollback_error:#}"
-            )),
-        };
-    }
-
-    println!(
-        "Infra updated from {base}; the new agent is online. Previous binaries are retained as infra.rollback and infra-agent.rollback."
-    );
-    #[cfg(target_os = "macos")]
-    println!(
-        "macOS may require Accessibility and Screen Recording to be re-enabled after replacing the agent binary; verify desktop permissions before relying on GUI control."
-    );
-    Ok(ExitCode::SUCCESS)
-}
-
-#[cfg(windows)]
-async fn apply_windows_update(
-    state_dir: &Path,
-    base: &str,
-    cli_path: &Path,
-    agent_path: &Path,
-    staged_cli: &Path,
-    staged_agent: &Path,
-) -> anyhow::Result<ExitCode> {
-    let install_dir = cli_path
-        .parent()
-        .ok_or_else(|| anyhow!("infra CLI path has no parent"))?;
-    let rollback_agent = install_dir.join("infra-agent.rollback.exe");
-    let rollback_cli = install_dir.join("infra.rollback.exe");
-    let _ = fs::remove_file(&rollback_agent);
-
-    let previous_runtime = read_runtime(state_dir).ok().flatten();
-    windows_stop_agent();
-    if let Some(runtime) = &previous_runtime {
-        wait_for_process_exit(runtime.pid, Duration::from_secs(10)).await?;
-    }
-
-    fs::rename(agent_path, &rollback_agent)
-        .with_context(|| format!("stage rollback copy of {}", agent_path.display()))?;
-    if let Err(error) = fs::rename(staged_agent, agent_path) {
-        let _ = fs::rename(&rollback_agent, agent_path);
-        let _ = fs::remove_file(staged_cli);
-        let _ = windows_start_agent();
-        return Err(error).context("activate downloaded infra-agent");
-    }
-
-    let reconnect = async {
-        windows_start_agent()?;
-        wait_for_online_reconnect(
-            state_dir,
-            previous_runtime.as_ref(),
-            Duration::from_secs(25),
-        )
-        .await
-    }
-    .await;
-    if let Err(error) = reconnect {
-        windows_stop_agent();
-        let _ = fs::remove_file(agent_path);
-        let rollback_result = fs::rename(&rollback_agent, agent_path);
-        if rollback_result.is_ok() {
-            let _ = windows_start_agent();
-            let _ = wait_for_online_reconnect(state_dir, None, Duration::from_secs(25)).await;
-        }
-        let _ = fs::remove_file(staged_cli);
-        return Err(anyhow!(
-            "new infra-agent failed its reconnect health check and rollback was attempted: {error:#}"
-        ));
-    }
-
-    let helper = install_dir.join(format!(".infra-update-helper-{}.ps1", std::process::id()));
-    write_windows_cli_update_helper(
-        &helper,
-        cli_path,
-        staged_cli,
-        &rollback_cli,
-        std::process::id(),
-    )?;
-    Command::new("powershell.exe")
-        .args([
-            "-NoLogo",
-            "-NoProfile",
-            "-NonInteractive",
-            "-ExecutionPolicy",
-            "Bypass",
-            "-File",
-        ])
-        .arg(&helper)
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .spawn()
-        .context("start Windows CLI replacement helper")?;
-
-    println!(
-        "Infra agent updated from {base} and is online. The verified CLI replacement is staged and will be applied immediately after this command exits; the prior CLI is retained as infra.rollback.exe."
-    );
-    Ok(ExitCode::SUCCESS)
-}
-
-#[cfg(windows)]
-fn windows_stop_agent() {
-    let _ = Command::new("schtasks")
-        .args(["/End", "/TN", "Infra MCP Agent"])
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .status();
-}
-
-#[cfg(windows)]
-fn windows_start_agent() -> anyhow::Result<()> {
-    let status = Command::new("schtasks")
-        .args(["/Run", "/TN", "Infra MCP Agent"])
-        .status()?;
-    if !status.success() {
-        return Err(anyhow!("failed to start Infra MCP Agent scheduled task"));
-    }
-    Ok(())
-}
-
-#[cfg(windows)]
-async fn wait_for_process_exit(pid: u32, timeout: Duration) -> anyhow::Result<()> {
-    let deadline = tokio::time::Instant::now() + timeout;
-    while process_alive(pid) {
-        if tokio::time::Instant::now() >= deadline {
-            return Err(anyhow!("agent PID {pid} did not stop for update"));
-        }
-        tokio::time::sleep(Duration::from_millis(100)).await;
-    }
-    Ok(())
-}
-
-#[cfg(windows)]
-fn ps_quote_path(path: &Path) -> String {
-    path.to_string_lossy().replace('\'', "''")
-}
-
-#[cfg(windows)]
-fn write_windows_cli_update_helper(
-    helper: &Path,
-    cli_path: &Path,
-    staged_cli: &Path,
-    rollback_cli: &Path,
-    parent_pid: u32,
-) -> anyhow::Result<()> {
-    let cli = ps_quote_path(cli_path);
-    let staged = ps_quote_path(staged_cli);
-    let rollback = ps_quote_path(rollback_cli);
-    let script = format!(
-        r#"$ErrorActionPreference = 'Stop'
-$parentPid = {parent_pid}
-$deadline = (Get-Date).AddSeconds(20)
-while ((Get-Process -Id $parentPid -ErrorAction SilentlyContinue) -and (Get-Date) -lt $deadline) {{ Start-Sleep -Milliseconds 100 }}
-if (Get-Process -Id $parentPid -ErrorAction SilentlyContinue) {{ exit 12 }}
-$cli = '{cli}'
-$staged = '{staged}'
-$rollback = '{rollback}'
-try {{
-  if (Test-Path -LiteralPath $rollback) {{ Remove-Item -LiteralPath $rollback -Force }}
-  Move-Item -LiteralPath $cli -Destination $rollback -Force
-  Move-Item -LiteralPath $staged -Destination $cli -Force
-  Remove-Item -LiteralPath $MyInvocation.MyCommand.Path -Force -ErrorAction SilentlyContinue
-  exit 0
-}} catch {{
-  if (-not (Test-Path -LiteralPath $cli) -and (Test-Path -LiteralPath $rollback)) {{ Move-Item -LiteralPath $rollback -Destination $cli -Force }}
-  exit 13
-}}
-"#
-    );
-    fs::write(helper, script).with_context(|| format!("write {}", helper.display()))
+    update_handoff::apply(state_dir, install_dir, &staged_cli, &staged_agent, guard).await
 }
 
 fn release_asset_descriptor() -> anyhow::Result<(String, &'static str)> {
@@ -791,18 +643,27 @@ fn make_executable_like(path: &Path, reference: &Path) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn collect_status(state_dir: &Path) -> anyhow::Result<LocalStatus> {
+fn collect_status(state_dir: &Path, check_startup: bool) -> anyhow::Result<LocalStatus> {
     let config = read_config(state_dir)?;
     let runtime = read_runtime(state_dir)?;
     let alive = runtime
         .as_ref()
         .is_some_and(|runtime| process_alive(runtime.pid));
+    let connection = readiness::inspect(
+        state_dir,
+        config.as_ref(),
+        runtime.as_ref(),
+        alive,
+        infra_local_state::now_ms(),
+    );
     Ok(LocalStatus {
         state_dir: state_dir.to_string_lossy().into_owned(),
         configured: config.is_some(),
         enrolled: identity_path(state_dir).exists(),
+        update_status: update_handoff::status(state_dir),
         process_alive: alive,
-        startup: startup::status(),
+        connection,
+        startup: check_startup.then(startup::status),
         config,
         runtime,
     })
@@ -866,6 +727,19 @@ async fn doctor(state_dir: &Path) -> DoctorReport {
     let alive = runtime
         .as_ref()
         .is_some_and(|runtime| process_alive(runtime.pid));
+    let connection = readiness::inspect(
+        state_dir,
+        config.as_ref(),
+        runtime.as_ref(),
+        alive,
+        infra_local_state::now_ms(),
+    );
+    checks.push(check(
+        "connection",
+        connection.verified,
+        format!("{}: {}", connection.code, connection.detail),
+        false,
+    ));
     checks.push(check(
         "agent_process",
         alive,
@@ -885,7 +759,7 @@ async fn doctor(state_dir: &Path) -> DoctorReport {
     let startup = startup::status();
     checks.push(check(
         "startup",
-        startup.installed && startup.active,
+        startup.installed && startup.active && startup.reliable,
         startup.detail,
         true,
     ));
@@ -1258,9 +1132,16 @@ fn ensure_no_args(args: &[String]) -> anyhow::Result<()> {
 
 fn print_status(status: &LocalStatus) {
     println!("Infra status");
+    if let Some(update) = &status.update_status {
+        println!("Update {}: {} ({})", update.id, update.phase, update.detail);
+    }
     println!("State dir: {}", status.state_dir);
     println!("Configured: {}", yes_no(status.configured));
     println!("Enrolled: {}", yes_no(status.enrolled));
+    println!(
+        "Connection verification: {} ({})",
+        status.connection.code, status.connection.detail
+    );
     println!(
         "Agent process: {}",
         if status.process_alive {
@@ -1269,12 +1150,15 @@ fn print_status(status: &LocalStatus) {
             "not running"
         }
     );
-    println!(
-        "Startup: {} ({})",
-        status.startup.mechanism, status.startup.detail
-    );
+    if let Some(startup) = &status.startup {
+        println!("Startup: {} ({})", startup.mechanism, startup.detail);
+    } else {
+        println!(
+            "Startup: not inspected by connection verification; use infra status for startup details."
+        );
+    }
     if let Some(runtime) = &status.runtime {
-        println!("Connection state: {}", runtime.state);
+        println!("Recorded agent state: {}", runtime.state);
         if let Some(device_id) = &runtime.device_id {
             println!("Device ID: {device_id}");
         }
@@ -1312,7 +1196,7 @@ fn yes_no(value: bool) -> &'static str {
 fn print_help() {
     println!(
         "Infra device CLI\n\n\
-Usage:\n  infra status [--json] [--state-dir PATH]\n  infra doctor [--json] [--state-dir PATH]\n  infra setup [--gateway WS_URL] [--agent PATH] [--no-startup] [--state-dir PATH]\n  infra install --gateway WS_URL [--code CODE] [--name NAME] [--agent PATH] [--no-startup] [--state-dir PATH]\n  infra repair [--state-dir PATH]\n  infra reconnect [--state-dir PATH]\n  infra update [--version TAG] [--repo OWNER/REPO] [--base-url URL] [--trusted-update-key BASE64] [--state-dir PATH]\n  infra uninstall [--remove-state] [--state-dir PATH]\n"
+Usage:\n  infra status [--verify [--timeout-ms 15000]] [--json] [--state-dir PATH]\n  infra doctor [--json] [--state-dir PATH]\n  infra activate --source-dir PATH --install-dir PATH [--state-dir PATH] [setup options]\n  infra setup [--gateway WS_URL] [--agent PATH] [--no-startup] [--state-dir PATH]\n  infra install --gateway WS_URL [--code CODE] [--name NAME] [--agent PATH] [--no-startup] [--state-dir PATH]\n  infra repair [--state-dir PATH]\n  infra reconnect [--state-dir PATH]\n  infra update [--version TAG] [--repo OWNER/REPO] [--base-url URL] [--trusted-update-key BASE64] [--state-dir PATH]\n  infra uninstall [--remove-state] [--state-dir PATH]\n"
     );
 }
 
@@ -1360,11 +1244,83 @@ mod tests {
 
         let mut refreshed = previous.clone();
         refreshed.updated_unix_ms = 101;
-        assert!(runtime_is_newer(Some(&previous), &refreshed));
+        assert!(!runtime_is_newer(Some(&previous), &refreshed));
 
         let mut regenerated = previous.clone();
         regenerated.connection_generation = Some(8);
         assert!(runtime_is_newer(Some(&previous), &regenerated));
+    }
+
+    #[tokio::test]
+    async fn readiness_wait_rejects_cached_online_then_accepts_a_fresh_same_generation_receipt() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = LocalConfig::new("ws://127.0.0.1:12345/agent".into(), None).unwrap();
+        write_config(dir.path(), &config).unwrap();
+        let runtime: RuntimeStatus = serde_json::from_value(serde_json::json!({
+            "version":1,"pid":std::process::id(),"state":"online","device_id":"fixture",
+            "connection_generation":7,"gateway_epoch":"11111111-1111-4111-8111-111111111111",
+            "agent_instance_id":"22222222-2222-4222-8222-222222222222","updated_unix_ms":1
+        }))
+        .unwrap();
+        infra_local_state::write_runtime(dir.path(), &runtime).unwrap();
+        let mut proof = infra_local_state::ConnectionProof {
+            version: 1,
+            pid: runtime.pid,
+            device_id: "fixture".into(),
+            gateway_fingerprint: infra_local_state::gateway_fingerprint(&config.gateway_url),
+            gateway_epoch: runtime.gateway_epoch.unwrap(),
+            agent_instance_id: runtime.agent_instance_id.unwrap(),
+            connection_generation: 7,
+            probe_started_unix_ms: infra_local_state::now_ms().saturating_sub(100),
+            verified_unix_ms: infra_local_state::now_ms().saturating_sub(100),
+        };
+        infra_local_state::write_connection_proof(dir.path(), &proof).unwrap();
+        assert!(
+            wait_for_verified_runtime(dir.path(), None, Duration::from_millis(80), |_| true)
+                .await
+                .is_err()
+        );
+        let path = dir.path().to_owned();
+        // A delayed confirmation of a pre-check probe cannot certify a new check.
+        let delayed = proof.clone();
+        let delayed_path = path.clone();
+        let delayed_writer = tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+            let mut delayed = delayed;
+            delayed.verified_unix_ms = infra_local_state::now_ms();
+            infra_local_state::write_connection_proof(&delayed_path, &delayed).unwrap();
+        });
+        assert!(
+            wait_for_verified_runtime(dir.path(), None, Duration::from_millis(80), |_| true)
+                .await
+                .is_err()
+        );
+        delayed_writer.await.unwrap();
+        let writer = tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(25)).await;
+            proof.verified_unix_ms = infra_local_state::now_ms();
+            proof.probe_started_unix_ms = proof.verified_unix_ms;
+            infra_local_state::write_connection_proof(&path, &proof).unwrap();
+        });
+        let current = wait_for_verified_runtime(dir.path(), None, Duration::from_secs(2), |_| true)
+            .await
+            .unwrap();
+        assert_eq!(current.pid, runtime.pid);
+        assert_eq!(current.connection_generation, Some(7));
+        writer.await.unwrap();
+        assert!(
+            wait_for_verified_runtime(
+                dir.path(),
+                Some(&current),
+                Duration::from_millis(80),
+                |_| true
+            )
+            .await
+            .is_err()
+        );
+        let snapshot = collect_status(dir.path(), false).unwrap();
+        assert!(snapshot.startup.is_none());
+        assert!(!snapshot.connection.verified); // The real observer rejects the CLI test process as an agent.
     }
 
     #[test]

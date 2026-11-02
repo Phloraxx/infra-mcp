@@ -1,5 +1,6 @@
 //! Small cross-platform primitives used by the headless agent.
 
+pub mod command_runner;
 pub mod secret_store;
 
 use anyhow::Context;

@@ -1,5 +1,5 @@
-# Run in an isolated Windows CI VM. No Scheduled Task, real user profile, or
-# live agent is changed. Tests Windows PowerShell 5.1 compatibility.
+# Run on an isolated Windows CI runner using test-owned tasks/profiles only.
+# Tests Windows PowerShell 5.1 compatibility; no daily-use agent is accessed.
 $ErrorActionPreference = "Stop"
 $Root = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
 $TempRoot = Join-Path ([IO.Path]::GetTempPath()) ("infra-win-smoke-" + [guid]::NewGuid().ToString("N"))
@@ -124,7 +124,49 @@ try {
     }
   }
   if (-not $Online) { throw "Windows signed agent never came online" }
-  Write-Host "Windows bootstrap smoke PASS: verified preflight, spaces in paths, signed enrollment, Scheduled Task launch, CLI status and live agent handshake"
+  $TaskStatusText = & (Join-Path $Install "infra.exe") status --json --state-dir $State
+  if ($LASTEXITCODE -ne 0) { throw "Native task status query failed" }
+  $TaskStatus = $TaskStatusText | ConvertFrom-Json
+  if (-not $TaskStatus.startup.installed -or -not $TaskStatus.startup.active -or
+      -not $TaskStatus.startup.reliable) {
+    throw "Native structured startup status did not confirm the running recovery-enabled task"
+  }
+  if (-not $TaskStatus.connection.verified) { throw "Windows startup did not confirm a signed status roundtrip" }
+  $PreviousProof = $TaskStatus.connection.verified_unix_ms
+  $PreviousPid = $TaskStatus.runtime.pid
+  $PreviousGeneration = $TaskStatus.runtime.connection_generation
+  & (Join-Path $Install "infra.exe") setup --agent (Join-Path $Install "infra-agent.exe") --state-dir $State
+  if ($LASTEXITCODE -ne 0) { throw "Healthy Windows native setup rerun failed" }
+  $VerifiedText = & (Join-Path $Install "infra.exe") status --verify --json --state-dir $State
+  if ($LASTEXITCODE -ne 0) { throw "Fresh Windows connection verification failed" }
+  $Verified = $VerifiedText | ConvertFrom-Json
+  if (-not $Verified.connection.verified -or $null -ne $Verified.startup -or
+      $Verified.connection.verified_unix_ms -le $PreviousProof -or
+      $Verified.runtime.pid -ne $PreviousPid -or
+      $Verified.runtime.connection_generation -ne $PreviousGeneration) {
+    throw "Healthy setup rerun did not preserve PID/generation with fresh signed verification"
+  }
+  # Test that the task will stay running on laptops and recover after a crash.
+  $Task = Get-ScheduledTask -TaskName "Infra MCP Agent" -ErrorAction Stop
+  $TaskSettings = $Task.Settings
+  if ($TaskSettings.ExecutionTimeLimit -ne "PT0S" -or
+      $TaskSettings.RestartCount -lt 1 -or
+      $TaskSettings.DisallowStartIfOnBatteries -or
+      $TaskSettings.StopIfGoingOnBatteries -or
+      -not $TaskSettings.StartWhenAvailable) {
+    throw "Windows Infra Scheduled Task lacks durable restart/battery/runtime settings"
+  }
+  $Logon = @($Task.Triggers | Where-Object { $_.CimClass.CimClassName -eq "MSFT_TaskLogonTrigger" })
+  $Periodic = @($Task.Triggers | Where-Object {
+    $_.CimClass.CimClassName -eq "MSFT_TaskTimeTrigger" -and $_.Repetition.Interval -eq "PT5M"
+  })
+  if ($Logon.Count -ne 1 -or $Periodic.Count -ne 1) {
+    throw "Windows Infra Scheduled Task lacks logon or periodic process recovery"
+  }
+  Write-Host "Windows bootstrap smoke PASS: verified preflight, spaces in paths, signed enrollment, resilient Scheduled Task launch, CLI status and live agent handshake"
+
+  python (Join-Path $Root "scripts\test-install-safety.py") --binaries (Join-Path $Root "target\release") --live-fixture-root $TempRoot --live-state $State --live-install $Install
+  if ($LASTEXITCODE -ne 0) { throw "Native Windows pair/locked-file/failed-readiness rollback acceptance failed" }
 
   # New happy path: no code or friendly name. Pair a second local test profile
   # through the same compiled native CLI and an authenticated owner action.
@@ -141,7 +183,7 @@ try {
     if ($PairProcess.HasExited -and $null -ne $PairProcess.ExitCode -and $PairProcess.ExitCode -ne 0) {
       throw "Native Windows owner pairing exited early: $(Get-Content (Join-Path $TempRoot 'pair.err') -Raw)"
     }
-    $Pending = @(Invoke-RestMethod -Uri "$Base/api/pair/requests" -Headers $Headers)
+    $Pending = @(Invoke-RestMethod -Uri "$Base/api/pair/requests" -Headers $Headers | Where-Object { $null -ne $_ -and $_.request_id -and $_.verification_code -and $_.device_name })
     if ($Pending.Count -gt 0) { $PendingPair = $Pending[0]; break }
   }
   if ($null -eq $PendingPair) { throw "Native Windows agent did not request owner pairing" }

@@ -1,7 +1,11 @@
 mod auth;
 mod copy;
+mod mcp_actions;
+mod mcp_result;
 mod oauth;
 mod pairing;
+mod pending;
+mod readiness;
 mod store;
 
 use anyhow::Context;
@@ -25,15 +29,17 @@ use hmac::{Hmac, Mac};
 use infra_protocol::{
     AgentOperation, AgentRequest, AgentResponse, AgentToGateway, AuthChallenge, ContainerAction,
     ContainerRequest, DEFAULT_CONTROL_FRAME_LIMIT, DesktopAction, DesktopRequest, DeviceAuthStart,
-    DeviceHello, ExecOutput, FileAction, FileRequest, GatewayToAgent, GitAction, GitRequest,
-    HelloAck, JobAction, JobRequest, LegacyDeviceHello, NetworkAction, NetworkRequest,
-    OperationResult, PROTOCOL_VERSION, ProcessAction, ProcessRequest, ReconcileSnapshot,
-    SearchMode, SearchRequest, ServiceAction, ServiceRequest, SignedDeviceHello, SystemAction,
-    SystemRequest, TerminalAction, TerminalRequest, TransferAction, TransferRequest,
-    signed_auth_message,
+    DeviceHello, ExecOutput, FILE_LIST_PAGINATION_CAPABILITY, FileAction, FileRequest,
+    GatewayToAgent, GitAction, GitRequest, HelloAck, JobAction, JobRequest, LegacyDeviceHello,
+    MAX_DIRECTORY_ENTRIES, MAX_DIRECTORY_PAGE_SIZE, NetworkAction, NetworkRequest, OperationResult,
+    PROTOCOL_VERSION, ProcessAction, ProcessRequest, ReconcileSnapshot, SearchMode, SearchRequest,
+    ServiceAction, ServiceRequest, SignedDeviceHello, SystemAction, SystemRequest, TerminalAction,
+    TerminalRequest, TransferAction, TransferRequest, signed_auth_message,
 };
+use mcp_actions::*;
+use mcp_result::{ToolError, ToolJson as McpJson};
+use pending::PendingRequests;
 use rmcp::{
-    Json as McpJson,
     handler::server::wrapper::Parameters,
     tool, tool_router,
     transport::streamable_http_server::{
@@ -55,7 +61,7 @@ use std::{
     time::{Duration, Instant},
 };
 use store::{DeviceRecord, Store, StoreError, now_ms};
-use tokio::sync::{Mutex, RwLock, broadcast, mpsc, oneshot};
+use tokio::sync::{RwLock, broadcast, mpsc};
 use tracing::{info, warn};
 use uuid::Uuid;
 
@@ -74,7 +80,7 @@ struct AppState {
     gateway_epoch: Uuid,
     next_generation: Arc<AtomicU64>,
     devices: Arc<RwLock<HashMap<String, DeviceConnection>>>,
-    pending: Arc<Mutex<HashMap<Uuid, oneshot::Sender<AgentResponse>>>>,
+    pending: PendingRequests,
     events: broadcast::Sender<DashboardEvent>,
     store: Store,
 }
@@ -90,7 +96,7 @@ impl AppState {
             gateway_epoch: Uuid::new_v4(),
             next_generation: Arc::new(AtomicU64::new(1)),
             devices: Arc::new(RwLock::new(HashMap::new())),
-            pending: Arc::new(Mutex::new(HashMap::new())),
+            pending: PendingRequests::default(),
             events,
             store,
         }
@@ -296,18 +302,23 @@ enum DispatchError {
     },
     Revoked(String),
     Offline(String),
+    Unsupported(String),
     Storage(String),
     ConnectionClosed,
-    ResponseClosed,
+    QueueBusy,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
 struct McpExecInput {
+    /// Stable device ID or unique name from devices. Check online state and capabilities first.
     device: String,
+    /// Command to execute. Desktop Windows uses cmd.exe, Unix uses /bin/sh; Android is restricted. Use terminal for interactive state.
     command: String,
     #[serde(default)]
+    /// Working directory for this operation only. Omit to use the agent default; it does not change later calls.
     cwd: Option<String>,
     #[serde(default)]
+    /// Execution timeout in milliseconds: default 30000, clamped to 100..120000. Output is bounded; use jobs for long work.
     timeout_ms: Option<u64>,
 }
 #[derive(Debug, Serialize, JsonSchema)]
@@ -328,111 +339,164 @@ struct McpExecOutput {
 
 #[derive(Debug, Deserialize, JsonSchema)]
 struct McpFilesInput {
+    /// Stable device ID or unique name from devices. Check online state and capabilities first.
     device: String,
-    action: String,
+    /// Choose an allowed action. Only that action is executed; provide its required fields.
+    action: FileActionName,
     #[serde(default)]
+    /// Target path. Desktop paths follow the remote OS; Android paths must stay inside its authorized workspace.
     path: Option<String>,
     #[serde(default)]
+    /// Required destination path for copy/move on the same device; use the copy tool for another device.
     destination: Option<String>,
     #[serde(default)]
+    /// Required UTF-8 content for write/append. These actions can mutate files.
     content: Option<String>,
     #[serde(default)]
+    /// For read: byte offset. For list: entry offset in native filename order (0..100000), requiring files.list_page capability. Continue with next_offset while has_more; restart at zero if the directory changes.
     offset: Option<u64>,
     #[serde(default)]
+    /// For read: maximum bytes. For list: maximum entries (1..1000, default 1000), requiring files.list_page when supplied. A response byte cap can shorten the page; use returned next_offset, not offset + length.
     length: Option<usize>,
     #[serde(default)]
+    /// Allow recursive behavior for the selected directory action. Permanent deletion is consequential.
     recursive: Option<bool>,
     #[serde(default)]
+    /// Create missing parent directories for the selected write/upload action; default false.
     create_parents: Option<bool>,
     #[serde(default)]
+    /// Required exact source text for exact_edit; matching is literal.
     old: Option<String>,
     #[serde(default)]
+    /// Required replacement text for exact_edit.
     new: Option<String>,
     #[serde(default)]
+    /// Expected exact_edit match count. Use this to reject unexpected file changes.
     expected_replacements: Option<usize>,
 }
 #[derive(Debug, Deserialize, JsonSchema)]
 struct McpSearchInput {
+    /// Stable device ID or unique name from devices. Check online state and capabilities first.
     device: String,
+    /// Known remote directory to search. Bound the root to the relevant project.
     root: String,
+    /// Search/filter text. Content search uses regex unless literal is true.
     query: String,
-    mode: String,
+    /// files searches path names; content searches UTF-8 text. Binary and large files may be skipped.
+    mode: SearchModeName,
     #[serde(default)]
+    /// Treat search query as literal text instead of regex.
     literal: Option<bool>,
     #[serde(default)]
+    /// Use case-insensitive matching; default false.
     ignore_case: Option<bool>,
     #[serde(default)]
+    /// Include hidden paths; default false. Git-ignore rules still apply.
     include_hidden: Option<bool>,
     #[serde(default)]
+    /// Optional glob to restrict matching file names or relative paths.
     file_pattern: Option<String>,
     #[serde(default)]
+    /// Maximum search hits; default 100, cap 500. Inspect truncated and skipped-file counts.
     max_results: Option<usize>,
     #[serde(default)]
+    /// Context lines around content matches; cap 5.
     context_lines: Option<usize>,
 }
 #[derive(Debug, Deserialize, JsonSchema)]
 struct McpProcessesInput {
+    /// Stable device ID or unique name from devices. Check online state and capabilities first.
     device: String,
-    action: String,
+    /// Choose an allowed action. Only that action is executed; provide its required fields.
+    action: ProcessActionName,
     #[serde(default)]
+    /// Search/filter text. Content search uses regex unless literal is true.
     query: Option<String>,
     #[serde(default)]
+    /// Required target process ID for terminate; inspect the process before terminating it.
     pid: Option<u32>,
     #[serde(default)]
+    /// Request forceful termination; default false. OS permissions still apply.
     force: Option<bool>,
 }
 #[derive(Debug, Deserialize, JsonSchema)]
 struct McpJobsInput {
+    /// Stable device ID or unique name from devices. Check online state and capabilities first.
     device: String,
-    action: String,
+    /// Choose an allowed action. Only that action is executed; provide its required fields.
+    action: JobActionName,
     #[serde(default)]
+    /// Command to execute. Desktop Windows uses cmd.exe, Unix uses /bin/sh; Android is restricted. Use terminal for interactive state.
     command: Option<String>,
     #[serde(default)]
+    /// Working directory for this operation only. Omit to use the agent default; it does not change later calls.
     cwd: Option<String>,
     #[serde(default)]
+    /// Optional job execution deadline in milliseconds, clamped to 100..604800000. Omit for no job deadline.
     timeout_ms: Option<u64>,
     #[serde(default)]
+    /// Required returned job UUID for read/cancel. Reuse the ID across reconnects; do not start duplicate work.
     job_id: Option<String>,
     #[serde(default)]
+    /// Byte offset for range/output/chunk reads; preserve the returned next offset rather than counting characters.
     offset: Option<u64>,
     #[serde(default)]
+    /// Maximum bytes for read/output/chunk actions, subject to agent caps. Does not limit directory list.
     length: Option<usize>,
 }
 #[derive(Debug, Deserialize, JsonSchema)]
 struct McpTerminalInput {
+    /// Stable device ID or unique name from devices. Check online state and capabilities first.
     device: String,
-    action: String,
+    /// Choose an allowed action. Only that action is executed; provide its required fields.
+    action: TerminalActionName,
     #[serde(default)]
+    /// Command to execute. Desktop Windows uses cmd.exe, Unix uses /bin/sh; Android is restricted. Use terminal for interactive state.
     command: Option<String>,
     #[serde(default)]
+    /// Working directory for this operation only. Omit to use the agent default; it does not change later calls.
     cwd: Option<String>,
     #[serde(default)]
+    /// Required returned PTY UUID for read/write/resize/close. Reattach with the same ID.
     session_id: Option<String>,
     #[serde(default)]
+    /// Required terminal write data, including newline when needed. Never replay an uncertain write.
     data: Option<String>,
     #[serde(default)]
+    /// Terminal row count; required with cols for resize.
     rows: Option<u16>,
     #[serde(default)]
+    /// Terminal column count; required with rows for resize.
     cols: Option<u16>,
     #[serde(default)]
+    /// Byte offset for range/output/chunk reads; preserve the returned next offset rather than counting characters.
     offset: Option<u64>,
     #[serde(default)]
+    /// Maximum bytes for read/output/chunk actions, subject to agent caps. Does not limit directory list.
     length: Option<usize>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
 struct McpCopyInput {
+    /// Source device ID or unique name from devices; transfer capability is required.
     source_device: String,
+    /// Destination device ID or unique name; transfer capability is required.
     destination_device: String,
+    /// Source file path on source_device.
     source_path: String,
+    /// Destination file path on destination_device.
     destination_path: String,
     #[serde(default)]
+    /// Allow replacing an existing destination; default false.
     overwrite: Option<bool>,
     #[serde(default)]
+    /// Create missing parent directories for the selected write/upload action; default false.
     create_parents: Option<bool>,
     #[serde(default)]
+    /// Source download UUID from a previous partial copy; resume requires both transfer IDs.
     source_transfer_id: Option<String>,
     #[serde(default)]
+    /// Destination upload UUID from a previous partial copy; inspect status before retrying uncertain chunks.
     destination_transfer_id: Option<String>,
     /// Max bytes relayed this request (default 16 MiB, cap 64 MiB).
     #[serde(default)]
@@ -441,104 +505,149 @@ struct McpCopyInput {
 
 #[derive(Debug, Deserialize, JsonSchema)]
 struct McpTransferInput {
+    /// Stable device ID or unique name from devices. Check online state and capabilities first.
     device: String,
-    action: String,
+    /// Choose an allowed action. Only that action is executed; provide its required fields.
+    action: TransferActionName,
     #[serde(default)]
+    /// Target path. Desktop paths follow the remote OS; Android paths must stay inside its authorized workspace.
     path: Option<String>,
     #[serde(default)]
+    /// Required declared file size in bytes for upload_begin.
     size: Option<u64>,
     #[serde(default)]
+    /// Optional expected SHA-256 digest; upload commit verifies it before final activation.
     sha256: Option<String>,
     #[serde(default)]
+    /// Allow replacing an existing destination; default false.
     overwrite: Option<bool>,
     #[serde(default)]
+    /// Create missing parent directories for the selected write/upload action; default false.
     create_parents: Option<bool>,
     #[serde(default)]
+    /// Required returned transfer UUID for chunk/commit/status/cancel. Preserve it for resumption.
     transfer_id: Option<String>,
     #[serde(default)]
+    /// Byte offset for range/output/chunk reads; preserve the returned next offset rather than counting characters.
     offset: Option<u64>,
     #[serde(default)]
+    /// Required upload_chunk bytes encoded as base64; raw chunk cap is 256 KiB.
     data_base64: Option<String>,
     #[serde(default)]
+    /// Maximum bytes for read/output/chunk actions, subject to agent caps. Does not limit directory list.
     length: Option<usize>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
 struct McpDesktopInput {
+    /// Stable device ID or unique name from devices. Check online state and capabilities first.
     device: String,
-    action: String,
+    /// Choose an allowed action. Only that action is executed; provide its required fields.
+    action: DesktopActionName,
     #[serde(default)]
+    /// Optional display identifier returned by displays.
     display: Option<u32>,
     #[serde(default)]
+    /// Pixel x coordinate; required for click. For a screenshot region supply x, y, width and height together.
     x: Option<i32>,
     #[serde(default)]
+    /// Pixel y coordinate; required for click. Screenshot regions require all four bounds.
     y: Option<i32>,
     #[serde(default)]
+    /// Screenshot-region width in pixels; requires x, y and height.
     width: Option<u32>,
     #[serde(default)]
+    /// Screenshot-region height in pixels; requires x, y and width.
     height: Option<u32>,
     #[serde(default)]
+    /// Required application identifier/name for focus. Local desktop permission may be needed.
     app: Option<String>,
     #[serde(default)]
+    /// Required text for type_text/clipboard_set. These actions change the device UI or clipboard.
     text: Option<String>,
     #[serde(default)]
+    /// Required key name for key; combine with modifiers when needed.
     key: Option<String>,
     #[serde(default)]
+    /// Optional modifier names for key; default empty.
     modifiers: Option<Vec<String>>,
     #[serde(default)]
+    /// Optional click button; defaults to primary. Availability depends on the platform.
     button: Option<String>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
 struct McpSystemInput {
+    /// Stable device ID or unique name from devices. Check online state and capabilities first.
     device: String,
-    action: String,
+    /// Choose an allowed action. Only that action is executed; provide its required fields.
+    action: SystemActionName,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
 struct McpNetworkInput {
+    /// Stable device ID or unique name from devices. Check online state and capabilities first.
     device: String,
-    action: String,
+    /// Choose an allowed action. Only that action is executed; provide its required fields.
+    action: NetworkActionName,
     #[serde(default)]
+    /// Required hostname/IP for resolve and tcp_check.
     host: Option<String>,
     #[serde(default)]
+    /// Required TCP port for tcp_check.
     port: Option<u16>,
     #[serde(default)]
+    /// TCP connection timeout in milliseconds: default 3000, clamped to 100..30000. Used only by tcp_check.
     timeout_ms: Option<u64>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
 struct McpServiceInput {
+    /// Stable device ID or unique name from devices. Check online state and capabilities first.
     device: String,
-    action: String,
+    /// Choose an allowed action. Only that action is executed; provide its required fields.
+    action: ServiceActionName,
     #[serde(default)]
+    /// Required service name for status/start/stop/restart. Linux services are user scope.
     name: Option<String>,
     #[serde(default)]
+    /// Search/filter text. Content search uses regex unless literal is true.
     query: Option<String>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
 struct McpContainerInput {
+    /// Stable device ID or unique name from devices. Check online state and capabilities first.
     device: String,
-    action: String,
+    /// Choose an allowed action. Only that action is executed; provide its required fields.
+    action: ContainerActionName,
     #[serde(default)]
+    /// Required Docker container name/ID except for list. Docker must be available on the device.
     container: Option<String>,
     #[serde(default)]
+    /// Maximum recent log lines; ask for a bounded relevant excerpt.
     tail: Option<usize>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
 struct McpGitInput {
+    /// Stable device ID or unique name from devices. Check online state and capabilities first.
     device: String,
-    action: String,
+    /// Choose an allowed action. Only that action is executed; provide its required fields.
+    action: GitActionName,
+    /// Required remote repository directory. Git credentials must already work noninteractively.
     repo: String,
     #[serde(default)]
+    /// For diff, select staged changes; default false.
     staged: Option<bool>,
     #[serde(default)]
+    /// Maximum Git log entries, subject to the agent cap.
     limit: Option<usize>,
     #[serde(default)]
+    /// Optional Git remote name; defaults to the agent operation default.
     remote: Option<String>,
     #[serde(default)]
+    /// Optional branch for pull/push. Pull is fast-forward-only.
     branch: Option<String>,
 }
 
@@ -556,22 +665,22 @@ impl InfraMcp {
 impl InfraMcp {
     #[tool(
         name = "devices",
-        description = "List enrolled Infra devices, online state, capabilities and active persistent work."
+        description = "Discover enrolled devices, online state, capabilities and active persistent work. Select a returned unique device ID for later tools. Offline capabilities and disconnect reasons are cached history; Android capability names do not imply desktop-equivalent access."
     )]
-    async fn devices(&self) -> Result<McpJson<Vec<McpDeviceView>>, String> {
-        Ok(McpJson(
-            device_views(&self.state).await.map_err(|e| e.to_string())?,
-        ))
+    async fn devices(&self) -> Result<McpJson<Vec<McpDeviceView>>, ToolError> {
+        Ok(McpJson(device_views(&self.state).await.map_err(
+            |error| ToolError::new("device_registry_error", error.to_string()),
+        )?))
     }
 
     #[tool(
         name = "exec",
-        description = "Run a bounded one-shot command on an online Infra device as the agent user."
+        description = "Run a short noninteractive command as the device user. Windows uses cmd.exe; Unix uses /bin/sh; Android exec is restricted. Default 30s, maximum 120s. Use jobs for long work and terminal for interactive/stateful work. Inspect exit_code; never replay outcome_unknown."
     )]
     async fn exec(
         &self,
         Parameters(input): Parameters<McpExecInput>,
-    ) -> Result<McpJson<McpExecOutput>, String> {
+    ) -> Result<McpJson<McpExecOutput>, ToolError> {
         let device_id = resolve_device(&self.state, &input.device)
             .await
             .map_err(dispatch_error)?;
@@ -598,7 +707,7 @@ impl InfraMcp {
     async fn files(
         &self,
         Parameters(input): Parameters<McpFilesInput>,
-    ) -> Result<McpJson<serde_json::Value>, String> {
+    ) -> Result<McpJson<serde_json::Value>, ToolError> {
         let action = match input.action.as_str() {
             "read" => FileAction::Read {
                 path: required(input.path, "path")?,
@@ -624,9 +733,29 @@ impl InfraMcp {
             "hash" => FileAction::Hash {
                 path: required(input.path, "path")?,
             },
-            "list" => FileAction::List {
-                path: required(input.path, "path")?,
-            },
+            "list" => {
+                if input
+                    .length
+                    .is_some_and(|length| length == 0 || length > MAX_DIRECTORY_PAGE_SIZE)
+                {
+                    return Err(ToolError::invalid(format!(
+                        "files.list length must be between 1 and {MAX_DIRECTORY_PAGE_SIZE} entries"
+                    )));
+                }
+                if input
+                    .offset
+                    .is_some_and(|offset| offset > MAX_DIRECTORY_ENTRIES as u64)
+                {
+                    return Err(ToolError::invalid(format!(
+                        "files.list offset must not exceed {MAX_DIRECTORY_ENTRIES} entries"
+                    )));
+                }
+                FileAction::List {
+                    path: required(input.path, "path")?,
+                    offset: input.offset,
+                    length: input.length,
+                }
+            }
             "stat" => FileAction::Stat {
                 path: required(input.path, "path")?,
             },
@@ -667,7 +796,7 @@ impl InfraMcp {
     async fn search(
         &self,
         Parameters(input): Parameters<McpSearchInput>,
-    ) -> Result<McpJson<serde_json::Value>, String> {
+    ) -> Result<McpJson<serde_json::Value>, ToolError> {
         let mode = match input.mode.as_str() {
             "files" => SearchMode::Files,
             "content" => SearchMode::Content,
@@ -699,7 +828,7 @@ impl InfraMcp {
     async fn processes(
         &self,
         Parameters(input): Parameters<McpProcessesInput>,
-    ) -> Result<McpJson<serde_json::Value>, String> {
+    ) -> Result<McpJson<serde_json::Value>, ToolError> {
         let action = match input.action.as_str() {
             "list" => ProcessAction::List { query: input.query },
             "terminate" => ProcessAction::Terminate {
@@ -719,12 +848,12 @@ impl InfraMcp {
 
     #[tool(
         name = "jobs",
-        description = "Manage durable background command jobs. Actions: start, list, read, cancel."
+        description = "Start or inspect durable noninteractive command jobs. start requires command; read/cancel require job_id. Preserve returned IDs and byte offsets across reconnects. Windows commands use cmd.exe; Unix uses /bin/sh. Job execution status is inside the returned job metadata."
     )]
     async fn jobs(
         &self,
         Parameters(input): Parameters<McpJobsInput>,
-    ) -> Result<McpJson<serde_json::Value>, String> {
+    ) -> Result<McpJson<serde_json::Value>, ToolError> {
         let action = match input.action.as_str() {
             "start" => JobAction::Start {
                 command: required(input.command, "command")?,
@@ -753,12 +882,12 @@ impl InfraMcp {
 
     #[tool(
         name = "terminal",
-        description = "Manage persistent PTY sessions independent of the MCP request. Actions: open, list, read, write, resize, close."
+        description = "Manage persistent PTY sessions. open requires command; read/write/resize/close require session_id; write also requires data, resize requires rows and cols. Reads use byte offsets and can report expired retention. Reattach using the same ID; never replay uncertain input."
     )]
     async fn terminal(
         &self,
         Parameters(input): Parameters<McpTerminalInput>,
-    ) -> Result<McpJson<serde_json::Value>, String> {
+    ) -> Result<McpJson<serde_json::Value>, ToolError> {
         let action = match input.action.as_str() {
             "open" => TerminalAction::Open {
                 command: required(input.command, "command")?,
@@ -778,8 +907,8 @@ impl InfraMcp {
             },
             "resize" => TerminalAction::Resize {
                 session_id: parse_uuid(input.session_id, "session_id")?,
-                rows: input.rows.ok_or("rows is required")?,
-                cols: input.cols.ok_or("cols is required")?,
+                rows: required(input.rows, "rows")?,
+                cols: required(input.cols, "cols")?,
             },
             "close" => TerminalAction::Close {
                 session_id: parse_uuid(input.session_id, "session_id")?,
@@ -802,11 +931,11 @@ impl InfraMcp {
     async fn transfer(
         &self,
         Parameters(input): Parameters<McpTransferInput>,
-    ) -> Result<McpJson<serde_json::Value>, String> {
+    ) -> Result<McpJson<serde_json::Value>, ToolError> {
         let action = match input.action.as_str() {
             "upload_begin" => TransferAction::UploadBegin {
                 path: required(input.path, "path")?,
-                size: input.size.ok_or("size is required")?,
+                size: required(input.size, "size")?,
                 sha256: input.sha256,
                 overwrite: input.overwrite.unwrap_or(false),
                 create_parents: input.create_parents.unwrap_or(false),
@@ -852,7 +981,7 @@ impl InfraMcp {
     async fn copy(
         &self,
         Parameters(input): Parameters<McpCopyInput>,
-    ) -> Result<McpJson<serde_json::Value>, String> {
+    ) -> Result<McpJson<serde_json::Value>, ToolError> {
         Ok(McpJson(copy::run(&self.state, input).await?))
     }
 
@@ -863,7 +992,7 @@ impl InfraMcp {
     async fn desktop(
         &self,
         Parameters(input): Parameters<McpDesktopInput>,
-    ) -> Result<McpJson<serde_json::Value>, String> {
+    ) -> Result<McpJson<serde_json::Value>, ToolError> {
         let action = match input.action.as_str() {
             "permissions" => DesktopAction::Permissions,
             "displays" => DesktopAction::Displays,
@@ -912,7 +1041,7 @@ impl InfraMcp {
     async fn system(
         &self,
         Parameters(input): Parameters<McpSystemInput>,
-    ) -> Result<McpJson<serde_json::Value>, String> {
+    ) -> Result<McpJson<serde_json::Value>, ToolError> {
         let action = match input.action.as_str() {
             "summary" => SystemAction::Summary,
             "disks" => SystemAction::Disks,
@@ -935,7 +1064,7 @@ impl InfraMcp {
     async fn network(
         &self,
         Parameters(input): Parameters<McpNetworkInput>,
-    ) -> Result<McpJson<serde_json::Value>, String> {
+    ) -> Result<McpJson<serde_json::Value>, ToolError> {
         let action = match input.action.as_str() {
             "listeners" => NetworkAction::Listeners,
             "resolve" => NetworkAction::Resolve {
@@ -943,7 +1072,7 @@ impl InfraMcp {
             },
             "tcp_check" => NetworkAction::TcpCheck {
                 host: required(input.host, "host")?,
-                port: input.port.ok_or("port is required")?,
+                port: required(input.port, "port")?,
                 timeout_ms: input.timeout_ms,
             },
             _ => return Err("unknown network action".into()),
@@ -964,7 +1093,7 @@ impl InfraMcp {
     async fn services(
         &self,
         Parameters(input): Parameters<McpServiceInput>,
-    ) -> Result<McpJson<serde_json::Value>, String> {
+    ) -> Result<McpJson<serde_json::Value>, ToolError> {
         let action = match input.action.as_str() {
             "list" => ServiceAction::List { query: input.query },
             "status" => ServiceAction::Status {
@@ -997,7 +1126,7 @@ impl InfraMcp {
     async fn containers(
         &self,
         Parameters(input): Parameters<McpContainerInput>,
-    ) -> Result<McpJson<serde_json::Value>, String> {
+    ) -> Result<McpJson<serde_json::Value>, ToolError> {
         let action = match input.action.as_str() {
             "list" => ContainerAction::List,
             "inspect" => ContainerAction::Inspect {
@@ -1034,7 +1163,7 @@ impl InfraMcp {
     async fn git(
         &self,
         Parameters(input): Parameters<McpGitInput>,
-    ) -> Result<McpJson<serde_json::Value>, String> {
+    ) -> Result<McpJson<serde_json::Value>, ToolError> {
         let action = match input.action.as_str() {
             "status" => GitAction::Status { repo: input.repo },
             "diff" => GitAction::Diff {
@@ -1809,7 +1938,7 @@ async fn dashboard_operation(
             Ok(McpJson(value)) => Json(value).into_response(),
             Err(error) => (
                 StatusCode::SERVICE_UNAVAILABLE,
-                Json(serde_json::json!({"error":error})),
+                Json(serde_json::json!({"error":error.message,"error_code":error.code})),
             )
                 .into_response(),
         }
@@ -2524,7 +2653,7 @@ async fn tool_operation(
     device: String,
     operation: AgentOperation,
     timeout_ms: u64,
-) -> Result<McpJson<serde_json::Value>, String> {
+) -> Result<McpJson<serde_json::Value>, ToolError> {
     let action = operation_label(&operation);
     let device = resolve_device(state, &device)
         .await
@@ -2621,7 +2750,10 @@ fn exec_output(response: AgentResponse) -> McpExecOutput {
                     out.stderr = Some(v.stderr);
                     out.truncated = Some(v.truncated)
                 }
-                Err(e) => out.error = Some(format!("invalid exec response: {e}")),
+                Err(e) => {
+                    out.status = "failed".into();
+                    out.error = Some(format!("invalid exec response: {e}"));
+                }
             }
         }
         OperationResult::Failed { error } => {
@@ -2645,11 +2777,12 @@ fn exec_output(response: AgentResponse) -> McpExecOutput {
     };
     out
 }
-fn required<T>(value: Option<T>, name: &str) -> Result<T, String> {
-    value.ok_or_else(|| format!("{name} is required"))
+fn required<T>(value: Option<T>, name: &str) -> Result<T, ToolError> {
+    value.ok_or_else(|| ToolError::invalid(format!("{name} is required")))
 }
-fn parse_uuid(value: Option<String>, name: &str) -> Result<Uuid, String> {
-    Uuid::parse_str(&required(value, name)?).map_err(|_| format!("{name} must be a UUID"))
+fn parse_uuid(value: Option<String>, name: &str) -> Result<Uuid, ToolError> {
+    Uuid::parse_str(&required(value, name)?)
+        .map_err(|_| ToolError::invalid(format!("{name} must be a UUID")))
 }
 /// Accept stable IDs or unique human-friendly names. Never mistake an unknown name for
 /// an offline device. Name matching is case-insensitive only after exact matching.
@@ -2726,12 +2859,13 @@ fn dispatch_error(error: DispatchError) -> String {
         DispatchError::Offline(name) => format!(
             "device_offline: '{name}' is enrolled but is not connected; it will reconnect when reachable"
         ),
+        DispatchError::Unsupported(message) => format!("unsupported: {message}"),
         DispatchError::Storage(error) => format!("device_registry_error: {error}"),
         DispatchError::ConnectionClosed => {
             "device_connection_closed: device disconnected while sending the request".into()
         }
-        DispatchError::ResponseClosed => {
-            "device_response_closed: agent response channel closed".into()
+        DispatchError::QueueBusy => {
+            "agent_busy: request deadline expired before dispatch; operation was not sent and may be retried".into()
         }
     }
 }
@@ -2742,43 +2876,57 @@ async fn dispatch_to_device(
     operation: AgentOperation,
     timeout_ms: u64,
 ) -> Result<AgentResponse, DispatchError> {
+    let deadline = tokio::time::Instant::now() + Duration::from_millis(timeout_ms);
     let device_id = resolve_device(state, &selector).await?;
-    let (tx, retire) = {
+    let (tx, retire, generation) = {
         let devices = state.devices.read().await;
-        devices
+        let device = devices
             .get(&device_id)
-            .map(|d| (d.tx.clone(), d.retire.clone()))
-            .ok_or_else(|| DispatchError::Offline(selector.clone()))?
+            .ok_or_else(|| DispatchError::Offline(selector.clone()))?;
+        if let AgentOperation::Files(FileRequest {
+            action: FileAction::List { offset, length, .. },
+        }) = &operation
+            && (offset.is_some() || length.is_some())
+            && !device
+                .hello
+                .capabilities
+                .iter()
+                .any(|capability| capability == FILE_LIST_PAGINATION_CAPABILITY)
+        {
+            return Err(DispatchError::Unsupported(
+                "this connection does not advertise files.list_page; update the device agent for directory pagination, or omit offset/length for its legacy bounded listing".into(),
+            ));
+        }
+        (device.tx.clone(), device.retire.clone(), device.generation)
     };
-    let id = Uuid::new_v4();
-    let request = GatewayToAgent::Request(AgentRequest { id, operation });
-    let (reply_tx, reply_rx) = oneshot::channel();
-    state.pending.lock().await.insert(id, reply_tx);
-    if tx.send(request).await.is_err() {
-        state.pending.lock().await.remove(&id);
-        let _ = retire.try_send(());
-        return Err(DispatchError::ConnectionClosed);
-    }
-    match tokio::time::timeout(Duration::from_millis(timeout_ms), reply_rx).await {
-        Ok(Ok(r)) => Ok(r),
+    // Reserve before registering a waiter: cancellation or timeout while queued
+    // cannot leak pending state or enqueue a command after its caller gives up.
+    let permit = match tokio::time::timeout_at(deadline, tx.reserve()).await {
+        Ok(Ok(permit)) => permit,
         Ok(Err(_)) => {
             let _ = retire.try_send(());
-            Err(DispatchError::ResponseClosed)
+            return Err(DispatchError::ConnectionClosed);
         }
-        Err(_) => {
-            state.pending.lock().await.remove(&id);
-            // An unanswered command might have run. Disconnect instead of replaying it.
-            let _ = retire.try_send(());
-            Ok(AgentResponse {
-                id,
-                result: OperationResult::OutcomeUnknown {
-                    error:
-                        "gateway timed out waiting for device response; operation was not replayed"
-                            .into(),
-                },
-            })
-        }
-    }
+        Err(_) => return Err(DispatchError::QueueBusy),
+    };
+    let id = Uuid::new_v4();
+    let (_pending, reply_rx) = state.pending.register(id, device_id.clone(), generation);
+    permit.send(GatewayToAgent::Request(AgentRequest { id, operation }));
+    let error = match tokio::time::timeout_at(deadline, reply_rx).await {
+        Ok(Ok(response)) => return Ok(response),
+        Ok(Err(_)) => "device connection closed after dispatch; operation was not replayed",
+        Err(_) => "gateway timed out waiting for device response; operation was not replayed",
+    };
+    // The operation may still complete. Liveness belongs to the independent
+    // heartbeat/socket checks; an operation deadline alone must not retire it.
+    warn!(device_id=%device_id, request_id=%id, timeout_ms,
+        "agent operation response unavailable; outcome unknown, no replay");
+    Ok(AgentResponse {
+        id,
+        result: OperationResult::OutcomeUnknown {
+            error: error.into(),
+        },
+    })
 }
 
 async fn agent_upgrade(ws: WebSocketUpgrade, State(state): State<AppState>) -> impl IntoResponse {
@@ -2796,6 +2944,11 @@ async fn handle_agent(mut socket: WebSocket, state: AppState) {
         }
     };
     let hello = auth.hello;
+    let supports_readiness = auth.public_key.is_some()
+        && hello
+            .capabilities
+            .iter()
+            .any(|cap| cap == infra_protocol::CONNECTION_READINESS_CAPABILITY);
     let generation = state.next_generation.fetch_add(1, Ordering::Relaxed);
     let (out_tx, mut out_rx) = mpsc::channel::<GatewayToAgent>(64);
     let (retire_tx, mut retire_rx) = mpsc::channel::<()>(1);
@@ -2838,6 +2991,12 @@ async fn handle_agent(mut socket: WebSocket, state: AppState) {
     // `interval` ticks immediately once. Consume that first tick so a newly authenticated
     // connection gets a full interval before its first protocol heartbeat.
     heartbeat.tick().await;
+    let mut readiness = readiness::ProbeState::default();
+    if supports_readiness {
+        let _ = out_tx.try_send(GatewayToAgent::ConnectionProbe(
+            readiness.challenge(generation),
+        ));
+    }
     let mut last_inbound = Instant::now();
     let mut disconnect_reason = "connection_closed";
     loop {
@@ -2848,7 +3007,10 @@ async fn handle_agent(mut socket: WebSocket, state: AppState) {
                     disconnect_reason = "heartbeat_timeout";
                     break;
                 }
-                if out_tx.try_send(GatewayToAgent::Ping).is_err() {
+                let heartbeat_message = if supports_readiness {
+                    GatewayToAgent::ConnectionProbe(readiness.challenge(generation))
+                } else { GatewayToAgent::Ping };
+                if out_tx.try_send(heartbeat_message).is_err() {
                     warn!(device_id=%hello.device_id,generation,"agent heartbeat queue unavailable");
                     disconnect_reason = "heartbeat_queue_full";
                     break;
@@ -2870,7 +3032,7 @@ async fn handle_agent(mut socket: WebSocket, state: AppState) {
                 Some(Ok(Message::Text(text)))=>{
                     last_inbound=Instant::now();
                     match serde_json::from_str::<AgentToGateway>(text.as_str()){
-                        Ok(AgentToGateway::Response(response))=>if let Some(waiter)=state.pending.lock().await.remove(&response.id){let _=waiter.send(response);},
+                        Ok(AgentToGateway::Response(response))=>state.pending.complete(&hello.device_id, generation, response),
                         Ok(AgentToGateway::Reconcile(snapshot)) => {
                             if let Some(device) = state.devices.write().await.get_mut(&hello.device_id)
                                 && device.generation == generation
@@ -2879,6 +3041,22 @@ async fn handle_agent(mut socket: WebSocket, state: AppState) {
                             }
                             let _ = state.store.record_reconcile(&hello.device_id, &snapshot);
                             state.emit("sessions_changed", Some(hello.device_id.clone()));
+                        },
+                        Ok(AgentToGateway::ConnectionProbeReply(reply)) => {
+                            if supports_readiness && readiness.accept(&reply) {
+                                // Hold the routing read lock until confirmation is queued;
+                                // a cached/superseded socket cannot certify itself as active.
+                                let devices = state.devices.read().await;
+                                if devices.get(&hello.device_id).is_some_and(|device| device.generation == generation) {
+                                    if out_tx.try_send(GatewayToAgent::ConnectionReady(reply)).is_err() {
+                                        disconnect_reason = "readiness_queue_full";
+                                        break;
+                                    }
+                                } else {
+                                    disconnect_reason = "superseded";
+                                    break;
+                                }
+                            }
                         },
                         Ok(AgentToGateway::Pong)=>{}, Ok(_)=>warn!(device_id=%hello.device_id,"unexpected post-auth agent frame"), Err(e)=>warn!(device_id=%hello.device_id,error=%e,"invalid agent frame")
                     }
@@ -2889,6 +3067,7 @@ async fn handle_agent(mut socket: WebSocket, state: AppState) {
             }
         }
     }
+    state.pending.disconnect(&hello.device_id, generation);
     let mut devices = state.devices.write().await;
     if devices
         .get(&hello.device_id)
@@ -3055,6 +3234,18 @@ mod tests {
     }
 
     #[test]
+    fn malformed_exec_payload_is_a_failure_not_a_successful_command() {
+        let output = exec_output(AgentResponse {
+            id: Uuid::new_v4(),
+            result: OperationResult::Ok {
+                body: serde_json::json!({"unexpected":"shape"}),
+            },
+        });
+        assert_eq!(output.status, "failed");
+        assert!(output.error.unwrap().contains("invalid exec response"));
+    }
+
+    #[test]
     fn friendly_names_and_ids_resolve_without_confusing_offline_and_unknown() {
         let records = vec![
             test_device("vm-id", "oracle-vm"),
@@ -3121,6 +3312,211 @@ mod tests {
             capabilities: vec!["exec".into()],
             metadata: BTreeMap::new(),
         }
+    }
+
+    type TestSocket = tokio_tungstenite::WebSocketStream<
+        tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+    >;
+    async fn next_test_message(socket: &mut TestSocket) -> GatewayToAgent {
+        let frame = tokio::time::timeout(Duration::from_secs(2), socket.next())
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        let ClientMessage::Text(text) = frame else {
+            panic!("expected JSON frame")
+        };
+        serde_json::from_str(text.as_str()).unwrap()
+    }
+    fn enroll_readiness_fixture(state: &AppState) -> (String, SigningKey) {
+        let key = SigningKey::from_bytes(&[9; 32]);
+        let enrollment = state.store.create_enrollment(60_000).unwrap();
+        let enrolled = state
+            .store
+            .consume_enrollment(
+                &enrollment.code,
+                &Uuid::new_v4().to_string(),
+                "readiness-fixture",
+                &key.verifying_key().to_bytes(),
+                "linux",
+                "aarch64",
+                "test",
+            )
+            .unwrap();
+        (enrolled.device_id, key)
+    }
+    async fn connect_readiness_fixture(
+        addr: SocketAddr,
+        id: &str,
+        key: &SigningKey,
+        advertise: bool,
+    ) -> (TestSocket, HelloAck) {
+        let (mut socket, _) = connect_async(format!("ws://{addr}/agent")).await.unwrap();
+        let mut hello = test_hello(id, Uuid::new_v4());
+        if advertise {
+            hello
+                .capabilities
+                .push(infra_protocol::CONNECTION_READINESS_CAPABILITY.into());
+        }
+        socket
+            .send(ClientMessage::Text(
+                serde_json::to_string(&AgentToGateway::AuthStart(DeviceAuthStart {
+                    protocol: PROTOCOL_VERSION,
+                    device_id: id.into(),
+                    agent_instance_id: hello.agent_instance_id,
+                }))
+                .unwrap()
+                .into(),
+            ))
+            .await
+            .unwrap();
+        let GatewayToAgent::AuthChallenge(challenge) = next_test_message(&mut socket).await else {
+            panic!("expected challenge")
+        };
+        let signature = URL_SAFE_NO_PAD.encode(
+            key.sign(&signed_auth_message(
+                &challenge.nonce,
+                challenge.gateway_epoch,
+                &hello,
+            ))
+            .to_bytes(),
+        );
+        socket
+            .send(ClientMessage::Text(
+                serde_json::to_string(&AgentToGateway::SignedHello(SignedDeviceHello {
+                    hello,
+                    signature,
+                }))
+                .unwrap()
+                .into(),
+            ))
+            .await
+            .unwrap();
+        let GatewayToAgent::HelloAck(ack) = next_test_message(&mut socket).await else {
+            panic!("expected ack")
+        };
+        (socket, ack)
+    }
+
+    #[tokio::test]
+    async fn signed_readiness_status_roundtrip_rejects_nonce_replay_and_preserves_legacy_peers() {
+        let (_dir, state, addr, server) = spawn_test_gateway().await;
+        let (id, key) = enroll_readiness_fixture(&state);
+        let (mut socket, ack) = connect_readiness_fixture(addr, &id, &key, true).await;
+        let GatewayToAgent::ConnectionProbe(probe) = next_test_message(&mut socket).await else {
+            panic!("expected probe")
+        };
+        assert_eq!(probe.generation, ack.connection_generation);
+        let reply = infra_protocol::ConnectionProbeReply {
+            probe,
+            pid: 42,
+            protocol: PROTOCOL_VERSION,
+        };
+        let mut wrong = reply.clone();
+        wrong.probe.nonce = Uuid::new_v4();
+        socket
+            .send(ClientMessage::Text(
+                serde_json::to_string(&AgentToGateway::ConnectionProbeReply(wrong))
+                    .unwrap()
+                    .into(),
+            ))
+            .await
+            .unwrap();
+        assert!(
+            tokio::time::timeout(Duration::from_millis(50), socket.next())
+                .await
+                .is_err()
+        );
+        socket
+            .send(ClientMessage::Text(
+                serde_json::to_string(&AgentToGateway::ConnectionProbeReply(reply.clone()))
+                    .unwrap()
+                    .into(),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(
+            next_test_message(&mut socket).await,
+            GatewayToAgent::ConnectionReady(reply.clone())
+        );
+        socket
+            .send(ClientMessage::Text(
+                serde_json::to_string(&AgentToGateway::ConnectionProbeReply(reply))
+                    .unwrap()
+                    .into(),
+            ))
+            .await
+            .unwrap();
+        assert!(
+            tokio::time::timeout(Duration::from_millis(50), socket.next())
+                .await
+                .is_err()
+        );
+        let (mut old, _) = connect_readiness_fixture(addr, &id, &key, false).await;
+        assert!(
+            tokio::time::timeout(Duration::from_millis(50), old.next())
+                .await
+                .is_err(),
+            "non-advertising peer must not receive extension frames"
+        );
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn a_superseded_signed_connection_cannot_confirm_readiness() {
+        let (_dir, state, addr, server) = spawn_test_gateway().await;
+        let (id, key) = enroll_readiness_fixture(&state);
+        let (mut old, old_ack) = connect_readiness_fixture(addr, &id, &key, true).await;
+        let GatewayToAgent::ConnectionProbe(old_probe) = next_test_message(&mut old).await else {
+            panic!()
+        };
+        let (mut current, ack) = connect_readiness_fixture(addr, &id, &key, true).await;
+        let GatewayToAgent::ConnectionProbe(probe) = next_test_message(&mut current).await else {
+            panic!()
+        };
+        assert_ne!(old_ack.connection_generation, ack.connection_generation);
+        old.send(ClientMessage::Text(
+            serde_json::to_string(&AgentToGateway::ConnectionProbeReply(
+                infra_protocol::ConnectionProbeReply {
+                    probe: old_probe,
+                    pid: 42,
+                    protocol: PROTOCOL_VERSION,
+                },
+            ))
+            .unwrap()
+            .into(),
+        ))
+        .await
+        .unwrap();
+        let frame = tokio::time::timeout(Duration::from_secs(1), old.next())
+            .await
+            .unwrap();
+        assert!(
+            !matches!(frame, Some(Ok(ClientMessage::Text(_)))),
+            "stale socket received a readiness confirmation"
+        );
+        let reply = infra_protocol::ConnectionProbeReply {
+            probe,
+            pid: 43,
+            protocol: PROTOCOL_VERSION,
+        };
+        current
+            .send(ClientMessage::Text(
+                serde_json::to_string(&AgentToGateway::ConnectionProbeReply(reply.clone()))
+                    .unwrap()
+                    .into(),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(
+            next_test_message(&mut current).await,
+            GatewayToAgent::ConnectionReady(reply)
+        );
+        assert_eq!(
+            state.devices.read().await[&id].generation,
+            ack.connection_generation
+        );
+        server.abort();
     }
     async fn connect_legacy(
         addr: SocketAddr,
@@ -3241,28 +3637,303 @@ mod tests {
         server.abort();
     }
     #[tokio::test]
-    async fn timed_out_request_retires_connection() {
+    async fn timed_out_operation_does_not_disconnect_healthy_agent() {
         let (_dir, state, addr, server) = spawn_test_gateway().await;
-        let (_socket, _) = connect_legacy(addr, "silent-device").await;
-        wait_registered(&state, "silent-device").await;
-        let response =
-            dispatch_to_device(&state, "silent-device".into(), AgentOperation::Status, 50)
-                .await
-                .unwrap();
+        let (socket, generation) = connect_legacy(addr, "slow-device").await;
+        wait_registered(&state, "slow-device").await;
+        let (mut sink, mut stream) = socket.split();
+        let responder = tokio::spawn(async move {
+            let mut requests = 0;
+            while let Some(Ok(ClientMessage::Text(text))) = stream.next().await {
+                let message: GatewayToAgent = serde_json::from_str(text.as_str()).unwrap();
+                if let GatewayToAgent::Request(request) = message {
+                    requests += 1;
+                    if requests == 1 {
+                        // One command never responds, but the agent can process
+                        // subsequent requests on its still-healthy connection.
+                        continue;
+                    }
+                    let answer = AgentToGateway::Response(AgentResponse {
+                        id: request.id,
+                        result: OperationResult::Ok {
+                            body: serde_json::json!({"status": "ready"}),
+                        },
+                    });
+                    sink.send(ClientMessage::Text(
+                        serde_json::to_string(&answer).unwrap().into(),
+                    ))
+                    .await
+                    .unwrap();
+                }
+            }
+        });
+        let first = dispatch_to_device(&state, "slow-device".into(), AgentOperation::Status, 50)
+            .await
+            .unwrap();
         assert!(matches!(
-            response.result,
+            first.result,
             OperationResult::OutcomeUnknown { .. }
         ));
-        tokio::time::timeout(Duration::from_secs(1), async {
-            loop {
-                if !state.devices.read().await.contains_key("silent-device") {
-                    break;
-                }
-                tokio::task::yield_now().await;
+        assert!(state.pending.is_empty());
+        assert_eq!(
+            state.devices.read().await["slow-device"].generation,
+            generation
+        );
+        let next = dispatch_to_device(&state, "slow-device".into(), AgentOperation::Status, 1000)
+            .await
+            .unwrap();
+        assert!(matches!(next.result, OperationResult::Ok { .. }));
+        assert!(state.pending.is_empty());
+        assert_eq!(
+            state.devices.read().await["slow-device"].generation,
+            generation
+        );
+        responder.abort();
+        server.abort();
+    }
+
+    async fn queued_test_device(
+        state: &AppState,
+    ) -> (mpsc::Receiver<GatewayToAgent>, mpsc::Receiver<()>) {
+        let (tx, rx) = mpsc::channel(1);
+        let (retire, retire_rx) = mpsc::channel(1);
+        state.devices.write().await.insert(
+            "queued-device".into(),
+            DeviceConnection {
+                hello: test_hello("queued-device", Uuid::new_v4()),
+                generation: 1,
+                tx,
+                retire,
+                reconcile: ReconcileSnapshot::default(),
+            },
+        );
+        (rx, retire_rx)
+    }
+
+    #[tokio::test]
+    async fn list_pagination_checks_live_capability_before_queueing() {
+        let (_dir, state, _addr, server) = spawn_test_gateway().await;
+        let (mut rx, mut retire) = queued_test_device(&state).await;
+        // A previous build advertised pagination, but the current connection
+        // does not. Cached discovery is not permission to send new semantics.
+        let mut cached = test_hello("queued-device", Uuid::new_v4());
+        cached
+            .capabilities
+            .push(FILE_LIST_PAGINATION_CAPABILITY.into());
+        state.store.record_connect(&cached, None).unwrap();
+        for (offset, length) in [(Some(0), None), (None, Some(2))] {
+            let result = dispatch_to_device(
+                &state,
+                "queued-device".into(),
+                AgentOperation::Files(FileRequest {
+                    action: FileAction::List {
+                        path: ".".into(),
+                        offset,
+                        length,
+                    },
+                }),
+                5000,
+            )
+            .await;
+            let Err(DispatchError::Unsupported(message)) = result else {
+                panic!("old connection must reject paging")
+            };
+            let error = ToolError::from(dispatch_error(DispatchError::Unsupported(message)));
+            assert_eq!(error.code, "unsupported");
+            assert!(!error.retryable);
+            assert!(error.message.contains("files.list_page"));
+            assert!(rx.try_recv().is_err());
+            assert!(state.pending.is_empty());
+        }
+        assert!(retire.try_recv().is_err());
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn legacy_lists_and_advertised_pages_use_the_existing_request_lifecycle() {
+        let (_dir, state, _addr, server) = spawn_test_gateway().await;
+        let (mut rx, _retire) = queued_test_device(&state).await;
+        for paged in [false, true] {
+            if paged {
+                state
+                    .devices
+                    .write()
+                    .await
+                    .get_mut("queued-device")
+                    .unwrap()
+                    .hello
+                    .capabilities
+                    .push(FILE_LIST_PAGINATION_CAPABILITY.into());
             }
-        })
+            let operation = AgentOperation::Files(FileRequest {
+                action: FileAction::List {
+                    path: "fixture".into(),
+                    offset: paged.then_some(2),
+                    length: paged.then_some(3),
+                },
+            });
+            let sent = operation.clone();
+            let caller_state = state.clone();
+            let caller = tokio::spawn(async move {
+                dispatch_to_device(&caller_state, "queued-device".into(), operation, 1000).await
+            });
+            let Some(GatewayToAgent::Request(request)) =
+                tokio::time::timeout(Duration::from_secs(1), rx.recv())
+                    .await
+                    .unwrap()
+            else {
+                panic!("expected list request")
+            };
+            assert_eq!(request.operation, sent);
+            state.pending.complete(
+                "queued-device",
+                1,
+                AgentResponse {
+                    id: request.id,
+                    result: OperationResult::Ok {
+                        body: serde_json::json!({"entries":[],"has_more":false}),
+                    },
+                },
+            );
+            assert!(matches!(
+                caller.await.unwrap().unwrap().result,
+                OperationResult::Ok { .. }
+            ));
+            assert!(state.pending.is_empty());
+        }
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn full_queue_expires_without_dispatch_or_connection_retirement() {
+        let (_dir, state, _addr, server) = spawn_test_gateway().await;
+        let (mut rx, mut retire) = queued_test_device(&state).await;
+        state.devices.read().await["queued-device"]
+            .tx
+            .send(GatewayToAgent::Ping)
+            .await
+            .unwrap();
+        let result = tokio::time::timeout(
+            Duration::from_secs(1),
+            dispatch_to_device(&state, "queued-device".into(), AgentOperation::Status, 25),
+        )
         .await
-        .expect("timed-out device connection was not retired");
+        .expect("queue admission must be bounded");
+        assert!(matches!(result, Err(DispatchError::QueueBusy)));
+        assert!(state.pending.is_empty());
+        assert!(matches!(rx.recv().await, Some(GatewayToAgent::Ping)));
+        assert!(
+            rx.try_recv().is_err(),
+            "expired operation was unexpectedly queued"
+        );
+        assert!(
+            retire.try_recv().is_err(),
+            "a full queue must not retire the connection"
+        );
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn abort_after_dispatch_removes_waiter_and_does_not_replay() {
+        let (_dir, state, _addr, server) = spawn_test_gateway().await;
+        let (mut rx, mut retire) = queued_test_device(&state).await;
+        let caller_state = state.clone();
+        let caller = tokio::spawn(async move {
+            dispatch_to_device(
+                &caller_state,
+                "queued-device".into(),
+                AgentOperation::Status,
+                5_000,
+            )
+            .await
+        });
+        let request = tokio::time::timeout(Duration::from_secs(1), rx.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        let GatewayToAgent::Request(request) = request else {
+            panic!("expected request")
+        };
+        assert!(!state.pending.is_empty());
+        caller.abort();
+        assert!(caller.await.unwrap_err().is_cancelled());
+        assert!(state.pending.is_empty());
+        // A late response after cancellation is harmless.
+        state.pending.complete(
+            "queued-device",
+            1,
+            AgentResponse {
+                id: request.id,
+                result: OperationResult::Ok {
+                    body: serde_json::json!({}),
+                },
+            },
+        );
+        assert!(rx.try_recv().is_err());
+        assert!(retire.try_recv().is_err());
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn abort_while_waiting_for_queue_does_not_dispatch() {
+        let (_dir, state, _addr, server) = spawn_test_gateway().await;
+        let (mut rx, _retire) = queued_test_device(&state).await;
+        state.devices.read().await["queued-device"]
+            .tx
+            .send(GatewayToAgent::Ping)
+            .await
+            .unwrap();
+        let caller_state = state.clone();
+        let caller = tokio::spawn(async move {
+            dispatch_to_device(
+                &caller_state,
+                "queued-device".into(),
+                AgentOperation::Status,
+                5_000,
+            )
+            .await
+        });
+        tokio::task::yield_now().await;
+        caller.abort();
+        assert!(caller.await.unwrap_err().is_cancelled());
+        assert!(state.pending.is_empty());
+        assert!(matches!(rx.recv().await, Some(GatewayToAgent::Ping)));
+        assert!(rx.try_recv().is_err());
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn socket_loss_after_dispatch_returns_unknown_without_waiting_for_deadline() {
+        let (_dir, state, addr, server) = spawn_test_gateway().await;
+        let (mut socket, _) = connect_legacy(addr, "disconnect-device").await;
+        wait_registered(&state, "disconnect-device").await;
+        let caller_state = state.clone();
+        let caller = tokio::spawn(async move {
+            dispatch_to_device(
+                &caller_state,
+                "disconnect-device".into(),
+                AgentOperation::Status,
+                30_000,
+            )
+            .await
+        });
+        let frame = tokio::time::timeout(Duration::from_secs(1), socket.next())
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        assert!(matches!(frame, ClientMessage::Text(_)));
+        socket.close(None).await.unwrap();
+        let result = tokio::time::timeout(Duration::from_secs(2), caller)
+            .await
+            .expect("socket closure should release the pending caller")
+            .unwrap()
+            .unwrap();
+        assert!(matches!(
+            result.result,
+            OperationResult::OutcomeUnknown { .. }
+        ));
+        assert!(state.pending.is_empty());
         server.abort();
     }
 

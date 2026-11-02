@@ -8,6 +8,24 @@ pub const PROTOCOL_VERSION: u16 = 1;
 pub const DEFAULT_CONTROL_FRAME_LIMIT: usize = 8 * 1024 * 1024;
 pub const DEFAULT_READ_LIMIT: usize = 64 * 1024;
 pub const MAX_READ_LIMIT: usize = 1024 * 1024;
+pub const FILE_LIST_PAGINATION_CAPABILITY: &str = "files.list_page";
+pub const MAX_DIRECTORY_PAGE_SIZE: usize = 1000;
+pub const MAX_DIRECTORY_ENTRIES: usize = 100_000;
+pub const MAX_DIRECTORY_PAGE_BYTES: usize = 512 * 1024;
+pub const CONNECTION_READINESS_CAPABILITY: &str = "connection.readiness_v1";
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ConnectionProbe {
+    pub nonce: Uuid,
+    pub generation: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ConnectionProbeReply {
+    pub probe: ConnectionProbe,
+    pub pid: u32,
+    pub protocol: u16,
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct DeviceHello {
@@ -326,6 +344,12 @@ pub enum FileAction {
     },
     List {
         path: String,
+        /// Entry offset in native filename order, not a byte offset.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        offset: Option<u64>,
+        /// Maximum entries. Requires files.list_page when explicitly supplied.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        length: Option<usize>,
     },
     Stat {
         path: String,
@@ -563,6 +587,7 @@ pub enum AgentToGateway {
     LegacyHello(LegacyDeviceHello),
     Response(AgentResponse),
     Reconcile(ReconcileSnapshot),
+    ConnectionProbeReply(ConnectionProbeReply),
     Pong,
 }
 
@@ -572,6 +597,8 @@ pub enum GatewayToAgent {
     AuthChallenge(AuthChallenge),
     HelloAck(HelloAck),
     Request(AgentRequest),
+    ConnectionProbe(ConnectionProbe),
+    ConnectionReady(ConnectionProbeReply),
     Ping,
 }
 
@@ -588,12 +615,57 @@ mod tests {
     use super::*;
 
     #[test]
+    fn readiness_frames_roundtrip_without_changing_legacy_heartbeats() {
+        assert_eq!(
+            serde_json::to_value(GatewayToAgent::Ping).unwrap(),
+            serde_json::json!({"type":"ping"})
+        );
+        assert_eq!(
+            serde_json::to_value(AgentToGateway::Pong).unwrap(),
+            serde_json::json!({"type":"pong"})
+        );
+        let probe = ConnectionProbe {
+            nonce: Uuid::new_v4(),
+            generation: 7,
+        };
+        let reply = ConnectionProbeReply {
+            probe: probe.clone(),
+            pid: 42,
+            protocol: PROTOCOL_VERSION,
+        };
+        for message in [
+            GatewayToAgent::ConnectionProbe(probe),
+            GatewayToAgent::ConnectionReady(reply.clone()),
+        ] {
+            let value = serde_json::to_value(&message).unwrap();
+            assert_eq!(
+                serde_json::from_value::<GatewayToAgent>(value).unwrap(),
+                message
+            );
+        }
+        let response = AgentToGateway::ConnectionProbeReply(reply);
+        assert_eq!(
+            serde_json::from_value::<AgentToGateway>(serde_json::to_value(&response).unwrap())
+                .unwrap(),
+            response
+        );
+        assert!(
+            serde_json::from_value::<GatewayToAgent>(
+                serde_json::json!({"type":"connection_probe","body":{"generation":7}})
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
     fn android_files_operation_uses_nested_action_json() {
         let request = AgentRequest {
             id: Uuid::parse_str("11111111-1111-4111-8111-111111111111").unwrap(),
             operation: AgentOperation::Files(FileRequest {
                 action: FileAction::List {
                     path: String::from("site"),
+                    offset: None,
+                    length: None,
                 },
             }),
         };
@@ -601,8 +673,35 @@ mod tests {
         assert_eq!(json["operation"]["op"], "files");
         assert_eq!(json["operation"]["action"]["action"], "list");
         assert_eq!(json["operation"]["action"]["path"], "site");
+        assert!(json["operation"]["action"].get("offset").is_none());
+        assert!(json["operation"]["action"].get("length").is_none());
         let decoded: AgentRequest = serde_json::from_value(json).unwrap();
         assert_eq!(decoded, request);
+    }
+
+    #[test]
+    fn directory_list_optional_fields_preserve_legacy_wire_shape() {
+        let legacy: FileAction =
+            serde_json::from_value(serde_json::json!({"action":"list","path":"fixture"})).unwrap();
+        assert_eq!(
+            legacy,
+            FileAction::List {
+                path: "fixture".into(),
+                offset: None,
+                length: None
+            }
+        );
+        let paged = FileAction::List {
+            path: "fixture".into(),
+            offset: Some(42),
+            length: Some(10),
+        };
+        let wire = serde_json::to_value(&paged).unwrap();
+        assert_eq!(
+            wire,
+            serde_json::json!({"action":"list","path":"fixture","offset":42,"length":10})
+        );
+        assert_eq!(serde_json::from_value::<FileAction>(wire).unwrap(), paged);
     }
 
     #[test]

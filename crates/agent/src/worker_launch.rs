@@ -4,6 +4,51 @@ use std::{
 };
 use uuid::Uuid;
 
+#[cfg(not(target_os = "macos"))]
+use std::{
+    process::Child,
+    sync::{OnceLock, mpsc},
+    time::Duration,
+};
+
+// One sleeping reaper for all durable workers, not one thread per session.
+// Waiting for a worker collects its exit status without owning its lifetime:
+// controller exit still leaves active workers running under platform policy.
+#[cfg(not(target_os = "macos"))]
+fn worker_reaper() -> Result<&'static mpsc::Sender<Child>, String> {
+    static REAPER: OnceLock<Result<mpsc::Sender<Child>, String>> = OnceLock::new();
+    REAPER.get_or_init(|| {
+        let (tx, rx) = mpsc::channel::<Child>();
+        std::thread::Builder::new().name("infra-worker-reaper".into()).spawn(move || {
+            let mut children: Vec<Child> = Vec::new();
+            loop {
+                let next = if children.is_empty() {
+                    match rx.recv() {
+                        Ok(child) => Some(child),
+                        Err(_) => break,
+                    }
+                } else {
+                    match rx.recv_timeout(Duration::from_millis(100)) {
+                        Ok(child) => Some(child),
+                        Err(mpsc::RecvTimeoutError::Timeout) => None,
+                        Err(mpsc::RecvTimeoutError::Disconnected) => break,
+                    }
+                };
+                if let Some(child) = next { children.push(child); }
+                children.retain_mut(|child| match child.try_wait() {
+                    Ok(Some(_)) => false,
+                    Ok(None) => true,
+                    Err(error) => {
+                        tracing::warn!(pid=child.id(), %error, "failed to collect durable worker exit");
+                        false
+                    }
+                });
+            }
+        }).map_err(|error| format!("start worker reaper: {error}"))?;
+        Ok(tx)
+    }).as_ref().map_err(Clone::clone)
+}
+
 #[derive(Debug, Clone, Copy)]
 pub enum WorkerKind {
     Job,
@@ -86,6 +131,7 @@ pub fn spawn(kind: WorkerKind, id: Uuid, dir: &Path) -> Result<Option<u32>, Stri
 
     #[cfg(not(target_os = "macos"))]
     {
+        let reaper = worker_reaper()?;
         let child = Command::new(exe)
             .arg(kind.flag())
             .arg(dir)
@@ -94,7 +140,11 @@ pub fn spawn(kind: WorkerKind, id: Uuid, dir: &Path) -> Result<Option<u32>, Stri
             .stderr(Stdio::null())
             .spawn()
             .map_err(|error| format!("start durable worker: {error}"))?;
-        Ok(Some(child.id()))
+        let pid = child.id();
+        reaper
+            .send(child)
+            .map_err(|_| "durable worker reaper unavailable".to_string())?;
+        Ok(Some(pid))
     }
 }
 
@@ -124,6 +174,32 @@ mod tests {
     fn worker_flags_are_stable() {
         assert_eq!(WorkerKind::Job.flag(), "--job-worker");
         assert_eq!(WorkerKind::Pty.flag(), "--pty-worker");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn completed_workers_are_reaped_without_waiting_in_the_controller() {
+        let reaper = worker_reaper().unwrap();
+        let mut pids = Vec::new();
+        for _ in 0..100 {
+            let child = Command::new("/bin/sh")
+                .args(["-c", "exit 0"])
+                .spawn()
+                .unwrap();
+            pids.push(child.id());
+            reaper.send(child).unwrap();
+        }
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while pids
+            .iter()
+            .any(|pid| Path::new(&format!("/proc/{pid}")).exists())
+        {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "finished children were not collected"
+            );
+            std::thread::sleep(Duration::from_millis(20));
+        }
     }
 
     #[cfg(target_os = "macos")]

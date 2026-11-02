@@ -52,7 +52,7 @@ fn list(query: Option<&str>) -> Result<serde_json::Value, String> {
         "--no-pager",
         "--plain",
     ]);
-    let output = require_success(run(&mut command, Duration::from_secs(10), OUTPUT_LIMIT)?)?;
+    let output = require_success(run(command, Duration::from_secs(10), OUTPUT_LIMIT)?)?;
     let query = query.map(str::to_ascii_lowercase);
     let services = output
         .stdout
@@ -98,7 +98,7 @@ fn status(name: &str) -> Result<serde_json::Value, String> {
         "--no-pager",
         "--property=Id,LoadState,ActiveState,SubState,Description,MainPID",
     ]);
-    let output = require_success(run(&mut command, Duration::from_secs(10), OUTPUT_LIMIT)?)?;
+    let output = require_success(run(command, Duration::from_secs(10), OUTPUT_LIMIT)?)?;
     let mut object = serde_json::Map::new();
     for line in output.stdout.lines() {
         if let Some((key, value)) = line.split_once('=') {
@@ -117,7 +117,7 @@ fn mutate(action: &str, name: &str) -> Result<serde_json::Value, String> {
     validate_name(name)?;
     let mut command = Command::new("systemctl");
     command.args(["--user", action, name]);
-    let output = require_success(run(&mut command, Duration::from_secs(30), OUTPUT_LIMIT)?)?;
+    let output = require_success(run(command, Duration::from_secs(30), OUTPUT_LIMIT)?)?;
     Ok(
         serde_json::json!({"ok":true,"scope":"user","action":action,"service":name,"stderr":output.stderr}),
     )
@@ -127,7 +127,7 @@ fn mutate(action: &str, name: &str) -> Result<serde_json::Value, String> {
 fn list(query: Option<&str>) -> Result<serde_json::Value, String> {
     let mut command = Command::new("launchctl");
     command.arg("list");
-    let output = require_success(run(&mut command, Duration::from_secs(10), OUTPUT_LIMIT)?)?;
+    let output = require_success(run(command, Duration::from_secs(10), OUTPUT_LIMIT)?)?;
     let query = query.map(str::to_ascii_lowercase);
     let services = output
         .stdout
@@ -164,7 +164,7 @@ fn status(name: &str) -> Result<serde_json::Value, String> {
     let target = format!("gui/{}/{name}", current_uid()?);
     let mut command = Command::new("launchctl");
     command.args(["print", &target]);
-    let output = require_success(run(&mut command, Duration::from_secs(10), OUTPUT_LIMIT)?)?;
+    let output = require_success(run(command, Duration::from_secs(10), OUTPUT_LIMIT)?)?;
     let mut safe = serde_json::Map::new();
     for line in output.stdout.lines().map(str::trim) {
         for key in [
@@ -207,7 +207,7 @@ fn mutate(action: &str, name: &str) -> Result<serde_json::Value, String> {
         }
         _ => return Err("unsupported launchctl action".into()),
     }
-    require_success(run(&mut command, Duration::from_secs(30), OUTPUT_LIMIT)?)?;
+    require_success(run(command, Duration::from_secs(30), OUTPUT_LIMIT)?)?;
     Ok(serde_json::json!({"ok":true,"scope":"user","action":action,"service":name}))
 }
 
@@ -215,7 +215,7 @@ fn mutate(action: &str, name: &str) -> Result<serde_json::Value, String> {
 fn current_uid() -> Result<String, String> {
     let mut command = Command::new("id");
     command.arg("-u");
-    let output = require_success(run(&mut command, Duration::from_secs(5), 1024)?)?;
+    let output = require_success(run(command, Duration::from_secs(5), 1024)?)?;
     Ok(output.stdout.trim().to_string())
 }
 
@@ -223,7 +223,7 @@ fn current_uid() -> Result<String, String> {
 fn list(query: Option<&str>) -> Result<serde_json::Value, String> {
     let mut command = Command::new("sc.exe");
     command.args(["query", "type=", "service", "state=", "all"]);
-    let output = require_success(run(&mut command, Duration::from_secs(15), OUTPUT_LIMIT)?)?;
+    let output = require_success(run(command, Duration::from_secs(15), OUTPUT_LIMIT)?)?;
     let query = query.map(str::to_ascii_lowercase);
     let mut services = Vec::new();
     let mut current: Option<ServiceView> = None;
@@ -263,7 +263,7 @@ fn status(name: &str) -> Result<serde_json::Value, String> {
     validate_name(name)?;
     let mut command = Command::new("sc.exe");
     command.args(["queryex", name]);
-    let output = require_success(run(&mut command, Duration::from_secs(10), OUTPUT_LIMIT)?)?;
+    let output = require_success(run(command, Duration::from_secs(10), OUTPUT_LIMIT)?)?;
     Ok(serde_json::json!({"service":name,"detail":output.stdout,"truncated":output.truncated}))
 }
 
@@ -274,15 +274,15 @@ fn mutate(action: &str, name: &str) -> Result<serde_json::Value, String> {
         "start" | "stop" => {
             let mut command = Command::new("sc.exe");
             command.args([action, name]);
-            require_success(run(&mut command, Duration::from_secs(30), OUTPUT_LIMIT)?)?;
+            require_success(run(command, Duration::from_secs(30), OUTPUT_LIMIT)?)?;
         }
         "restart" => {
             let mut stop = Command::new("sc.exe");
             stop.args(["stop", name]);
-            let _ = run(&mut stop, Duration::from_secs(30), OUTPUT_LIMIT);
+            let _ = run(stop, Duration::from_secs(30), OUTPUT_LIMIT);
             let mut start = Command::new("sc.exe");
             start.args(["start", name]);
-            require_success(run(&mut start, Duration::from_secs(30), OUTPUT_LIMIT)?)?;
+            require_success(run(start, Duration::from_secs(30), OUTPUT_LIMIT)?)?;
         }
         _ => return Err("unsupported service action".into()),
     }

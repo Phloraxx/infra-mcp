@@ -1,5 +1,60 @@
 # MCP tool model
 
+## Current stabilization contract — 2 November 2026
+
+The MCP-contract branch adds typed action enums and argument descriptions to the
+existing tool families. Conditional required fields are still checked by the
+gateway rather than a deeply nested schema. Unknown actions are rejected during
+deserialization. The raw gateway exposes 15 tools including cross-device `copy`;
+a host/connector may need its catalog refreshed before showing that tool.
+
+Tool failures now use `isError: true` and structured `error_code`, `retryable`, and
+`next_action` fields. Existing `status`, request IDs, stdout/stderr, exit code and
+legacy error strings are retained. Nonzero one-shot command exit codes are tool
+failures even when the dispatch succeeded. An `outcome_unknown` result is never
+retryable automatically; explicit pre-execution `agent_busy` rejection is.
+Offline/missing devices and invalid arguments have distinct codes.
+
+Successful screenshots include native MCP image content plus concise metadata
+text. The structured JSON retains image bytes for existing consumers. This is
+wire-format support, not certification of every multimodal client.
+
+Desktop Windows exec/jobs use `cmd.exe`; Unix uses `/bin/sh`. Android exec remains
+restricted. Use jobs for lengthy work, terminals for interactive/stateful work,
+and preserve handles/byte offsets across reconnects.
+
+### Directory listing pagination
+
+`files(action: "list", path: "...", offset: 0, length: 100)` requests at most
+100 entries. **For list only, offset/length count entries; read still counts
+bytes.** Continue with the returned `next_offset` while `has_more` is true.
+Never calculate the next offset from the requested length: the 512 KiB response
+budget can shorten a page. The maximum/default length is 1,000 and the maximum
+offset is 100,000. Zero/excessive lengths and excessive offsets fail explicitly.
+
+The agent sorts all names in ascending native filename order, reads metadata
+only for the page, and returns `offset`, `next_offset`, `has_more`, `total_entries`,
+`limit`, `order`, `pagination_supported`, and `snapshot: false`. Existing `path`,
+`entries`, and `truncated` remain; `truncated` matches `has_more`. Empty/beyond-end
+pages have no more entries. Names that cannot be displayed as UTF-8 remain lossy
+in JSON, as before; distinct native names still occupy distinct positions.
+
+Each call scans at most 100,000 names; a larger directory fails with guidance
+to use bounded search or a narrower directory. These offsets are **not a frozen
+snapshot**. If names are added/removed/renamed between requests, restart at zero
+to avoid missed/repeated positions. Exact snapshot enumeration is not promised.
+
+Explicit list `offset` or `length` requires the **live connection** capability
+`files.list_page`. Current native agents advertise it. Older native/Android
+agents do not: the gateway returns `unsupported` before dispatch, rather than
+letting an old agent silently ignore pagination fields. Omitting both fields
+preserves their legacy bounded list operation, which may lack continuation
+metadata. Android pagination is not implemented by this native-agent change.
+
+`scripts/smoke-mcp-contract.py` checks the actual HTTP tool list, schemas, shell
+guidance, and structured errors against an isolated loopback fixture. The older
+conceptual/future lists below are not the callable API contract.
+
 Infra should expose a compact, predictable MCP surface. Tool design is optimized for model selection and low call count rather than mirroring every OS command.
 
 The names below are conceptual; exact MCP schema details may evolve.

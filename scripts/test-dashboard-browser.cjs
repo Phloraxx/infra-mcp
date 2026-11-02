@@ -19,6 +19,10 @@ let sessions = [
   {id:jobId,kind:'job',status:'running',device_id:'online',device_name:badName,device_online:true,started_at_unix_ms:Date.now()},
   {id:transferId,kind:'transfer',status:'ready',device_id:'online',device_name:badName,device_online:true,started_at_unix_ms:Date.now()}
 ];
+let overviewMode=null, overviewCalls=0, hangEnrollment=false, enrollmentCalls=0;
+let fileListMode='legacy',failFilePage=false,filePageDelay=0;
+const hungResponses=new Set();
+const hang=(res,body=false)=>{hungResponses.add(res);res.on('close',()=>hungResponses.delete(res));if(body){res.writeHead(200,{'Content-Type':'application/json'});res.write('{"devices":');}};
 let authenticated=false, output='fixture PTY ready\r\n', failWrite=false, failRead=false, delayedRead=false, readDelay=0;
 const operations=[], errors=[], streams=new Set();
 const server=http.createServer(async(req,res)=>{
@@ -34,9 +38,9 @@ const server=http.createServer(async(req,res)=>{
     if(req.url==='/api/pair/requests'&&req.method==='GET')return send([{request_id:'00000000-0000-4000-8000-000000000004',device_name:'Windows Test PC',platform:'windows',arch:'x86_64',verification_code:'482731'}]);
     if(req.url==='/api/pair/00000000-0000-4000-8000-000000000004/approve'&&req.method==='POST')return send({state:'approved',device_id:'paired-fixture'});
     if(req.url==='/api/pair/00000000-0000-4000-8000-000000000004/reject'&&req.method==='POST')return send({ok:true});
-    if(req.url==='/api/enrollments'&&req.method==='POST')return send({code:'fixture-5-minute-code',expires_at_unix_ms:Date.now()+300000});
+    if(req.url==='/api/enrollments'&&req.method==='POST'){enrollmentCalls++;if(hangEnrollment)return hang(res);return send({code:'fixture-5-minute-code',expires_at_unix_ms:Date.now()+300000});}
     if(req.url==='/api/events'){res.writeHead(200,{'Content-Type':'text/event-stream'});res.write(': connected\n\n');streams.add(res);res.on('close',()=>streams.delete(res));return;}
-    if(req.url==='/api/overview')return send({devices,sessions,activity:[]});
+    if(req.url==='/api/overview'){overviewCalls++;if(overviewMode)return hang(res,overviewMode==='body');return send({devices,sessions,activity:[]});}
     if(req.url==='/api/devices')return send(devices);
     if(req.url==='/api/sessions')return send(sessions);
     if(req.url==='/api/activity')return send([]);
@@ -69,7 +73,18 @@ const server=http.createServer(async(req,res)=>{
         return ok({transfer:{id:a.transfer_id,status:a.action==='cancel'?'canceled':'ready',path:'build.zip',offset:20,size:100}});
       }
       if(op.op==='files'){
-        if(a.action==='list')return ok({path:a.path,entries:[{name:badName,path:'./'+badName,kind:'file',size:9}],truncated:false});
+        if(a.action==='list'){
+          if(fileListMode==='paged'){
+            if(failFilePage)return send({error:'directory temporarily unavailable'},503);
+            // A byte cap may return fewer entries than the requested length.
+            const offset=a.offset||0,names=[badName,'entry-01','entry-02','entry-03','entry-04'];
+            const entries=names.slice(offset,offset+2).map(name=>({name,path:a.path+'/'+name,kind:'file',size:9}));
+            const result={path:a.path,entries,offset,next_offset:offset+entries.length,total_entries:5,has_more:offset+entries.length<5,truncated:offset+entries.length<5,pagination_supported:true};
+            if(filePageDelay)await new Promise(resolve=>setTimeout(resolve,filePageDelay));
+            return ok(result);
+          }
+          return ok({path:a.path,entries:[{name:badName,path:'./'+badName,kind:'file',size:9}],truncated:fileListMode==='legacy-truncated'});
+        }
         return ok({path:a.path,content:'<script>window.xss=2</script>',offset:0,next_offset:29,size:29,has_more:false});
       }
       return send({error:'unexpected operation'},400);
@@ -154,6 +169,12 @@ const server=http.createServer(async(req,res)=>{
     await page.goto(base);
     await page.locator('#overview-devices [data-device="online"]').waitFor();
     await page.locator('#add-device').click();
+    await page.locator('[data-quick-platform="windows"]').click();
+    const quickCommand=await page.locator('#quick-install-command').textContent();
+    assert.match(quickCommand,/Invoke-WebRequest[\s\S]*-UseBasicParsing[\s\S]*-OutFile/);
+    assert.match(quickCommand,/guid/);
+    assert.match(quickCommand,/LASTEXITCODE/);
+    assert.match(quickCommand,/finally[\s\S]*Remove-Item/);
     await page.waitForFunction(()=>document.querySelector('#pending-pairs').textContent.includes('Windows Test PC'));
     assert.match(await page.locator('#pending-pairs').textContent(),/482731/);
     await page.locator('#pending-pairs [data-pair-action="approve"]').click();
@@ -187,6 +208,58 @@ const server=http.createServer(async(req,res)=>{
     await page.locator('[data-file-path]').waitFor();
     assert.equal(await page.locator('#files-list [data-file-path] svg.ui-icon').count(),1);await page.locator('[data-file-path]').click();await page.locator('#file-preview:not(.hidden)').waitFor();
     assert.equal(await page.locator('#file-content').textContent(),'<script>window.xss=2</script>');assert.equal(await page.evaluate(()=>window.xss),undefined);
+    assert.equal(operations.filter(op=>op.op==='files'&&op.action.action==='list').at(-1).action.offset,undefined);
+    assert.equal(await page.locator('#files-pagination').isVisible(),false);
+
+    fileListMode='paged';devices[0].capabilities.push('files.list_page');await page.evaluate(()=>refresh());
+    await page.locator('#files-browse button').first().click();
+    await page.waitForFunction(()=>document.querySelector('#files-note').textContent.includes('1–2 of 5'));
+    assert.equal(await page.locator('#files-list [data-file-path]').count(),2);
+    assert.equal(await page.locator('#files-previous').isDisabled(),true);
+    if(process.env.INFRA_QA_FILES_SCREENSHOT)await page.locator('#device-files').screenshot({path:process.env.INFRA_QA_FILES_SCREENSHOT});
+    await page.locator('#files-next').focus();await page.keyboard.press('Enter');
+    await page.waitForFunction(()=>document.querySelector('#files-note').textContent.includes('3–4 of 5'));
+    assert.equal(operations.filter(op=>op.op==='files'&&op.action.action==='list').at(-1).action.offset,2);
+    failFilePage=true;await page.locator('#files-next').click();
+    await page.waitForFunction(()=>document.querySelector('#device-error').textContent.includes('directory temporarily unavailable'));
+    assert.equal(await page.locator('#files-list [data-file-path]').count(),2);
+    assert.match(await page.locator('#files-note').textContent(),/last confirmed page/);
+    failFilePage=false;await page.locator('#files-path').fill('unsubmitted-path');await page.locator('#files-next').click();
+    await page.waitForFunction(()=>document.querySelector('#files-note').textContent.includes('5–5 of 5'));
+    assert.equal(await page.locator('#files-list [data-file-path]').count(),1);
+    assert.equal(await page.locator('#files-next').isDisabled(),true);
+    assert.equal(operations.filter(op=>op.op==='files'&&op.action.action==='list').at(-1).action.path,'.');
+    await page.locator('#files-previous').click();
+    await page.waitForFunction(()=>document.querySelector('#files-note').textContent.includes('3–4 of 5'));
+    await page.locator('#files-previous').click();
+    await page.waitForFunction(()=>document.querySelector('#files-note').textContent.includes('1–2 of 5'));
+    await page.setViewportSize({width:390,height:844});
+    assert(await page.locator('#files-next').isVisible());
+    assert(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth+1));
+    if(process.env.INFRA_QA_MOBILE_FILES_SCREENSHOT)await page.locator('#device-files').screenshot({path:process.env.INFRA_QA_MOBILE_FILES_SCREENSHOT});
+    await page.setViewportSize({width:1280,height:900});
+    filePageDelay=250;await page.locator('#files-next').click();
+    await page.evaluate(()=>navigateDevice('offline','files'));
+    await page.waitForFunction(()=>document.querySelector('#view-title').textContent==='Rose');
+    await page.waitForTimeout(350);filePageDelay=0;
+    assert.equal(await page.locator('#files-list [data-file-path]').count(),0);
+    assert.equal(await page.locator('#files-pagination').isVisible(),false);
+    await page.evaluate(()=>navigateDevice('online','files'));
+    await page.locator('#files-browse button:not([disabled])').first().waitFor();
+    await page.locator('#files-browse button').first().click();
+    await page.waitForFunction(()=>document.querySelector('#files-note').textContent.includes('1–2 of 5'));
+    filePageDelay=250;await page.locator('#files-next').click();
+    await page.evaluate(()=>{location.hash='overview';});await page.waitForTimeout(350);filePageDelay=0;
+    await page.evaluate(()=>navigateDevice('online','files'));
+    await page.waitForFunction(()=>document.querySelector('#device-files').classList.contains('hidden')===false);
+    assert.match(await page.locator('#files-note').textContent(),/last confirmed page/);
+    devices[0].capabilities=devices[0].capabilities.filter(cap=>cap!=='files.list_page');await page.evaluate(()=>refresh());
+    assert.equal(await page.locator('#files-next').isDisabled(),true);
+    fileListMode='legacy-truncated';await page.locator('#files-browse button').first().click();
+    await page.waitForFunction(()=>document.querySelector('#files-note').textContent.includes('Listing incomplete'));
+    assert.equal(await page.locator('#files-pagination').isVisible(),false);
+    const legacy=operations.filter(op=>op.op==='files'&&op.action.action==='list').at(-1).action;
+    assert.equal(legacy.offset,undefined);assert.equal(legacy.length,undefined);fileListMode='legacy';
     await page.locator('[data-view="devices"]').click();
     await page.locator('#device-search').fill('no-such-device');
     assert.equal(await page.locator('#all-devices .device-row:not(.hidden)').count(),0);
@@ -262,12 +335,42 @@ const server=http.createServer(async(req,res)=>{
     await page.locator('#overview-devices .device-row').first().waitFor();
     assert.equal(await page.evaluate(()=>getComputedStyle(document.documentElement).colorScheme),'dark');
 
+    // Both absent headers and a stalled JSON body must release the coalesced
+    // refresh promise. Last confirmed device data remains visibly stale.
+    for(const mode of ['headers','body']){
+      overviewMode=mode;
+      const before=overviewCalls;
+      await page.evaluate(()=>{void refresh();});
+      await page.waitForFunction(()=>document.querySelector('#gateway-label').textContent.includes('last confirmed data'),{},{timeout:15000});
+      assert(overviewCalls>before);
+      assert.equal(await page.locator('#overview-devices .device-row').count(),2);
+      assert.match(await page.locator('#gateway-label').getAttribute('title'),/timed out/);
+      overviewMode=null;
+      await page.evaluate(()=>refresh());
+      await page.waitForFunction(()=>document.querySelector('#gateway-label').textContent==='Gateway online');
+    }
+    // A mutation may have reached the server even if its response never arrives.
+    // The browser reports uncertainty and must never replay it automatically.
+    hangEnrollment=true;
+    const mutationsBefore=enrollmentCalls;
+    const timeout=await page.evaluate(async()=>{
+      try{await jsonFetch('/api/enrollments',{method:'POST',body:'{}'});return null;}
+      catch(error){return {code:error.code,message:error.message};}
+    });
+    hangEnrollment=false;
+    assert.equal(timeout.code,'request_timeout');
+    assert.match(timeout.message,/outcome may be unknown/);
+    assert.equal(enrollmentCalls,mutationsBefore+1);
+
     await page.setViewportSize({width:1280,height:900});
     await page.locator('[data-view="settings"]').click();await page.locator('#logout-session').click();
     await page.waitForFunction(()=>document.querySelector('#all-devices').textContent.includes('No devices'));
     assert.equal(await page.locator('#app-shell').isVisible(),false);assert.equal(await page.locator('#signin').isVisible(),true);
     assert.equal(await page.locator('#file-content').textContent(),'');assert.equal(await page.locator('#session-output').textContent(),'');
+    assert.equal(await page.locator('#files-list').textContent(),'');assert.equal(await page.locator('#files-note').textContent(),'');
+    assert.equal(await page.evaluate(()=>state.listing),null);
+    assert.equal(await page.locator('#files-path').inputValue(),'.');
     assert.deepEqual(errors,[]);
-    console.log('Dashboard browser gate PASS: dedicated password sign-in gate, device views, literal rendering/XSS, file preview, filters, shared-ID terminal attach/input/resize/refresh/detach, no write replay, job/transfer cancel and active counts, mobile layout, sign-out clearing and CSP.');
-  }finally{await browser.close();for(const stream of streams)stream.end();await new Promise(resolve=>server.close(resolve));}
+    console.log('Dashboard browser gate PASS: auth/device/XSS/terminal/session/CSP coverage; file pages with keyboard/mobile navigation, byte-shortened offsets, retained error recovery, stale-response isolation, legacy fallback and private-state clearing; bounded header/body timeout recovery and mutation no-replay.');
+  }finally{for(const response of hungResponses)response.destroy();await browser.close();for(const stream of streams)stream.end();await new Promise(resolve=>server.close(resolve));}
 })().catch(error=>{console.error(error);server.close();process.exitCode=1;});

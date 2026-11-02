@@ -1,5 +1,16 @@
 # One-command Infra setup
 
+**Native activation candidate:** [installation transactions](INSTALL_TRANSACTION.md)
+now consolidate locking, pair replacement/recovery and native setup. The adapters
+require new compatible release artifacts before promotion; the old pinned RC
+does not implement this interface. This is candidate code, not deployed setup.
+
+**2 November 2026 candidate update:** fresh nonce/status roundtrip verification
+replaces the cached-online/PID shortcut in native setup and repair. See
+[connection readiness](CONNECTION_READINESS.md) for `status --verify`, rollout
+order, diagnostic semantics and remaining acceptance gates. This is source work,
+not a production deployment or physical Windows certification.
+
 **2026-10-24 · Implementation started in the isolated feature branch; not deployed.** Pairing, setup, approval and aliases are implemented and locally validated. A signed six-platform developer prerelease is now available (v0.1.0-rc.1), but a publisher-authenticated short consumer bootstrap, rollback and physical Windows/no-VPN testing remain open. Local browser handoff is implemented and Windows CI now passes signed owner pairing with automatic OS hostname; no consumer release is published. See [IMPLEMENTATION_STATUS.md](IMPLEMENTATION_STATUS.md).
 
 This is the new near-term onboarding priority, refining [ONBOARDING_REDESIGN.md](ONBOARDING_REDESIGN.md). A signed MSI can be offered later, but is no longer the prerequisite for a usable desktop installer.
