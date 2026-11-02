@@ -43,6 +43,9 @@ jobs:
         run: ./scripts/smoke-v1.sh
       - if: matrix.os == 'ubuntu-latest'
         run: ./scripts/smoke-install-dashboard.sh
+      - name: Native installer transaction acceptance
+        if: matrix.os == 'ubuntu-latest'
+        run: python3 scripts/test-install-safety.py
       - if: matrix.os == 'ubuntu-latest'
         run: ./scripts/smoke-dashboard-password.sh
       - if: matrix.os == 'ubuntu-latest'

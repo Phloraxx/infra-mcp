@@ -1,5 +1,5 @@
-# Run in an isolated Windows CI VM. No Scheduled Task, real user profile, or
-# live agent is changed. Tests Windows PowerShell 5.1 compatibility.
+# Run on an isolated Windows CI runner using test-owned tasks/profiles only.
+# Tests Windows PowerShell 5.1 compatibility; no daily-use agent is accessed.
 $ErrorActionPreference = "Stop"
 $Root = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
 $TempRoot = Join-Path ([IO.Path]::GetTempPath()) ("infra-win-smoke-" + [guid]::NewGuid().ToString("N"))
@@ -164,6 +164,9 @@ try {
     throw "Windows Infra Scheduled Task lacks logon or periodic process recovery"
   }
   Write-Host "Windows bootstrap smoke PASS: verified preflight, spaces in paths, signed enrollment, resilient Scheduled Task launch, CLI status and live agent handshake"
+
+  python (Join-Path $Root "scripts\test-install-safety.py") --binaries (Join-Path $Root "target\release") --live-fixture-root $TempRoot --live-state $State --live-install $Install
+  if ($LASTEXITCODE -ne 0) { throw "Native Windows pair/locked-file/failed-readiness rollback acceptance failed" }
 
   # New happy path: no code or friendly name. Pair a second local test profile
   # through the same compiled native CLI and an authenticated owner action.
