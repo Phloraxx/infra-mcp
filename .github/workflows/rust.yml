@@ -43,6 +43,15 @@ jobs:
         run: ./scripts/smoke-v1.sh
       - if: matrix.os == 'ubuntu-latest'
         run: ./scripts/smoke-install-dashboard.sh
+      - name: Release version policy acceptance
+        if: matrix.os == 'ubuntu-latest'
+        run: python3 scripts/test-release-policy.py
+      - name: Release packaging contract acceptance
+        if: matrix.os == 'ubuntu-latest'
+        run: |
+          python3 -m venv "$RUNNER_TEMP/infra-release-fixture"
+          "$RUNNER_TEMP/infra-release-fixture/bin/pip" install --disable-pip-version-check cryptography
+          "$RUNNER_TEMP/infra-release-fixture/bin/python" scripts/test-release-signing.py
       - name: Native installer transaction acceptance
         if: matrix.os == 'ubuntu-latest'
         run: python3 scripts/test-install-safety.py
@@ -56,6 +65,13 @@ jobs:
       - name: Build native acceptance binaries
         if: matrix.os == 'macos-latest' || matrix.os == 'windows-latest'
         run: cargo build --release -p infra-agent -p infra-cli
+      - name: Check native release metadata
+        if: matrix.os == 'macos-latest' || matrix.os == 'windows-latest'
+        shell: pwsh
+        run: |
+          $InfraPython = if ($IsWindows) { 'python' } else { 'python3' }
+          & $InfraPython scripts/release_contract.py --binaries target/release
+          if ($LASTEXITCODE -ne 0) { throw "Native release metadata check failed" }
       - name: Upload macOS ARM64 acceptance binaries
         if: matrix.os == 'macos-latest'
         uses: actions/upload-artifact@v4

@@ -45,9 +45,22 @@ jobs:
           INFRA_RELEASE_PUBLIC_KEY_B64: ${{ vars.INFRA_RELEASE_PUBLIC_KEY_B64 }}
         run: |
           if ([string]::IsNullOrWhiteSpace($env:INFRA_RELEASE_PUBLIC_KEY_B64)) { throw "Release key missing: set repository variable INFRA_RELEASE_PUBLIC_KEY_B64" }
+      - name: Check tag against package version
+        if: startsWith(github.ref, 'refs/tags/v')
+        shell: pwsh
+        run: |
+          $InfraPython = if ($IsWindows) { 'python' } else { 'python3' }
+          & $InfraPython scripts/release_contract.py --tag "$env:GITHUB_REF_NAME"
+          if ($LASTEXITCODE -ne 0) { throw "Release tag/package version check failed" }
       - run: cargo build --release -p infra-agent -p infra-cli
         env:
           INFRA_RELEASE_PUBLIC_KEY_B64: ${{ vars.INFRA_RELEASE_PUBLIC_KEY_B64 }}
+      - name: Check native pair build metadata
+        shell: pwsh
+        run: |
+          $InfraPython = if ($IsWindows) { 'python' } else { 'python3' }
+          & $InfraPython scripts/release_contract.py --binaries target/release
+          if ($LASTEXITCODE -ne 0) { throw "Native release metadata check failed" }
       - name: Package binaries and checksums
         shell: pwsh
         run: |
@@ -76,6 +89,7 @@ jobs:
       contents: write
     steps:
       - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.99.0
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
@@ -90,7 +104,7 @@ jobs:
         env:
           INFRA_RELEASE_SIGNING_KEY_B64: ${{ secrets.INFRA_RELEASE_SIGNING_KEY_B64 }}
           INFRA_RELEASE_PUBLIC_KEY_B64: ${{ vars.INFRA_RELEASE_PUBLIC_KEY_B64 }}
-        run: python3 scripts/sign-release.py --directory release --version "$GITHUB_REF_NAME"
+        run: python3 scripts/sign-release.py --directory release --version "$GITHUB_REF_NAME" --source-commit "$GITHUB_SHA"
       - name: Publish GitHub release
         env:
           GH_TOKEN: ${{ github.token }}

@@ -86,6 +86,7 @@ pub async fn apply(
     install_dir: &Path,
     cli: &Path,
     agent: &Path,
+    release_version: &str,
     guard: LifecycleLocks,
 ) -> Result<ExitCode> {
     let id = Uuid::new_v4();
@@ -98,17 +99,21 @@ pub async fn apply(
     }
     fs::copy(cli, source.join(activation::CLI))?;
     fs::copy(agent, source.join(activation::AGENT))?;
-    let preflight = async {
+    let preflight: Result<()> = async {
         let cli_version = install::probe(&source.join(activation::CLI), "infra").await?;
         let agent_version = install::probe(&source.join(activation::AGENT), "infra-agent").await?;
-        if cli_version != agent_version {
-            return Err(anyhow::anyhow!("candidate CLI/agent versions differ"));
-        }
+        super::release_verify::verify_binary_versions(
+            release_version,
+            &cli_version,
+            &agent_version,
+        )?;
         Ok(())
     }
     .await;
     if let Err(error) = preflight {
         let _ = fs::remove_dir_all(&source);
+        let _ = fs::remove_file(cli);
+        let _ = fs::remove_file(agent);
         return Err(error).context(
             "selected release does not support safe paired activation; installed files unchanged",
         );
