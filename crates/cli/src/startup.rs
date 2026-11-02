@@ -20,6 +20,7 @@ pub struct StartupStatus {
     pub mechanism: &'static str,
     pub installed: bool,
     pub active: bool,
+    pub reliable: bool,
     pub detail: String,
 }
 
@@ -88,16 +89,28 @@ pub fn install(agent: &Path, state_dir: &Path) -> anyhow::Result<()> {
     let script = format!(
         "$ErrorActionPreference='Stop'; \
          $action=New-ScheduledTaskAction -Execute '{executable}' -Argument '{arguments}'; \
-         $trigger=New-ScheduledTaskTrigger -AtLogOn; \
+         $logon=New-ScheduledTaskTrigger -AtLogOn; \
+         $retry=New-ScheduledTaskTrigger -Once -At (Get-Date).AddMinutes(1) -RepetitionInterval (New-TimeSpan -Minutes 5) -RepetitionDuration (New-TimeSpan -Days 3650); \
+         $settings=New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -ExecutionTimeLimit (New-TimeSpan -Seconds 0) -RestartCount 3 -RestartInterval (New-TimeSpan -Minutes 1) -StartWhenAvailable; \
          $principal=New-ScheduledTaskPrincipal -UserId ([Security.Principal.WindowsIdentity]::GetCurrent().Name) -LogonType Interactive -RunLevel Limited; \
-         Register-ScheduledTask -TaskName '{WINDOWS_TASK}' -Action $action -Trigger $trigger -Principal $principal -Force | Out-Null"
+         Register-ScheduledTask -TaskName '{WINDOWS_TASK}' -Action $action -Trigger @($logon,$retry) -Settings $settings -Principal $principal -Force | Out-Null"
     );
     command_ok(Command::new("powershell.exe").args([
         "-NoProfile",
         "-NonInteractive",
         "-Command",
         &script,
-    ]))?;
+    ]))
+    .map_err(|error| {
+        if error.to_string().to_ascii_lowercase().contains("access is denied") {
+            anyhow!(
+                "Infra Scheduled Task is administrator-owned or task permissions are restricted. Run infra repair once in Administrator PowerShell; enrollment and running agent were not changed: {error}"
+            )
+        } else {
+            error
+        }
+    })?;
+    // /Run leaves already-running tasks and their durable work alone.
     command_ok(Command::new("schtasks").args(["/Run", "/TN", WINDOWS_TASK]))?;
     Ok(())
 }
@@ -189,6 +202,7 @@ pub fn status() -> StartupStatus {
         mechanism: "systemd-user",
         installed,
         active,
+        reliable: installed,
         detail: if active {
             "user service active"
         } else if installed {
@@ -213,6 +227,7 @@ pub fn status() -> StartupStatus {
         mechanism: "launchd",
         installed,
         active,
+        reliable: installed,
         detail: if active {
             "LaunchAgent loaded"
         } else if installed {
@@ -235,19 +250,43 @@ pub fn status() -> StartupStatus {
         .map(|output| String::from_utf8_lossy(&output.stdout).to_string())
         .unwrap_or_default();
     let active = installed && text.to_ascii_lowercase().contains("running");
+    let reliable = installed && windows_task_has_recovery();
     StartupStatus {
         mechanism: "scheduled-task",
         installed,
         active,
-        detail: if active {
-            "scheduled task running"
+        reliable,
+        detail: if installed && !reliable {
+            "task lacks crash/battery/runtime recovery; run infra repair from Administrator PowerShell if the task is administrator-owned"
+        } else if active {
+            "scheduled task running with periodic recovery"
         } else if installed {
-            "scheduled task installed"
+            "scheduled task installed with recovery but not running"
         } else {
             "scheduled task not installed"
         }
         .into(),
     }
+}
+
+#[cfg(windows)]
+fn windows_task_has_recovery() -> bool {
+    // A legacy task can be running now but fail forever after battery or 72h.
+    const SCRIPT: &str = r#"
+$t=Get-ScheduledTask -TaskName 'Infra MCP Agent' -ErrorAction Stop
+$s=$t.Settings
+$logon=@($t.Triggers | Where-Object { $_.CimClass.CimClassName -eq 'MSFT_TaskLogonTrigger' }).Count -gt 0
+$retry=@($t.Triggers | Where-Object { $_.CimClass.CimClassName -eq 'MSFT_TaskTimeTrigger' -and $_.Repetition.Interval -eq 'PT5M' }).Count -gt 0
+if ($logon -and $retry -and $s.ExecutionTimeLimit -eq 'PT0S' -and
+    $s.RestartCount -ge 1 -and -not $s.DisallowStartIfOnBatteries -and
+    -not $s.StopIfGoingOnBatteries -and $s.StartWhenAvailable) { 'OK' } else { 'UNSAFE' }
+"#;
+    Command::new("powershell.exe")
+        .args(["-NoProfile", "-NonInteractive", "-Command", SCRIPT])
+        .output()
+        .is_ok_and(|output| {
+            output.status.success() && String::from_utf8_lossy(&output.stdout).trim() == "OK"
+        })
 }
 
 #[cfg(target_os = "linux")]

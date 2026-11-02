@@ -21,14 +21,13 @@ use infra_local_state::{RuntimeStatus, now_ms, read_config, write_runtime};
 use infra_platform::identity as platform_identity;
 use infra_protocol::{
     AgentOperation, AgentRequest, AgentResponse, AgentToGateway, DeviceAuthStart, DeviceHello,
-    ExecOutput, GatewayToAgent, LegacyDeviceHello, OperationResult, PROTOCOL_VERSION,
-    ReconcileSnapshot, SignedDeviceHello,
+    GatewayToAgent, LegacyDeviceHello, OperationResult, PROTOCOL_VERSION, ReconcileSnapshot,
+    SignedDeviceHello,
 };
 use jobs::Jobs;
-use std::{collections::BTreeMap, path::PathBuf, process::Stdio, sync::Arc, time::Duration};
+use std::{collections::BTreeMap, path::PathBuf, sync::Arc, time::Duration};
 use terminal::Terminals;
 use tokio::{
-    io::{AsyncRead, AsyncReadExt},
     process::Command,
     sync::{Semaphore, mpsc},
 };
@@ -648,82 +647,20 @@ async fn exec(command: String, cwd: Option<String>, timeout_ms: u64) -> Operatio
     if let Some(cwd) = cwd {
         cmd.current_dir(cwd);
     }
-    cmd.stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
-    let mut child = match cmd.spawn() {
-        Ok(child) => child,
-        Err(err) => {
-            return OperationResult::Failed {
-                error: format!("spawn failed: {err}"),
-            };
-        }
-    };
-    let stdout = child.stdout.take().expect("stdout piped");
-    let stderr = child.stderr.take().expect("stderr piped");
-    let stdout_task = tokio::spawn(read_bounded(stdout, MAX_CAPTURE_BYTES));
-    let stderr_task = tokio::spawn(read_bounded(stderr, MAX_CAPTURE_BYTES));
-    let status = match tokio::time::timeout(Duration::from_millis(timeout_ms), child.wait()).await {
-        Ok(Ok(status)) => Some(status),
-        Ok(Err(err)) => {
-            let _ = child.kill().await;
-            return OperationResult::Failed {
-                error: format!("wait failed: {err}"),
-            };
-        }
-        Err(_) => {
-            let _ = child.kill().await;
-            let _ = child.wait().await;
-            let _ = stdout_task.await;
-            let _ = stderr_task.await;
-            return OperationResult::DeadlineExceeded;
-        }
-    };
-    let (stdout, stdout_truncated) = stdout_task.await.unwrap_or_default();
-    let (stderr, stderr_truncated) = stderr_task.await.unwrap_or_default();
-    let output = ExecOutput {
-        exit_code: status.and_then(|s| s.code()),
-        stdout: String::from_utf8_lossy(&stdout).into_owned(),
-        stderr: String::from_utf8_lossy(&stderr).into_owned(),
-        truncated: stdout_truncated || stderr_truncated,
-    };
-    OperationResult::Ok {
-        body: serde_json::to_value(output)
-            .unwrap_or_else(|_| serde_json::json!({"error":"serialize exec output"})),
+    match command_runner::run_async(cmd, Duration::from_millis(timeout_ms), MAX_CAPTURE_BYTES).await
+    {
+        Ok(output) => OperationResult::Ok {
+            body: serde_json::to_value(output).expect("command output is serializable"),
+        },
+        Err(command_runner::CommandError::DeadlineExceeded(_)) => OperationResult::DeadlineExceeded,
+        Err(command_runner::CommandError::Failed(error)) => OperationResult::Failed { error },
     }
-}
-
-async fn read_bounded<R>(mut reader: R, limit: usize) -> (Vec<u8>, bool)
-where
-    R: AsyncRead + Unpin,
-{
-    let mut kept = Vec::with_capacity(limit.min(64 * 1024));
-    let mut buf = [0_u8; 8192];
-    let mut truncated = false;
-    loop {
-        let n = match reader.read(&mut buf).await {
-            Ok(0) => break,
-            Ok(n) => n,
-            Err(_) => break,
-        };
-        if kept.len() < limit {
-            let room = limit - kept.len();
-            let take = n.min(room);
-            kept.extend_from_slice(&buf[..take]);
-            if take < n {
-                truncated = true;
-            }
-        } else {
-            truncated = true;
-        }
-    }
-    (kept, truncated)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tokio::io::AsyncWriteExt;
+    use infra_protocol::ExecOutput;
 
     #[tokio::test]
     async fn exec_captures_successful_output() {
@@ -742,17 +679,5 @@ mod tests {
     async fn exec_enforces_deadline() {
         let result = exec("sleep 2".into(), None, 100).await;
         assert!(matches!(result, OperationResult::DeadlineExceeded));
-    }
-
-    #[tokio::test]
-    async fn bounded_reader_discards_after_limit_without_blocking() {
-        let (mut writer, reader) = tokio::io::duplex(4096);
-        let producer = tokio::spawn(async move {
-            writer.write_all(&vec![b'x'; 2048]).await.unwrap();
-        });
-        let (bytes, truncated) = read_bounded(reader, 128).await;
-        producer.await.unwrap();
-        assert_eq!(bytes.len(), 128);
-        assert!(truncated);
     }
 }

@@ -99,6 +99,13 @@ async fn run() -> anyhow::Result<ExitCode> {
             ensure_no_args(&args)?;
             let previous_runtime = read_runtime(&state_dir).ok().flatten();
             repair(&state_dir)?;
+            if let Ok(Some(runtime)) = read_runtime(&state_dir)
+                && runtime.state == "online"
+                && process_alive(runtime.pid)
+            {
+                println!("Infra startup is repaired; existing signed connection is healthy.");
+                return Ok(ExitCode::SUCCESS);
+            }
             let runtime = wait_for_online_reconnect(
                 &state_dir,
                 previous_runtime.as_ref(),
@@ -233,6 +240,15 @@ async fn setup_command(state_dir: &Path, mut args: Vec<String>) -> anyhow::Resul
     let previous_runtime = read_runtime(state_dir).ok().flatten();
     startup::install(&agent, state_dir)
         .context("Infra paired, but automatic startup needs repair; run infra doctor")?;
+    // Repairing a running Windows task leaves its signed agent online. Do not
+    // demand a new generation if /Run correctly ignored an already-running task.
+    if let Ok(Some(runtime)) = read_runtime(state_dir)
+        && runtime.state == "online"
+        && process_alive(runtime.pid)
+    {
+        println!("Infra startup is installed; existing signed agent is online.");
+        return Ok(ExitCode::SUCCESS);
+    }
     let runtime = wait_for_online_reconnect(
         state_dir,
         previous_runtime.as_ref(),
@@ -385,6 +401,7 @@ async fn update_command(state_dir: &Path, mut args: Vec<String>) -> anyhow::Resu
     }
 
     let (asset, extension) = release_asset_descriptor()?;
+    let using_default_release_url = base_url.is_none();
     let base = base_url.unwrap_or_else(|| {
         if version == "latest" {
             format!("https://github.com/{repo}/releases/latest/download")
@@ -397,13 +414,19 @@ async fn update_command(state_dir: &Path, mut args: Vec<String>) -> anyhow::Resu
         .build()?;
 
     // Signature is checked before any staged executable is written.
-    let manifest_bytes = client
+    let manifest_response = client
         .get(format!("{base}/infra-release.json"))
         .send()
-        .await?
-        .error_for_status()?
-        .bytes()
         .await?;
+    if manifest_response.status() == reqwest::StatusCode::NOT_FOUND
+        && version == "latest"
+        && using_default_release_url
+    {
+        return Err(anyhow!(
+            "No stable Infra release is published. GitHub /releases/latest excludes prereleases; this is not an update or network repair failure. Use an explicitly tested signed prerelease tag such as --version v0.1.0-rc.1 for a manual update; unattended updates should remain disabled until a stable release passes Windows rollback acceptance."
+        ));
+    }
+    let manifest_bytes = manifest_response.error_for_status()?.bytes().await?;
     let manifest_signature = client
         .get(format!("{base}/infra-release.json.sig"))
         .send()
@@ -885,7 +908,7 @@ async fn doctor(state_dir: &Path) -> DoctorReport {
     let startup = startup::status();
     checks.push(check(
         "startup",
-        startup.installed && startup.active,
+        startup.installed && startup.active && startup.reliable,
         startup.detail,
         true,
     ));

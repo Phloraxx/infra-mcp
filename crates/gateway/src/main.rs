@@ -2,6 +2,7 @@ mod auth;
 mod copy;
 mod oauth;
 mod pairing;
+mod pending;
 mod store;
 
 use anyhow::Context;
@@ -32,6 +33,7 @@ use infra_protocol::{
     SystemRequest, TerminalAction, TerminalRequest, TransferAction, TransferRequest,
     signed_auth_message,
 };
+use pending::PendingRequests;
 use rmcp::{
     Json as McpJson,
     handler::server::wrapper::Parameters,
@@ -55,7 +57,7 @@ use std::{
     time::{Duration, Instant},
 };
 use store::{DeviceRecord, Store, StoreError, now_ms};
-use tokio::sync::{Mutex, RwLock, broadcast, mpsc, oneshot};
+use tokio::sync::{RwLock, broadcast, mpsc};
 use tracing::{info, warn};
 use uuid::Uuid;
 
@@ -74,7 +76,7 @@ struct AppState {
     gateway_epoch: Uuid,
     next_generation: Arc<AtomicU64>,
     devices: Arc<RwLock<HashMap<String, DeviceConnection>>>,
-    pending: Arc<Mutex<HashMap<Uuid, oneshot::Sender<AgentResponse>>>>,
+    pending: PendingRequests,
     events: broadcast::Sender<DashboardEvent>,
     store: Store,
 }
@@ -90,7 +92,7 @@ impl AppState {
             gateway_epoch: Uuid::new_v4(),
             next_generation: Arc::new(AtomicU64::new(1)),
             devices: Arc::new(RwLock::new(HashMap::new())),
-            pending: Arc::new(Mutex::new(HashMap::new())),
+            pending: PendingRequests::default(),
             events,
             store,
         }
@@ -298,7 +300,7 @@ enum DispatchError {
     Offline(String),
     Storage(String),
     ConnectionClosed,
-    ResponseClosed,
+    QueueBusy,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -2730,8 +2732,8 @@ fn dispatch_error(error: DispatchError) -> String {
         DispatchError::ConnectionClosed => {
             "device_connection_closed: device disconnected while sending the request".into()
         }
-        DispatchError::ResponseClosed => {
-            "device_response_closed: agent response channel closed".into()
+        DispatchError::QueueBusy => {
+            "agent_busy: request deadline expired before dispatch; operation was not sent and may be retried".into()
         }
     }
 }
@@ -2742,43 +2744,43 @@ async fn dispatch_to_device(
     operation: AgentOperation,
     timeout_ms: u64,
 ) -> Result<AgentResponse, DispatchError> {
+    let deadline = tokio::time::Instant::now() + Duration::from_millis(timeout_ms);
     let device_id = resolve_device(state, &selector).await?;
-    let (tx, retire) = {
+    let (tx, retire, generation) = {
         let devices = state.devices.read().await;
         devices
             .get(&device_id)
-            .map(|d| (d.tx.clone(), d.retire.clone()))
+            .map(|d| (d.tx.clone(), d.retire.clone(), d.generation))
             .ok_or_else(|| DispatchError::Offline(selector.clone()))?
     };
-    let id = Uuid::new_v4();
-    let request = GatewayToAgent::Request(AgentRequest { id, operation });
-    let (reply_tx, reply_rx) = oneshot::channel();
-    state.pending.lock().await.insert(id, reply_tx);
-    if tx.send(request).await.is_err() {
-        state.pending.lock().await.remove(&id);
-        let _ = retire.try_send(());
-        return Err(DispatchError::ConnectionClosed);
-    }
-    match tokio::time::timeout(Duration::from_millis(timeout_ms), reply_rx).await {
-        Ok(Ok(r)) => Ok(r),
+    // Reserve before registering a waiter: cancellation or timeout while queued
+    // cannot leak pending state or enqueue a command after its caller gives up.
+    let permit = match tokio::time::timeout_at(deadline, tx.reserve()).await {
+        Ok(Ok(permit)) => permit,
         Ok(Err(_)) => {
             let _ = retire.try_send(());
-            Err(DispatchError::ResponseClosed)
+            return Err(DispatchError::ConnectionClosed);
         }
-        Err(_) => {
-            state.pending.lock().await.remove(&id);
-            // An unanswered command might have run. Disconnect instead of replaying it.
-            let _ = retire.try_send(());
-            Ok(AgentResponse {
-                id,
-                result: OperationResult::OutcomeUnknown {
-                    error:
-                        "gateway timed out waiting for device response; operation was not replayed"
-                            .into(),
-                },
-            })
-        }
-    }
+        Err(_) => return Err(DispatchError::QueueBusy),
+    };
+    let id = Uuid::new_v4();
+    let (_pending, reply_rx) = state.pending.register(id, device_id.clone(), generation);
+    permit.send(GatewayToAgent::Request(AgentRequest { id, operation }));
+    let error = match tokio::time::timeout_at(deadline, reply_rx).await {
+        Ok(Ok(response)) => return Ok(response),
+        Ok(Err(_)) => "device connection closed after dispatch; operation was not replayed",
+        Err(_) => "gateway timed out waiting for device response; operation was not replayed",
+    };
+    // The operation may still complete. Liveness belongs to the independent
+    // heartbeat/socket checks; an operation deadline alone must not retire it.
+    warn!(device_id=%device_id, request_id=%id, timeout_ms,
+        "agent operation response unavailable; outcome unknown, no replay");
+    Ok(AgentResponse {
+        id,
+        result: OperationResult::OutcomeUnknown {
+            error: error.into(),
+        },
+    })
 }
 
 async fn agent_upgrade(ws: WebSocketUpgrade, State(state): State<AppState>) -> impl IntoResponse {
@@ -2870,7 +2872,7 @@ async fn handle_agent(mut socket: WebSocket, state: AppState) {
                 Some(Ok(Message::Text(text)))=>{
                     last_inbound=Instant::now();
                     match serde_json::from_str::<AgentToGateway>(text.as_str()){
-                        Ok(AgentToGateway::Response(response))=>if let Some(waiter)=state.pending.lock().await.remove(&response.id){let _=waiter.send(response);},
+                        Ok(AgentToGateway::Response(response))=>state.pending.complete(&hello.device_id, generation, response),
                         Ok(AgentToGateway::Reconcile(snapshot)) => {
                             if let Some(device) = state.devices.write().await.get_mut(&hello.device_id)
                                 && device.generation == generation
@@ -2889,6 +2891,7 @@ async fn handle_agent(mut socket: WebSocket, state: AppState) {
             }
         }
     }
+    state.pending.disconnect(&hello.device_id, generation);
     let mut devices = state.devices.write().await;
     if devices
         .get(&hello.device_id)
@@ -3241,28 +3244,209 @@ mod tests {
         server.abort();
     }
     #[tokio::test]
-    async fn timed_out_request_retires_connection() {
+    async fn timed_out_operation_does_not_disconnect_healthy_agent() {
         let (_dir, state, addr, server) = spawn_test_gateway().await;
-        let (_socket, _) = connect_legacy(addr, "silent-device").await;
-        wait_registered(&state, "silent-device").await;
-        let response =
-            dispatch_to_device(&state, "silent-device".into(), AgentOperation::Status, 50)
-                .await
-                .unwrap();
+        let (socket, generation) = connect_legacy(addr, "slow-device").await;
+        wait_registered(&state, "slow-device").await;
+        let (mut sink, mut stream) = socket.split();
+        let responder = tokio::spawn(async move {
+            let mut requests = 0;
+            while let Some(Ok(ClientMessage::Text(text))) = stream.next().await {
+                let message: GatewayToAgent = serde_json::from_str(text.as_str()).unwrap();
+                if let GatewayToAgent::Request(request) = message {
+                    requests += 1;
+                    if requests == 1 {
+                        // One command never responds, but the agent can process
+                        // subsequent requests on its still-healthy connection.
+                        continue;
+                    }
+                    let answer = AgentToGateway::Response(AgentResponse {
+                        id: request.id,
+                        result: OperationResult::Ok {
+                            body: serde_json::json!({"status": "ready"}),
+                        },
+                    });
+                    sink.send(ClientMessage::Text(
+                        serde_json::to_string(&answer).unwrap().into(),
+                    ))
+                    .await
+                    .unwrap();
+                }
+            }
+        });
+        let first = dispatch_to_device(&state, "slow-device".into(), AgentOperation::Status, 50)
+            .await
+            .unwrap();
         assert!(matches!(
-            response.result,
+            first.result,
             OperationResult::OutcomeUnknown { .. }
         ));
-        tokio::time::timeout(Duration::from_secs(1), async {
-            loop {
-                if !state.devices.read().await.contains_key("silent-device") {
-                    break;
-                }
-                tokio::task::yield_now().await;
-            }
-        })
+        assert!(state.pending.is_empty());
+        assert_eq!(
+            state.devices.read().await["slow-device"].generation,
+            generation
+        );
+        let next = dispatch_to_device(&state, "slow-device".into(), AgentOperation::Status, 1000)
+            .await
+            .unwrap();
+        assert!(matches!(next.result, OperationResult::Ok { .. }));
+        assert!(state.pending.is_empty());
+        assert_eq!(
+            state.devices.read().await["slow-device"].generation,
+            generation
+        );
+        responder.abort();
+        server.abort();
+    }
+
+    async fn queued_test_device(
+        state: &AppState,
+    ) -> (mpsc::Receiver<GatewayToAgent>, mpsc::Receiver<()>) {
+        let (tx, rx) = mpsc::channel(1);
+        let (retire, retire_rx) = mpsc::channel(1);
+        state.devices.write().await.insert(
+            "queued-device".into(),
+            DeviceConnection {
+                hello: test_hello("queued-device", Uuid::new_v4()),
+                generation: 1,
+                tx,
+                retire,
+                reconcile: ReconcileSnapshot::default(),
+            },
+        );
+        (rx, retire_rx)
+    }
+
+    #[tokio::test]
+    async fn full_queue_expires_without_dispatch_or_connection_retirement() {
+        let (_dir, state, _addr, server) = spawn_test_gateway().await;
+        let (mut rx, mut retire) = queued_test_device(&state).await;
+        state.devices.read().await["queued-device"]
+            .tx
+            .send(GatewayToAgent::Ping)
+            .await
+            .unwrap();
+        let result = tokio::time::timeout(
+            Duration::from_secs(1),
+            dispatch_to_device(&state, "queued-device".into(), AgentOperation::Status, 25),
+        )
         .await
-        .expect("timed-out device connection was not retired");
+        .expect("queue admission must be bounded");
+        assert!(matches!(result, Err(DispatchError::QueueBusy)));
+        assert!(state.pending.is_empty());
+        assert!(matches!(rx.recv().await, Some(GatewayToAgent::Ping)));
+        assert!(
+            rx.try_recv().is_err(),
+            "expired operation was unexpectedly queued"
+        );
+        assert!(
+            retire.try_recv().is_err(),
+            "a full queue must not retire the connection"
+        );
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn abort_after_dispatch_removes_waiter_and_does_not_replay() {
+        let (_dir, state, _addr, server) = spawn_test_gateway().await;
+        let (mut rx, mut retire) = queued_test_device(&state).await;
+        let caller_state = state.clone();
+        let caller = tokio::spawn(async move {
+            dispatch_to_device(
+                &caller_state,
+                "queued-device".into(),
+                AgentOperation::Status,
+                5_000,
+            )
+            .await
+        });
+        let request = tokio::time::timeout(Duration::from_secs(1), rx.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        let GatewayToAgent::Request(request) = request else {
+            panic!("expected request")
+        };
+        assert!(!state.pending.is_empty());
+        caller.abort();
+        assert!(caller.await.unwrap_err().is_cancelled());
+        assert!(state.pending.is_empty());
+        // A late response after cancellation is harmless.
+        state.pending.complete(
+            "queued-device",
+            1,
+            AgentResponse {
+                id: request.id,
+                result: OperationResult::Ok {
+                    body: serde_json::json!({}),
+                },
+            },
+        );
+        assert!(rx.try_recv().is_err());
+        assert!(retire.try_recv().is_err());
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn abort_while_waiting_for_queue_does_not_dispatch() {
+        let (_dir, state, _addr, server) = spawn_test_gateway().await;
+        let (mut rx, _retire) = queued_test_device(&state).await;
+        state.devices.read().await["queued-device"]
+            .tx
+            .send(GatewayToAgent::Ping)
+            .await
+            .unwrap();
+        let caller_state = state.clone();
+        let caller = tokio::spawn(async move {
+            dispatch_to_device(
+                &caller_state,
+                "queued-device".into(),
+                AgentOperation::Status,
+                5_000,
+            )
+            .await
+        });
+        tokio::task::yield_now().await;
+        caller.abort();
+        assert!(caller.await.unwrap_err().is_cancelled());
+        assert!(state.pending.is_empty());
+        assert!(matches!(rx.recv().await, Some(GatewayToAgent::Ping)));
+        assert!(rx.try_recv().is_err());
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn socket_loss_after_dispatch_returns_unknown_without_waiting_for_deadline() {
+        let (_dir, state, addr, server) = spawn_test_gateway().await;
+        let (mut socket, _) = connect_legacy(addr, "disconnect-device").await;
+        wait_registered(&state, "disconnect-device").await;
+        let caller_state = state.clone();
+        let caller = tokio::spawn(async move {
+            dispatch_to_device(
+                &caller_state,
+                "disconnect-device".into(),
+                AgentOperation::Status,
+                30_000,
+            )
+            .await
+        });
+        let frame = tokio::time::timeout(Duration::from_secs(1), socket.next())
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        assert!(matches!(frame, ClientMessage::Text(_)));
+        socket.close(None).await.unwrap();
+        let result = tokio::time::timeout(Duration::from_secs(2), caller)
+            .await
+            .expect("socket closure should release the pending caller")
+            .unwrap()
+            .unwrap();
+        assert!(matches!(
+            result.result,
+            OperationResult::OutcomeUnknown { .. }
+        ));
+        assert!(state.pending.is_empty());
         server.abort();
     }
 

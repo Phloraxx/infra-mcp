@@ -12,16 +12,60 @@ param(
 $ErrorActionPreference = "Stop"
 $Repo = "Phloraxx/infra-mcp"
 
-$Arch = switch ([System.Runtime.InteropServices.RuntimeInformation]::OSArchitecture.ToString()) {
+# Avoid invoking .ToString() on a potentially missing environment/API value.
+$DetectedArchitecture = [System.Runtime.InteropServices.RuntimeInformation]::OSArchitecture
+if ($null -eq $DetectedArchitecture) {
+  throw "Infra preflight: Windows OS architecture was unavailable. Run in Windows PowerShell 5.1 or PowerShell 7."
+}
+$Arch = switch ([string]$DetectedArchitecture) {
   "X64" { "x86_64" }
   "Arm64" { "aarch64" }
-  default { throw "Unsupported Windows architecture: $_" }
+  default { throw "Infra preflight: unsupported Windows architecture '$DetectedArchitecture'." }
 }
 
 # Download and verify BOTH assets before modifying a working installation.
 # This also means a missing GitHub release cannot leave a half-installed agent.
 $TempDir = Join-Path ([IO.Path]::GetTempPath()) ("infra-install-" + [guid]::NewGuid())
 New-Item -ItemType Directory -Force -Path $TempDir | Out-Null
+
+# These helpers are deliberately strict: PowerShell 5.1 can return $null from
+# file reads instead of an empty string. Never call methods on those results.
+function Get-InfraExpectedHash([string]$ChecksumPath, [string]$Asset) {
+  if (-not (Test-Path -LiteralPath $ChecksumPath -PathType Leaf)) {
+    throw "Infra download: missing checksum file for $Asset. Check GitHub access or proxy filtering."
+  }
+  $Content = Get-Content -LiteralPath $ChecksumPath -Raw -ErrorAction Stop
+  if ([string]::IsNullOrWhiteSpace($Content)) {
+    throw "Infra download: checksum file for $Asset is empty. Check GitHub access or proxy filtering."
+  }
+  $Parts = $Content.Trim() -split '\s+'
+  if ($Parts.Count -lt 1 -or [string]::IsNullOrWhiteSpace($Parts[0])) {
+    throw "Infra download: checksum for $Asset is missing."
+  }
+  $Expected = [string]$Parts[0]
+  if ($Expected -notmatch '^[0-9a-fA-F]{64}$') {
+    throw "Infra download: checksum format is invalid for $Asset."
+  }
+  if ($Parts.Count -ge 2 -and $Parts[1] -ne $Asset -and $Parts[1] -ne "*$Asset") {
+    throw "Infra download: checksum references another asset, refusing $Asset."
+  }
+  return $Expected.ToLowerInvariant()
+}
+
+function Get-InfraActualHash([string]$FilePath, [string]$Asset) {
+  if (-not (Test-Path -LiteralPath $FilePath -PathType Leaf)) {
+    throw "Infra download: missing binary $Asset after download."
+  }
+  $FileInfo = Get-Item -LiteralPath $FilePath -ErrorAction Stop
+  if ($null -eq $FileInfo -or $FileInfo.Length -le 0) {
+    throw "Infra download: empty binary $Asset after download."
+  }
+  $Digest = Get-FileHash -LiteralPath $FilePath -Algorithm SHA256 -ErrorAction Stop
+  if ($null -eq $Digest -or [string]::IsNullOrWhiteSpace($Digest.Hash)) {
+    throw "Infra verification: could not calculate the SHA-256 of $Asset."
+  }
+  return ([string]$Digest.Hash).ToLowerInvariant()
+}
 
 function Stage-InfraBinary([string]$Name) {
   $Staged = Join-Path $TempDir "$Name.exe"
@@ -52,15 +96,8 @@ function Stage-InfraBinary([string]$Name) {
       }
       throw "Unable to download $Asset from GitHub ($($_.Exception.Message)). Check network access, proxy/TLS and the release tag."
     }
-    $Parts = ((Get-Content -LiteralPath $ChecksumPath -Raw).Trim() -split '\s+')
-    $Expected = $Parts[0].ToLowerInvariant()
-    if ($Expected -notmatch '^[0-9a-f]{64}$') {
-      throw "Release checksum format is invalid for $Asset"
-    }
-    if ($Parts.Length -ge 2 -and ($Parts[1] -ne $Asset -and $Parts[1] -ne "*$Asset")) {
-      throw "Release checksum references a different asset, refusing $Asset"
-    }
-    $Actual = (Get-FileHash -LiteralPath $Staged -Algorithm SHA256).Hash.ToLowerInvariant()
+    $Expected = Get-InfraExpectedHash -ChecksumPath $ChecksumPath -Asset $Asset
+    $Actual = Get-InfraActualHash -FilePath $Staged -Asset $Asset
     if ($Expected -ne $Actual) { throw "SHA-256 verification failed for $Asset" }
     # SHA-256 is only an integrity check. First-install publisher authentication
     # needs a signed bootstrap trust root (tracked separately).
@@ -73,8 +110,8 @@ function Activate-InfraBinary([string]$Name, [string]$Staged) {
   # Repair/re-run of this same release must not try to overwrite a running
   # Windows executable; that raises access-denied and can damage a healthy setup.
   if (Test-Path -LiteralPath $Destination -PathType Leaf) {
-    $InstalledHash = (Get-FileHash -LiteralPath $Destination -Algorithm SHA256).Hash
-    $StagedHash = (Get-FileHash -LiteralPath $Staged -Algorithm SHA256).Hash
+    $InstalledHash = Get-InfraActualHash -FilePath $Destination -Asset "$Name (installed)"
+    $StagedHash = Get-InfraActualHash -FilePath $Staged -Asset "$Name (staged)"
     if ($InstalledHash -eq $StagedHash) {
       Write-Host "Infra $Name is already installed; leaving the existing binary intact."
       return
@@ -105,11 +142,49 @@ try {
       (Test-Path -LiteralPath $ExistingCli) -and (Test-Path -LiteralPath $ExistingAgent) -and
       ((& $ExistingCli help 2>&1 | Out-String) -match 'infra setup')) {
     Write-Host "Infra is already installed. Checking pairing and startup..."
+    # Idempotency: do not restart a correctly configured, healthy agent.
+    # On Windows /Run on an already-running scheduled task may do nothing;
+    # waiting for a newer generation would then fail after 35 seconds.
+    $CurrentStatus = $null
+    try {
+      $StatusJson = & $ExistingCli status --json --state-dir $StateDir 2>$null
+      if ($LASTEXITCODE -eq 0 -and -not [string]::IsNullOrWhiteSpace(($StatusJson | Out-String))) {
+        $CurrentStatus = $StatusJson | Out-String | ConvertFrom-Json -ErrorAction Stop
+      }
+    } catch {
+      Write-Host "Infra status unavailable; attempting native startup repair."
+    }
+    $GatewayMatches = [string]::IsNullOrWhiteSpace($Gateway) -or
+      ($null -ne $CurrentStatus -and $null -ne $CurrentStatus.config -and
+       $CurrentStatus.config.gateway_url -eq $Gateway)
+    # A legacy running task is NOT healthy: default Windows task settings
+    # stop on battery, terminate after 72 hours, and never restart on crash.
+    $StartupResilient = $false
+    try {
+      $Task = Get-ScheduledTask -TaskName "Infra MCP Agent" -ErrorAction Stop
+      $TaskSettings = $Task.Settings
+      $HasLogon = @($Task.Triggers | Where-Object { $_.CimClass.CimClassName -eq "MSFT_TaskLogonTrigger" }).Count -gt 0
+      $HasRetry = @($Task.Triggers | Where-Object {
+        $_.CimClass.CimClassName -eq "MSFT_TaskTimeTrigger" -and $_.Repetition.Interval -eq "PT5M"
+      }).Count -gt 0
+      $StartupResilient = $HasLogon -and $HasRetry -and
+        ($TaskSettings.ExecutionTimeLimit -eq "PT0S") -and ($TaskSettings.RestartCount -gt 0) -and
+        (-not $TaskSettings.DisallowStartIfOnBatteries) -and
+        (-not $TaskSettings.StopIfGoingOnBatteries) -and $TaskSettings.StartWhenAvailable
+    } catch { Write-Host "Infra startup task is missing or unreadable; attempting repair." }
+    if ($null -ne $CurrentStatus -and $CurrentStatus.configured -and $CurrentStatus.enrolled -and
+        $CurrentStatus.process_alive -and $CurrentStatus.startup.installed -and $StartupResilient -and
+        $CurrentStatus.runtime.state -eq "online" -and $GatewayMatches) {
+      Write-Host "Infra is already paired, running and connected; nothing to repair."
+      return
+    }
     $RepairArgs = @("setup", "--agent", $ExistingAgent, "--state-dir", $StateDir)
     if (-not [string]::IsNullOrWhiteSpace($Gateway)) { $RepairArgs += @("--gateway", $Gateway) }
     if ($NoStartup) { $RepairArgs += "--no-startup" }
     & $ExistingCli @RepairArgs
-    if ($LASTEXITCODE -ne 0) { throw "Existing Infra setup needs repair. Run $ExistingCli doctor." }
+    if ($LASTEXITCODE -ne 0) {
+      throw "Existing Infra startup needs repair (exit $LASTEXITCODE). If this is an administrator-owned Windows Scheduled Task, run the installer once as Administrator. Device enrollment was retained; see infra doctor for details."
+    }
     return
   }
   $CliStage = Stage-InfraBinary "infra"
@@ -162,6 +237,10 @@ try {
     }
     throw "Infra setup did not finish; previous versions were preserved and new-device pairing can be resumed. $($_.Exception.Message)"
   }
+}
+catch {
+  $Line = $_.InvocationInfo.ScriptLineNumber
+  throw "Infra installation failed at installer line ${Line}: $($_.Exception.Message)"
 }
 finally {
   Remove-Item -Recurse -Force $TempDir -ErrorAction SilentlyContinue

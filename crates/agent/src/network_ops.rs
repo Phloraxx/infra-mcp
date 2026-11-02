@@ -141,11 +141,7 @@ fn validate_host(host: &str) -> Result<(), String> {
 fn listeners() -> Result<ListenerOutput, String> {
     let mut command = Command::new("ss");
     command.args(["-H", "-lntup"]);
-    let output = require_success(run(
-        &mut command,
-        Duration::from_secs(10),
-        MAX_LISTENER_OUTPUT,
-    )?)?;
+    let output = require_success(run(command, Duration::from_secs(10), MAX_LISTENER_OUTPUT)?)?;
     Ok(ListenerOutput {
         source: "ss",
         entries: parse_linux_ss(&output.stdout),
@@ -157,11 +153,7 @@ fn listeners() -> Result<ListenerOutput, String> {
 fn listeners() -> Result<ListenerOutput, String> {
     let mut command = Command::new("lsof");
     command.args(["-nP", "-iTCP", "-sTCP:LISTEN"]);
-    let output = require_success(run(
-        &mut command,
-        Duration::from_secs(10),
-        MAX_LISTENER_OUTPUT,
-    )?)?;
+    let output = require_success(run(command, Duration::from_secs(10), MAX_LISTENER_OUTPUT)?)?;
     Ok(ListenerOutput {
         source: "lsof",
         entries: parse_macos_lsof(&output.stdout),
@@ -173,11 +165,7 @@ fn listeners() -> Result<ListenerOutput, String> {
 fn listeners() -> Result<ListenerOutput, String> {
     let mut command = Command::new("netstat.exe");
     command.args(["-ano", "-p", "tcp"]);
-    let output = require_success(run(
-        &mut command,
-        Duration::from_secs(10),
-        MAX_LISTENER_OUTPUT,
-    )?)?;
+    let output = require_success(run(command, Duration::from_secs(10), MAX_LISTENER_OUTPUT)?)?;
     Ok(ListenerOutput {
         source: "netstat",
         entries: parse_windows_netstat(&output.stdout),

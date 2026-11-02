@@ -2,6 +2,14 @@
 
 This file is the starting context for coding agents working in this repository.
 
+## Reliability stabilization — 2026-11-02
+
+Read [STABILIZATION_STATUS.md](docs/STABILIZATION_STATUS.md) for the current local
+reliability changes and validation limits. Use isolated local fixtures or hosted
+CI for this work; do not access or restart live production devices/gateways.
+Source changes and passing tests do not establish deployment or physical-device
+acceptance. Preserve later installer fixes when integrating timeout work.
+
 ## Current required context — 2026-10-23
 
 Before planning or coding, read **[One-command setup](docs/ONE_COMMAND_SETUP.md)** first for the near-term installer priority, followed by **[Infra onboarding redesign](docs/ONBOARDING_REDESIGN.md)** for pairing and UX. Also read **[Current reality](docs/CURRENT_REALITY.md)** and **[Next steps](docs/NEXT_STEPS.md)**. These are the canonical current-state/near-term-plan documents; dated 2026-10-15/16/18 portions below are historical. The newest Rust feature commits implement name resolution, responsive dashboard refresh, bounded resumable `copy`, signed native updater, and classified disconnect diagnostics; **do not claim they are deployed**.
