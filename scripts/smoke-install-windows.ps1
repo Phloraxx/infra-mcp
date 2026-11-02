@@ -124,6 +124,13 @@ try {
     }
   }
   if (-not $Online) { throw "Windows signed agent never came online" }
+  $TaskStatusText = & (Join-Path $Install "infra.exe") status --json --state-dir $State
+  if ($LASTEXITCODE -ne 0) { throw "Native task status query failed" }
+  $TaskStatus = $TaskStatusText | ConvertFrom-Json
+  if (-not $TaskStatus.startup.installed -or -not $TaskStatus.startup.active -or
+      -not $TaskStatus.startup.reliable) {
+    throw "Native structured startup status did not confirm the running recovery-enabled task"
+  }
   # Test that the task will stay running on laptops and recover after a crash.
   $Task = Get-ScheduledTask -TaskName "Infra MCP Agent" -ErrorAction Stop
   $TaskSettings = $Task.Settings
