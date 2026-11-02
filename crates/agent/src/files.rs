@@ -1,5 +1,6 @@
 use infra_protocol::{
-    DEFAULT_READ_LIMIT, FileAction, FileRequest, MAX_READ_LIMIT, OperationResult,
+    DEFAULT_READ_LIMIT, FileAction, FileRequest, MAX_DIRECTORY_ENTRIES, MAX_DIRECTORY_PAGE_BYTES,
+    MAX_DIRECTORY_PAGE_SIZE, MAX_READ_LIMIT, OperationResult,
 };
 use serde::Serialize;
 use sha2::{Digest, Sha256};
@@ -10,7 +11,6 @@ use std::{
 };
 use uuid::Uuid;
 
-const MAX_LIST_ENTRIES: usize = 1000;
 const MAX_EDIT_FILE_BYTES: u64 = 16 * 1024 * 1024;
 
 #[derive(Debug, Serialize)]
@@ -93,7 +93,15 @@ fn handle_inner(action: FileAction) -> Result<serde_json::Value, FileError> {
             expected_replacements,
         } => exact_edit(&PathBuf::from(path), &old, &new, expected_replacements),
         FileAction::Hash { path } => hash_file(&PathBuf::from(path)),
-        FileAction::List { path } => list(&PathBuf::from(path)),
+        FileAction::List {
+            path,
+            offset,
+            length,
+        } => list(
+            &PathBuf::from(path),
+            offset.unwrap_or(0),
+            length.unwrap_or(MAX_DIRECTORY_PAGE_SIZE),
+        ),
         FileAction::Stat { path } => stat(&PathBuf::from(path)),
         FileAction::Mkdir { path } => {
             let path = PathBuf::from(path);
@@ -257,11 +265,60 @@ fn hash_file(path: &Path) -> Result<serde_json::Value, FileError> {
     }))
 }
 
-fn list(path: &Path) -> Result<serde_json::Value, FileError> {
+fn list(path: &Path, offset: u64, length: usize) -> Result<serde_json::Value, FileError> {
+    if length == 0 || length > MAX_DIRECTORY_PAGE_SIZE {
+        return Err(FileError::Other(format!(
+            "list length must be between 1 and {MAX_DIRECTORY_PAGE_SIZE} entries"
+        )));
+    }
+    if offset > MAX_DIRECTORY_ENTRIES as u64 {
+        return Err(FileError::Other(format!(
+            "list offset must not exceed {MAX_DIRECTORY_ENTRIES} entries"
+        )));
+    }
+    let names = directory_names(path, MAX_DIRECTORY_ENTRIES)?;
+    directory_page(
+        path,
+        &names,
+        offset as usize,
+        length,
+        MAX_DIRECTORY_PAGE_BYTES,
+    )
+}
+
+fn directory_names(path: &Path, scan_limit: usize) -> Result<Vec<std::ffi::OsString>, FileError> {
+    let mut names = Vec::new();
+    for item in fs::read_dir(path)? {
+        if names.len() == scan_limit {
+            return Err(FileError::Other(format!(
+                "directory exceeds the {scan_limit}-entry listing scan limit; use bounded search or a narrower directory"
+            )));
+        }
+        names.push(item?.file_name());
+    }
+    // Sort the whole bounded name set, not an arbitrary prefix from read_dir.
+    // Native names retain a deterministic tie-breaker even for lossy UTF-8 display.
+    names.sort_unstable();
+    Ok(names)
+}
+
+fn directory_page(
+    path: &Path,
+    names: &[std::ffi::OsString],
+    offset: usize,
+    length: usize,
+    byte_limit: usize,
+) -> Result<serde_json::Value, FileError> {
+    let start = offset.min(names.len());
     let mut entries = Vec::new();
-    for item in fs::read_dir(path)?.take(MAX_LIST_ENTRIES + 1) {
-        let item = item?;
-        let full = item.path();
+    // Include the fixed envelope/path in the budget; final serialization is
+    // checked too. Metadata is read only for the requested page.
+    let mut bytes = serde_json::to_vec(&display(path))
+        .map_err(|e| FileError::Other(e.to_string()))?
+        .len()
+        + 512;
+    for name in names.iter().skip(start).take(length) {
+        let full = path.join(name);
         let metadata = fs::symlink_metadata(&full).ok();
         let kind = metadata
             .as_ref()
@@ -277,20 +334,50 @@ fn list(path: &Path) -> Result<serde_json::Value, FileError> {
                 }
             })
             .unwrap_or("unknown");
-        entries.push(FileEntry {
-            name: item.file_name().to_string_lossy().into_owned(),
+        let entry = FileEntry {
+            name: name.to_string_lossy().into_owned(),
             path: display(&full),
             kind: kind.into(),
             size: metadata.as_ref().filter(|m| m.is_file()).map(|m| m.len()),
             modified_unix_ms: metadata
                 .and_then(|m| m.modified().ok())
                 .and_then(system_time_ms),
-        });
+        };
+        let entry_bytes = serde_json::to_vec(&entry)
+            .map_err(|e| FileError::Other(e.to_string()))?
+            .len()
+            + 1;
+        if bytes + entry_bytes > byte_limit {
+            if entries.is_empty() {
+                return Err(FileError::Other(
+                    "directory entry exceeds the listing response byte limit; use a narrower path"
+                        .into(),
+                ));
+            }
+            break;
+        }
+        bytes += entry_bytes;
+        entries.push(entry);
     }
-    entries.sort_by_key(|a| a.name.to_lowercase());
-    let truncated = entries.len() > MAX_LIST_ENTRIES;
-    entries.truncate(MAX_LIST_ENTRIES);
-    Ok(serde_json::json!({"path": display(path), "entries": entries, "truncated": truncated}))
+    let next_offset = start + entries.len();
+    let has_more = next_offset < names.len();
+    let result = serde_json::json!({
+        "path": display(path), "entries": entries, "truncated": has_more,
+        "offset": start, "next_offset": next_offset, "has_more": has_more,
+        "total_entries": names.len(), "limit": length,
+        "pagination_supported": true, "snapshot": false,
+        "order": "native_filename_ascending"
+    });
+    if serde_json::to_vec(&result)
+        .map_err(|e| FileError::Other(e.to_string()))?
+        .len()
+        > byte_limit
+    {
+        return Err(FileError::Other(
+            "directory listing exceeds the response byte limit".into(),
+        ));
+    }
+    Ok(result)
 }
 
 fn stat(path: &Path) -> Result<serde_json::Value, FileError> {
@@ -376,6 +463,125 @@ fn system_time_ms(time: std::time::SystemTime) -> Option<u64> {
 mod tests {
     use super::*;
     use tempfile::tempdir;
+
+    #[test]
+    fn directory_pages_cover_more_than_the_old_cap_in_sorted_order() {
+        let dir = tempdir().unwrap();
+        let expected: Vec<_> = (0..1005).map(|i| format!("entry-{i:04}")).collect();
+        for name in expected.iter().rev() {
+            fs::write(dir.path().join(name), b"fixture").unwrap();
+        }
+        let first = list(dir.path(), 0, 1000).unwrap();
+        assert_eq!(first["entries"].as_array().unwrap().len(), 1000);
+        assert_eq!(first["next_offset"], 1000);
+        assert_eq!(first["has_more"], true);
+        assert_eq!(first["truncated"], true);
+        let second = list(dir.path(), first["next_offset"].as_u64().unwrap(), 1000).unwrap();
+        assert_eq!(second["has_more"], false);
+        assert_eq!(second["next_offset"], 1005);
+        let actual: Vec<_> = [first, second]
+            .iter()
+            .flat_map(|page| page["entries"].as_array().unwrap())
+            .map(|entry| entry["name"].as_str().unwrap().to_owned())
+            .collect();
+        assert_eq!(actual, expected);
+        let past_end = list(dir.path(), 2000, 10).unwrap();
+        assert_eq!(past_end["entries"], serde_json::json!([]));
+        assert_eq!(past_end["next_offset"], 1005);
+        assert_eq!(past_end["has_more"], false);
+    }
+
+    #[test]
+    fn directory_scan_and_input_limits_fail_explicitly() {
+        let dir = tempdir().unwrap();
+        for name in ["A", "B", "a2", "z"] {
+            fs::write(dir.path().join(name), b"").unwrap();
+        }
+        assert!(directory_names(dir.path(), 3).is_err());
+        let page = list(dir.path(), 1, 2).unwrap();
+        let names: Vec<_> = page["entries"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|entry| entry["name"].as_str().unwrap())
+            .collect();
+        assert_eq!(names, ["B", "a2"]);
+        assert!(list(dir.path(), 0, 0).is_err());
+        assert!(list(dir.path(), 0, MAX_DIRECTORY_PAGE_SIZE + 1).is_err());
+        assert!(list(dir.path(), u64::MAX, 1).is_err());
+        let empty = tempdir().unwrap();
+        assert_eq!(list(empty.path(), 0, 1).unwrap()["has_more"], false);
+    }
+
+    #[test]
+    fn byte_limited_directory_pages_continue_without_skipping_entries() {
+        let dir = tempdir().unwrap();
+        for i in 0..20 {
+            fs::write(dir.path().join(format!("{i:02}-{}", "x".repeat(60))), b"").unwrap();
+        }
+        let names = directory_names(dir.path(), MAX_DIRECTORY_ENTRIES).unwrap();
+        let mut offset = 0;
+        let mut collected = Vec::new();
+        loop {
+            let page = directory_page(dir.path(), &names, offset, 20, 1400).unwrap();
+            assert!(serde_json::to_vec(&page).unwrap().len() <= 1400);
+            let entries = page["entries"].as_array().unwrap();
+            assert!(entries.len() < 20);
+            collected.extend(
+                entries
+                    .iter()
+                    .map(|entry| entry["name"].as_str().unwrap().to_owned()),
+            );
+            let next = page["next_offset"].as_u64().unwrap() as usize;
+            assert!(next > offset);
+            offset = next;
+            if !page["has_more"].as_bool().unwrap() {
+                break;
+            }
+        }
+        assert_eq!(
+            collected,
+            names
+                .iter()
+                .map(|name| name.to_string_lossy().into_owned())
+                .collect::<Vec<_>>()
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn directory_pages_preserve_symlinks() {
+        use std::os::unix::fs::symlink;
+        let dir = tempdir().unwrap();
+        fs::write(dir.path().join("z-valid"), b"fixture").unwrap();
+        symlink("missing-target", dir.path().join("link")).unwrap();
+        let first = list(dir.path(), 0, 1).unwrap();
+        assert_eq!(first["entries"][0]["kind"], "symlink");
+        let second = list(dir.path(), 1, 1).unwrap();
+        assert_eq!(second["entries"][0]["kind"], "file");
+        assert_eq!(second["has_more"], false);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn lossy_display_names_still_have_distinct_pagination_positions() {
+        use std::os::unix::ffi::OsStringExt;
+        let dir = tempdir().unwrap();
+        for byte in [0xfe, 0xff] {
+            fs::write(
+                dir.path()
+                    .join(std::ffi::OsString::from_vec(vec![b'z', byte])),
+                b"fixture",
+            )
+            .unwrap();
+        }
+        let first = list(dir.path(), 0, 1).unwrap();
+        let second = list(dir.path(), 1, 1).unwrap();
+        assert_eq!(first["entries"][0]["name"], second["entries"][0]["name"]);
+        assert_eq!(first["has_more"], true);
+        assert_eq!(second["has_more"], false);
+        assert_eq!(second["next_offset"], 2);
+    }
 
     #[test]
     fn atomic_write_and_bounded_read() {

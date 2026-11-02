@@ -149,6 +149,43 @@ PYE
 HASH_RESULT="$(mcp_request "$FILES_HASH")"
 python3 -c 'import json,sys; b=json.load(sys.stdin)["result"]["structuredContent"]["body"]; assert len(b["sha256"])==64, b' <<<"$HASH_RESULT"
 
+# Exercise real gateway -> signed native agent pages through MCP, including the
+# capability advertisement. The token and files belong only to this fixture.
+INFRA_SMOKE_ADMIN_TOKEN="$ADMIN_TOKEN" python3 - "$DEVICE_ID" "$TMP" "$PORT" <<'PYLIST'
+import json, os, pathlib, sys, urllib.request
+device, directory, port = sys.argv[1:]
+root = pathlib.Path(directory)/'listing-pages'
+root.mkdir()
+expected = [f'entry-{i:02}' for i in range(5)]
+for name in reversed(expected):
+    (root/name).write_text('fixture')
+base = f'http://127.0.0.1:{port}'
+headers = {'Authorization':'Bearer '+os.environ['INFRA_SMOKE_ADMIN_TOKEN'],
+           'Content-Type':'application/json', 'Accept':'application/json, text/event-stream',
+           'MCP-Protocol-Version':'2025-06-18'}
+with urllib.request.urlopen(urllib.request.Request(base+'/api/devices', headers=headers), timeout=5) as response:
+    devices = json.load(response)
+assert 'files.list_page' in next(row for row in devices if row['device_id']==device)['capabilities']
+offset, actual = 0, []
+for _ in range(4):
+    call = {'jsonrpc':'2.0','id':30,'method':'tools/call','params':{'name':'files','arguments':{
+        'device':device,'action':'list','path':str(root),'offset':offset,'length':2}}}
+    request = urllib.request.Request(base+'/mcp', data=json.dumps(call).encode(), headers=headers)
+    with urllib.request.urlopen(request, timeout=10) as response:
+        result = json.load(response)['result']
+    assert not result.get('isError'), result
+    page = result['structuredContent']['body']
+    assert page['offset']==offset and page['total_entries']==5, page
+    assert 0 < len(page['entries']) <= 2 and page['pagination_supported'], page
+    actual.extend(entry['name'] for entry in page['entries'])
+    offset = page['next_offset']
+    if not page['has_more']:
+        break
+else:
+    raise AssertionError('listing did not terminate')
+assert actual==expected and offset==5, (actual, offset)
+PYLIST
+
 SEARCH_CALL="$(python3 - "$DEVICE_ID" "$TMP" <<'PYF'
 import json,sys
 print(json.dumps({"jsonrpc":"2.0","id":7,"method":"tools/call","params":{"name":"search","arguments":{"device":sys.argv[1],"root":sys.argv[2],"query":"omega beta omega","mode":"content","literal":True,"max_results":10}}}))

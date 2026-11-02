@@ -82,7 +82,9 @@ def main():
                 error('system', {'device':'fixture-missing','action':'summary'}, 'device_not_found')
                 error('network', {'device':'fixture-missing','action':'tcp_check','host':'localhost'}, 'invalid_argument')
                 error('terminal', {'device':'fixture-missing','action':'read','session_id':'invalid'}, 'invalid_argument')
-                error('files', {'device':'fixture-missing','action':'list','path':'.','length':1}, 'invalid_argument')
+                error('files', {'device':'fixture-missing','action':'list','path':'.','length':0}, 'invalid_argument')
+                error('files', {'device':'fixture-missing','action':'list','path':'.','length':1001}, 'invalid_argument')
+                error('files', {'device':'fixture-missing','action':'list','path':'.','offset':100001}, 'invalid_argument')
                 invalid = rpc('tools/call', {'name':'system','arguments':{'device':'fixture-missing','action':'invented'}})
                 assert 'error' in invalid or invalid.get('result',{}).get('isError') is True, invalid
                 print('MCP contract smoke passed: 15 tools, action schemas, shell guidance, and actionable HTTP error results.')
