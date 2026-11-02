@@ -477,7 +477,9 @@ async fn run_connection(
                         }
                     }
                     Ok(GatewayToAgent::ConnectionReady(reply)) => {
-                        if config.identity.is_some() && readiness.confirmed(&reply) {
+                        if config.identity.is_some()
+                            && let Some(probe_started_unix_ms) = readiness.confirmed(&reply)
+                        {
                             let _ = proof_writer.send(Some(infra_local_state::ConnectionProof {
                                 version: infra_local_state::CONNECTION_PROOF_VERSION,
                                 pid: std::process::id(),
@@ -488,6 +490,7 @@ async fn run_connection(
                                 gateway_epoch: ack.gateway_epoch,
                                 agent_instance_id,
                                 connection_generation: ack.connection_generation,
+                                probe_started_unix_ms,
                                 verified_unix_ms: now_ms(),
                             }));
                         }

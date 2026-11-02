@@ -106,8 +106,8 @@ follows from these code changes.
 The separate readiness slice replaces cached-online/PID success with a fresh
 nonce/status roundtrip on the exact signed connection selected by the gateway.
 Native receipts bind process/device, epoch, instance, generation and endpoint
-fingerprint. They expire after 30 seconds; lifecycle waits require confirmation
-after the check starts. A single coalescing disk writer stays outside the socket
+fingerprint. They expire after 30 seconds; lifecycle waits require a probe begun
+after the check starts and its matching confirmation. A single coalescing disk writer stays outside the socket
 loop. `status --verify` skips external startup queries and returns a failing
 connection result if no fresh receipt arrives. Ordinary status/doctor separate
 connection evidence from startup, credential history and HTTP health.
