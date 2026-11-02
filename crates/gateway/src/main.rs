@@ -28,12 +28,12 @@ use hmac::{Hmac, Mac};
 use infra_protocol::{
     AgentOperation, AgentRequest, AgentResponse, AgentToGateway, AuthChallenge, ContainerAction,
     ContainerRequest, DEFAULT_CONTROL_FRAME_LIMIT, DesktopAction, DesktopRequest, DeviceAuthStart,
-    DeviceHello, ExecOutput, FileAction, FileRequest, GatewayToAgent, GitAction, GitRequest,
-    HelloAck, JobAction, JobRequest, LegacyDeviceHello, NetworkAction, NetworkRequest,
-    OperationResult, PROTOCOL_VERSION, ProcessAction, ProcessRequest, ReconcileSnapshot,
-    SearchMode, SearchRequest, ServiceAction, ServiceRequest, SignedDeviceHello, SystemAction,
-    SystemRequest, TerminalAction, TerminalRequest, TransferAction, TransferRequest,
-    signed_auth_message,
+    DeviceHello, ExecOutput, FILE_LIST_PAGINATION_CAPABILITY, FileAction, FileRequest,
+    GatewayToAgent, GitAction, GitRequest, HelloAck, JobAction, JobRequest, LegacyDeviceHello,
+    MAX_DIRECTORY_ENTRIES, MAX_DIRECTORY_PAGE_SIZE, NetworkAction, NetworkRequest, OperationResult,
+    PROTOCOL_VERSION, ProcessAction, ProcessRequest, ReconcileSnapshot, SearchMode, SearchRequest,
+    ServiceAction, ServiceRequest, SignedDeviceHello, SystemAction, SystemRequest, TerminalAction,
+    TerminalRequest, TransferAction, TransferRequest, signed_auth_message,
 };
 use mcp_actions::*;
 use mcp_result::{ToolError, ToolJson as McpJson};
@@ -301,6 +301,7 @@ enum DispatchError {
     },
     Revoked(String),
     Offline(String),
+    Unsupported(String),
     Storage(String),
     ConnectionClosed,
     QueueBusy,
@@ -351,10 +352,10 @@ struct McpFilesInput {
     /// Required UTF-8 content for write/append. These actions can mutate files.
     content: Option<String>,
     #[serde(default)]
-    /// Byte offset for range/output/chunk reads; preserve the returned next offset rather than counting characters.
+    /// For read: byte offset. For list: entry offset in native filename order (0..100000), requiring files.list_page capability. Continue with next_offset while has_more; restart at zero if the directory changes.
     offset: Option<u64>,
     #[serde(default)]
-    /// Maximum bytes for read/output/chunk actions, subject to agent caps. Does not limit directory list.
+    /// For read: maximum bytes. For list: maximum entries (1..1000, default 1000), requiring files.list_page when supplied. A response byte cap can shorten the page; use returned next_offset, not offset + length.
     length: Option<usize>,
     #[serde(default)]
     /// Allow recursive behavior for the selected directory action. Permanent deletion is consequential.
@@ -732,13 +733,26 @@ impl InfraMcp {
                 path: required(input.path, "path")?,
             },
             "list" => {
-                if input.offset.is_some() || input.length.is_some() {
-                    return Err(ToolError::invalid(
-                        "files.list does not support offset/length pagination yet; use search with a bounded max_results or a narrower directory",
-                    ));
+                if input
+                    .length
+                    .is_some_and(|length| length == 0 || length > MAX_DIRECTORY_PAGE_SIZE)
+                {
+                    return Err(ToolError::invalid(format!(
+                        "files.list length must be between 1 and {MAX_DIRECTORY_PAGE_SIZE} entries"
+                    )));
+                }
+                if input
+                    .offset
+                    .is_some_and(|offset| offset > MAX_DIRECTORY_ENTRIES as u64)
+                {
+                    return Err(ToolError::invalid(format!(
+                        "files.list offset must not exceed {MAX_DIRECTORY_ENTRIES} entries"
+                    )));
                 }
                 FileAction::List {
                     path: required(input.path, "path")?,
+                    offset: input.offset,
+                    length: input.length,
                 }
             }
             "stat" => FileAction::Stat {
@@ -2844,6 +2858,7 @@ fn dispatch_error(error: DispatchError) -> String {
         DispatchError::Offline(name) => format!(
             "device_offline: '{name}' is enrolled but is not connected; it will reconnect when reachable"
         ),
+        DispatchError::Unsupported(message) => format!("unsupported: {message}"),
         DispatchError::Storage(error) => format!("device_registry_error: {error}"),
         DispatchError::ConnectionClosed => {
             "device_connection_closed: device disconnected while sending the request".into()
@@ -2864,10 +2879,24 @@ async fn dispatch_to_device(
     let device_id = resolve_device(state, &selector).await?;
     let (tx, retire, generation) = {
         let devices = state.devices.read().await;
-        devices
+        let device = devices
             .get(&device_id)
-            .map(|d| (d.tx.clone(), d.retire.clone(), d.generation))
-            .ok_or_else(|| DispatchError::Offline(selector.clone()))?
+            .ok_or_else(|| DispatchError::Offline(selector.clone()))?;
+        if let AgentOperation::Files(FileRequest {
+            action: FileAction::List { offset, length, .. },
+        }) = &operation
+            && (offset.is_some() || length.is_some())
+            && !device
+                .hello
+                .capabilities
+                .iter()
+                .any(|capability| capability == FILE_LIST_PAGINATION_CAPABILITY)
+        {
+            return Err(DispatchError::Unsupported(
+                "this connection does not advertise files.list_page; update the device agent for directory pagination, or omit offset/length for its legacy bounded listing".into(),
+            ));
+        }
+        (device.tx.clone(), device.retire.clone(), device.generation)
     };
     // Reserve before registering a waiter: cancellation or timeout while queued
     // cannot leak pending state or enqueue a command after its caller gives up.
@@ -3443,6 +3472,100 @@ mod tests {
             },
         );
         (rx, retire_rx)
+    }
+
+    #[tokio::test]
+    async fn list_pagination_checks_live_capability_before_queueing() {
+        let (_dir, state, _addr, server) = spawn_test_gateway().await;
+        let (mut rx, mut retire) = queued_test_device(&state).await;
+        // A previous build advertised pagination, but the current connection
+        // does not. Cached discovery is not permission to send new semantics.
+        let mut cached = test_hello("queued-device", Uuid::new_v4());
+        cached
+            .capabilities
+            .push(FILE_LIST_PAGINATION_CAPABILITY.into());
+        state.store.record_connect(&cached, None).unwrap();
+        for (offset, length) in [(Some(0), None), (None, Some(2))] {
+            let result = dispatch_to_device(
+                &state,
+                "queued-device".into(),
+                AgentOperation::Files(FileRequest {
+                    action: FileAction::List {
+                        path: ".".into(),
+                        offset,
+                        length,
+                    },
+                }),
+                5000,
+            )
+            .await;
+            let Err(DispatchError::Unsupported(message)) = result else {
+                panic!("old connection must reject paging")
+            };
+            let error = ToolError::from(dispatch_error(DispatchError::Unsupported(message)));
+            assert_eq!(error.code, "unsupported");
+            assert!(!error.retryable);
+            assert!(error.message.contains("files.list_page"));
+            assert!(rx.try_recv().is_err());
+            assert!(state.pending.is_empty());
+        }
+        assert!(retire.try_recv().is_err());
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn legacy_lists_and_advertised_pages_use_the_existing_request_lifecycle() {
+        let (_dir, state, _addr, server) = spawn_test_gateway().await;
+        let (mut rx, _retire) = queued_test_device(&state).await;
+        for paged in [false, true] {
+            if paged {
+                state
+                    .devices
+                    .write()
+                    .await
+                    .get_mut("queued-device")
+                    .unwrap()
+                    .hello
+                    .capabilities
+                    .push(FILE_LIST_PAGINATION_CAPABILITY.into());
+            }
+            let operation = AgentOperation::Files(FileRequest {
+                action: FileAction::List {
+                    path: "fixture".into(),
+                    offset: paged.then_some(2),
+                    length: paged.then_some(3),
+                },
+            });
+            let sent = operation.clone();
+            let caller_state = state.clone();
+            let caller = tokio::spawn(async move {
+                dispatch_to_device(&caller_state, "queued-device".into(), operation, 1000).await
+            });
+            let Some(GatewayToAgent::Request(request)) =
+                tokio::time::timeout(Duration::from_secs(1), rx.recv())
+                    .await
+                    .unwrap()
+            else {
+                panic!("expected list request")
+            };
+            assert_eq!(request.operation, sent);
+            state.pending.complete(
+                "queued-device",
+                1,
+                AgentResponse {
+                    id: request.id,
+                    result: OperationResult::Ok {
+                        body: serde_json::json!({"entries":[],"has_more":false}),
+                    },
+                },
+            );
+            assert!(matches!(
+                caller.await.unwrap().unwrap().result,
+                OperationResult::Ok { .. }
+            ));
+            assert!(state.pending.is_empty());
+        }
+        server.abort();
     }
 
     #[tokio::test]

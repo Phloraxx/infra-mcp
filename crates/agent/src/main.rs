@@ -308,6 +308,7 @@ async fn run_connection(
             "status".into(),
             "exec".into(),
             "files".into(),
+            infra_protocol::FILE_LIST_PAGINATION_CAPABILITY.into(),
             "search".into(),
             "processes".into(),
             "jobs".into(),
