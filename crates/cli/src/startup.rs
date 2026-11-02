@@ -2,6 +2,7 @@ use anyhow::{Context, anyhow};
 use serde::Serialize;
 #[cfg(not(windows))]
 use std::fs;
+use std::time::Duration;
 use std::{
     path::{Path, PathBuf},
     process::Command,
@@ -61,11 +62,12 @@ pub fn install(agent: &Path, state_dir: &Path) -> anyhow::Result<()> {
     fs::create_dir_all(parent)?;
     fs::write(&path, render_launchd_plist(agent, state_dir))?;
     let domain = format!("gui/{}", current_uid()?);
-    let _ = Command::new("launchctl")
-        .args(["bootout", &domain, path.to_string_lossy().as_ref()])
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status();
+    let _ = bounded_output(
+        Command::new("launchctl")
+            .args(["bootout", &domain, path.to_string_lossy().as_ref()])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null()),
+    );
     command_ok(Command::new("launchctl").args([
         "bootstrap",
         &domain,
@@ -122,14 +124,12 @@ fn powershell_single_quote(value: &str) -> String {
 
 #[cfg(target_os = "linux")]
 pub fn uninstall() -> anyhow::Result<()> {
-    let _ = user_systemctl()
-        .args(["disable", "--now", "infra-agent.service"])
-        .status();
+    let _ = bounded_output(user_systemctl().args(["disable", "--now", "infra-agent.service"]));
     let path = linux_unit_path()?;
     if path.exists() {
         fs::remove_file(path)?;
     }
-    let _ = user_systemctl().args(["daemon-reload"]).status();
+    let _ = bounded_output(user_systemctl().args(["daemon-reload"]));
     Ok(())
 }
 
@@ -137,11 +137,12 @@ pub fn uninstall() -> anyhow::Result<()> {
 pub fn uninstall() -> anyhow::Result<()> {
     let path = macos_plist_path()?;
     let domain = format!("gui/{}", current_uid()?);
-    let _ = Command::new("launchctl")
-        .args(["bootout", &domain, path.to_string_lossy().as_ref()])
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status();
+    let _ = bounded_output(
+        Command::new("launchctl")
+            .args(["bootout", &domain, path.to_string_lossy().as_ref()])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null()),
+    );
     if path.exists() {
         fs::remove_file(path)?;
     }
@@ -150,12 +151,8 @@ pub fn uninstall() -> anyhow::Result<()> {
 
 #[cfg(windows)]
 pub fn uninstall() -> anyhow::Result<()> {
-    let _ = Command::new("schtasks")
-        .args(["/End", "/TN", WINDOWS_TASK])
-        .status();
-    let _ = Command::new("schtasks")
-        .args(["/Delete", "/TN", WINDOWS_TASK, "/F"])
-        .status();
+    let _ = bounded_output(Command::new("schtasks").args(["/End", "/TN", WINDOWS_TASK]));
+    let _ = bounded_output(Command::new("schtasks").args(["/Delete", "/TN", WINDOWS_TASK, "/F"]));
     Ok(())
 }
 
@@ -165,39 +162,27 @@ pub fn restart() -> anyhow::Result<()> {
 }
 
 #[cfg(target_os = "linux")]
-pub fn recover_after_failed_start() -> anyhow::Result<()> {
-    let _ = user_systemctl()
-        .args(["reset-failed", "infra-agent.service"])
-        .status();
-    restart()
+pub fn reset_failed() -> anyhow::Result<()> {
+    command_ok(user_systemctl().args(["reset-failed", "infra-agent.service"]))
 }
-
 #[cfg(target_os = "macos")]
 pub fn restart() -> anyhow::Result<()> {
     let target = format!("gui/{}/{LABEL}", current_uid()?);
     command_ok(Command::new("launchctl").args(["kickstart", "-k", &target]))
 }
 
-#[cfg(target_os = "macos")]
-pub fn recover_after_failed_start() -> anyhow::Result<()> {
-    restart()
-}
-
 #[cfg(windows)]
 pub fn restart() -> anyhow::Result<()> {
-    let _ = Command::new("schtasks")
-        .args(["/End", "/TN", WINDOWS_TASK])
-        .status();
+    let _ = bounded_output(Command::new("schtasks").args(["/End", "/TN", WINDOWS_TASK]));
     command_ok(Command::new("schtasks").args(["/Run", "/TN", WINDOWS_TASK]))
 }
 
 #[cfg(target_os = "linux")]
 pub fn status() -> StartupStatus {
     let installed = linux_unit_path().is_ok_and(|path| path.exists());
-    let active = user_systemctl()
-        .args(["is-active", "--quiet", "infra-agent.service"])
-        .output()
-        .is_ok_and(|output| output.status.success());
+    let active =
+        bounded_output(user_systemctl().args(["is-active", "--quiet", "infra-agent.service"]))
+            .is_ok_and(|output| output.exit_code == Some(0));
     StartupStatus {
         mechanism: "systemd-user",
         installed,
@@ -218,10 +203,8 @@ pub fn status() -> StartupStatus {
 pub fn status() -> StartupStatus {
     let installed = macos_plist_path().is_ok_and(|path| path.exists());
     let active = current_uid().is_ok_and(|uid| {
-        Command::new("launchctl")
-            .args(["print", &format!("gui/{uid}/{LABEL}")])
-            .output()
-            .is_ok_and(|output| output.status.success())
+        bounded_output(Command::new("launchctl").args(["print", &format!("gui/{uid}/{LABEL}")]))
+            .is_ok_and(|output| output.exit_code == Some(0))
     });
     StartupStatus {
         mechanism: "launchd",
@@ -243,17 +226,15 @@ pub fn status() -> StartupStatus {
 pub fn status() -> StartupStatus {
     // Query task state and recovery settings once, as typed JSON. Human-readable
     // schtasks output is localized and can contain unrelated "running" text.
-    let output = Command::new("powershell.exe")
-        .args([
-            "-NoProfile",
-            "-NonInteractive",
-            "-Command",
-            WINDOWS_STATUS_SCRIPT,
-        ])
-        .output();
+    let output = bounded_output(Command::new("powershell.exe").args([
+        "-NoProfile",
+        "-NonInteractive",
+        "-Command",
+        WINDOWS_STATUS_SCRIPT,
+    ]));
     if let Ok(output) = output
-        && output.status.success()
-        && let Ok(status) = windows_status_from_json(&output.stdout)
+        && output.exit_code == Some(0)
+        && let Ok(status) = windows_status_from_json(output.stdout.as_bytes())
     {
         return status;
     }
@@ -323,11 +304,11 @@ fn user_systemctl() -> Command {
 
 #[cfg(target_os = "linux")]
 fn current_uid_linux() -> anyhow::Result<String> {
-    let output = Command::new("id").arg("-u").output()?;
-    if !output.status.success() {
+    let output = bounded_output(Command::new("id").arg("-u"))?;
+    if output.exit_code != Some(0) {
         return Err(anyhow!("id -u failed"));
     }
-    Ok(String::from_utf8(output.stdout)?.trim().to_string())
+    Ok(output.stdout.trim().to_string())
 }
 
 #[cfg(target_os = "linux")]
@@ -360,21 +341,78 @@ fn home_dir() -> anyhow::Result<PathBuf> {
 
 #[cfg(target_os = "macos")]
 fn current_uid() -> anyhow::Result<String> {
-    let output = Command::new("id").arg("-u").output()?;
-    if !output.status.success() {
+    let output = bounded_output(Command::new("id").arg("-u"))?;
+    if output.exit_code != Some(0) {
         return Err(anyhow!("id -u failed"));
     }
-    Ok(String::from_utf8(output.stdout)?.trim().to_string())
+    Ok(output.stdout.trim().to_string())
 }
 
-fn command_ok(command: &mut Command) -> anyhow::Result<()> {
-    let debug = format!("{command:?}");
-    let output = command.output().with_context(|| format!("run {debug}"))?;
-    if output.status.success() {
-        return Ok(());
+fn bounded_output(
+    command: &Command,
+) -> anyhow::Result<infra_platform::command_runner::CommandOutput> {
+    let mut owned = Command::new(command.get_program());
+    owned.args(command.get_args());
+    if let Some(path) = command.get_current_dir() {
+        owned.current_dir(path);
     }
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    Err(anyhow!("{debug} failed: {}", stderr.trim()))
+    for (name, value) in command.get_envs() {
+        if let Some(value) = value {
+            owned.env(name, value);
+        } else {
+            owned.env_remove(name);
+        }
+    }
+    std::thread::spawn(move || {
+        infra_platform::command_runner::run(owned, Duration::from_secs(15), 64 * 1024)
+    })
+    .join()
+    .map_err(|_| anyhow!("startup query worker failed"))?
+    .map_err(anyhow::Error::msg)
+}
+fn command_ok(command: &mut Command) -> anyhow::Result<()> {
+    let output = bounded_output(command)?;
+    infra_platform::command_runner::require_success(output)
+        .map(|_| ())
+        .map_err(anyhow::Error::msg)
+}
+
+#[cfg(target_os = "linux")]
+pub fn stop() -> anyhow::Result<()> {
+    command_ok(user_systemctl().args(["stop", "infra-agent.service"]))
+}
+#[cfg(target_os = "macos")]
+pub fn stop() -> anyhow::Result<()> {
+    command_ok(
+        Command::new("launchctl").args(["bootout", &format!("gui/{}/{LABEL}", current_uid()?)]),
+    )
+}
+#[cfg(windows)]
+pub fn stop() -> anyhow::Result<()> {
+    command_ok(Command::new("schtasks").args(["/End", "/TN", WINDOWS_TASK]))
+}
+#[cfg(target_os = "linux")]
+pub fn owns(agent: &Path, state: &Path) -> anyhow::Result<bool> {
+    Ok(fs::read_to_string(linux_unit_path()?)? == render_systemd_unit(agent, state))
+}
+#[cfg(target_os = "macos")]
+pub fn owns(agent: &Path, state: &Path) -> anyhow::Result<bool> {
+    Ok(fs::read_to_string(macos_plist_path()?)? == render_launchd_plist(agent, state))
+}
+#[cfg(windows)]
+pub fn owns(agent: &Path, state: &Path) -> anyhow::Result<bool> {
+    let executable = powershell_single_quote(&agent.to_string_lossy());
+    let arguments = powershell_single_quote(&format!("--state-dir \"{}\"", state.display()));
+    let script = format!(
+        "$ErrorActionPreference='Stop';$t=Get-ScheduledTask -TaskName '{WINDOWS_TASK}';[bool](@($t.Actions | Where-Object {{ $_.Execute -eq '{executable}' -and $_.Arguments -eq '{arguments}' }}).Count -eq 1)"
+    );
+    let output = bounded_output(Command::new("powershell.exe").args([
+        "-NoProfile",
+        "-NonInteractive",
+        "-Command",
+        &script,
+    ]))?;
+    Ok(output.exit_code == Some(0) && output.stdout.trim().eq_ignore_ascii_case("true"))
 }
 
 #[cfg(target_os = "linux")]

@@ -75,3 +75,17 @@ connection evidence from startup, credential history and HTTP health.
 Older/non-advertising peers retain legacy heartbeats. Strict checks need both
 gateway and native agent support; rollout order and pre-extension rollback
 compatibility remain explicit gates. See [CONNECTION_READINESS.md](CONNECTION_READINESS.md).
+
+## Native installer transaction
+
+Bootstrap adapters now delegate paired CLI/agent activation to the staged native
+CLI. Installation/profile locks serialize lifecycle mutations; a hashed journal,
+backups and commit marker support interrupted activation and rollback without
+copying identity keys. Startup commands reuse the bounded subprocess runner.
+Windows signed updates report pending until the post-exit native activation
+records its result. See [INSTALL_TRANSACTION.md](INSTALL_TRANSACTION.md) for
+acceptance, compatible-release requirements and unresolved physical-device gates.
+
+The installer slice passes 106 local workspace tests, strict Clippy, formatting,
+the disposable installer/dashboard smoke and owned-file rollback acceptance.
+Hosted Windows rollback and combined-candidate results must be recorded separately.

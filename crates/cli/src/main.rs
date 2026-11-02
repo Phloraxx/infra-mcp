@@ -1,6 +1,10 @@
+mod activation;
+mod install;
+mod lifecycle_lock;
 mod readiness;
 mod release_verify;
 mod startup;
+mod update_handoff;
 
 use anyhow::{Context, anyhow};
 use infra_local_state::{
@@ -31,6 +35,7 @@ struct LocalStatus {
     startup: Option<startup::StartupStatus>,
     config: Option<LocalConfig>,
     runtime: Option<RuntimeStatus>,
+    update_status: Option<update_handoff::UpdateStatus>,
 }
 
 #[derive(Debug, Serialize)]
@@ -70,7 +75,33 @@ async fn run() -> anyhow::Result<ExitCode> {
     };
     args.remove(0);
 
+    if command == "--build-info" {
+        ensure_no_args(&args)?;
+        println!(
+            "{}",
+            serde_json::json!({"component":"infra","activation_protocol":1,"version":env!("CARGO_PKG_VERSION")})
+        );
+        return Ok(ExitCode::SUCCESS);
+    }
+    let operation_lock = if matches!(
+        command.as_str(),
+        "setup" | "install" | "repair" | "reconnect" | "update" | "uninstall"
+    ) {
+        Some(lifecycle_lock::LifecycleLocks::acquire(
+            &lifecycle_lock::current_install_dir()?,
+            &state_dir,
+        )?)
+    } else {
+        None
+    };
+    if operation_lock.is_some() && activation::pending(&lifecycle_lock::current_install_dir()?) {
+        return Err(anyhow!(
+            "activation_recovery_required: rerun the verified installer to recover the interrupted pair"
+        ));
+    }
+
     match command.as_str() {
+        "activate" => install::activate(&state_dir, args).await,
         "status" => {
             let verify = take_flag(&mut args, "--verify");
             let timeout_requested = args.iter().any(|value| value == "--timeout-ms");
@@ -162,7 +193,14 @@ async fn run() -> anyhow::Result<ExitCode> {
             );
             Ok(ExitCode::SUCCESS)
         }
-        "update" => update_command(&state_dir, args).await,
+        "update" => {
+            update_command(
+                &state_dir,
+                args,
+                operation_lock.expect("update lock acquired"),
+            )
+            .await
+        }
         "uninstall" => {
             let remove_state = args.iter().any(|arg| arg == "--remove-state");
             let unknown = args
@@ -291,17 +329,30 @@ async fn install_command(state_dir: &Path, mut args: Vec<String>) -> anyhow::Res
     }
 
     let config = LocalConfig::new(gateway, name)?;
-    write_config(state_dir, &config)?;
+    if let Some(previous) = read_config(state_dir)?
+        && identity_path(state_dir).is_file()
+        && previous.gateway_url != config.gateway_url
+    {
+        return Err(anyhow!(
+            "already paired to another gateway; explicit migration is required"
+        ));
+    }
 
     if !identity_path(state_dir).exists() {
         let code = code.ok_or_else(|| {
             anyhow!("device is not enrolled; provide the one-time dashboard code with --code")
         })?;
-        let status = Command::new(&agent)
+        let mut enrollment = Command::new(&agent);
+        enrollment
             .arg("--state-dir")
             .arg(state_dir)
             .arg("--enroll-only")
-            .env("INFRA_ENROLLMENT_CODE", code)
+            .env("INFRA_GATEWAY_URL", &config.gateway_url)
+            .env("INFRA_ENROLLMENT_CODE", code);
+        if let Some(name) = &config.device_name {
+            enrollment.env("INFRA_DEVICE_NAME", name);
+        }
+        let status = enrollment
             .status()
             .with_context(|| format!("run {} enrollment", agent.display()))?;
         if !status.success() {
@@ -309,6 +360,7 @@ async fn install_command(state_dir: &Path, mut args: Vec<String>) -> anyhow::Res
         }
     }
 
+    write_config(state_dir, &config)?;
     if no_startup {
         println!("Infra configured and enrolled. Startup registration skipped.");
         return Ok(ExitCode::SUCCESS);
@@ -397,7 +449,11 @@ fn runtime_is_newer(previous: Option<&RuntimeStatus>, current: &RuntimeStatus) -
         }
 }
 
-async fn update_command(state_dir: &Path, mut args: Vec<String>) -> anyhow::Result<ExitCode> {
+async fn update_command(
+    state_dir: &Path,
+    mut args: Vec<String>,
+    guard: lifecycle_lock::LifecycleLocks,
+) -> anyhow::Result<ExitCode> {
     let repo = take_option(&mut args, "--repo").unwrap_or_else(|| "Phloraxx/infra-mcp".into());
     let version = take_option(&mut args, "--version").unwrap_or_else(|| "latest".into());
     let base_url = take_option(&mut args, "--base-url");
@@ -519,277 +575,7 @@ async fn update_command(state_dir: &Path, mut args: Vec<String>) -> anyhow::Resu
     make_executable_like(&staged_cli, &cli_path)?;
     make_executable_like(&staged_agent, &agent_path)?;
 
-    #[cfg(windows)]
-    {
-        apply_windows_update(
-            state_dir,
-            &base,
-            &cli_path,
-            &agent_path,
-            &staged_cli,
-            &staged_agent,
-        )
-        .await
-    }
-    #[cfg(not(windows))]
-    {
-        apply_unix_update(
-            state_dir,
-            &base,
-            &cli_path,
-            &agent_path,
-            &staged_cli,
-            &staged_agent,
-        )
-        .await
-    }
-}
-
-#[cfg(not(windows))]
-async fn apply_unix_update(
-    state_dir: &Path,
-    base: &str,
-    cli_path: &Path,
-    agent_path: &Path,
-    staged_cli: &Path,
-    staged_agent: &Path,
-) -> anyhow::Result<ExitCode> {
-    let install_dir = cli_path
-        .parent()
-        .ok_or_else(|| anyhow!("infra CLI path has no parent"))?;
-    let rollback_cli = install_dir.join("infra.rollback");
-    let rollback_agent = install_dir.join("infra-agent.rollback");
-    let _ = fs::remove_file(&rollback_cli);
-    let _ = fs::remove_file(&rollback_agent);
-
-    let previous_runtime = read_runtime(state_dir).ok().flatten();
-    fs::rename(agent_path, &rollback_agent)
-        .with_context(|| format!("stage rollback copy of {}", agent_path.display()))?;
-    if let Err(error) = fs::rename(staged_agent, agent_path) {
-        let _ = fs::rename(&rollback_agent, agent_path);
-        let _ = fs::remove_file(staged_cli);
-        return Err(error).context("activate downloaded infra-agent");
-    }
-
-    let reconnect = async {
-        startup::restart()?;
-        wait_for_online_reconnect(
-            state_dir,
-            previous_runtime.as_ref(),
-            Duration::from_secs(20),
-        )
-        .await
-    }
-    .await;
-    if let Err(error) = reconnect {
-        let rollback = async {
-            let _ = fs::remove_file(agent_path);
-            fs::rename(&rollback_agent, agent_path)
-                .context("restore previous infra-agent binary")?;
-            startup::recover_after_failed_start()?;
-            wait_for_online_reconnect(state_dir, None, Duration::from_secs(20)).await?;
-            anyhow::Ok(())
-        }
-        .await;
-        let _ = fs::remove_file(staged_cli);
-        return match rollback {
-            Ok(()) => Err(anyhow!(
-                "new infra-agent failed its reconnect health check; previous agent was restored and is online: {error:#}"
-            )),
-            Err(rollback_error) => Err(anyhow!(
-                "new infra-agent failed its reconnect health check and automatic rollback did not recover the agent: update error: {error:#}; rollback error: {rollback_error:#}"
-            )),
-        };
-    }
-
-    fs::rename(cli_path, &rollback_cli)
-        .with_context(|| format!("stage rollback copy of {}", cli_path.display()))?;
-    if let Err(error) = fs::rename(staged_cli, cli_path) {
-        let _ = fs::rename(&rollback_cli, cli_path);
-        let agent_rollback = async {
-            let _ = fs::remove_file(agent_path);
-            fs::rename(&rollback_agent, agent_path)
-                .context("restore previous infra-agent after CLI activation failure")?;
-            startup::recover_after_failed_start()?;
-            wait_for_online_reconnect(state_dir, None, Duration::from_secs(20)).await?;
-            anyhow::Ok(())
-        }
-        .await;
-        return match agent_rollback {
-            Ok(()) => Err(error).context(
-                "activate downloaded infra CLI; previous agent was restored and is online",
-            ),
-            Err(rollback_error) => Err(anyhow!(
-                "activate downloaded infra CLI failed and agent rollback did not recover connectivity: CLI error: {error}; rollback error: {rollback_error:#}"
-            )),
-        };
-    }
-
-    println!(
-        "Infra updated from {base}; the new agent is online. Previous binaries are retained as infra.rollback and infra-agent.rollback."
-    );
-    #[cfg(target_os = "macos")]
-    println!(
-        "macOS may require Accessibility and Screen Recording to be re-enabled after replacing the agent binary; verify desktop permissions before relying on GUI control."
-    );
-    Ok(ExitCode::SUCCESS)
-}
-
-#[cfg(windows)]
-async fn apply_windows_update(
-    state_dir: &Path,
-    base: &str,
-    cli_path: &Path,
-    agent_path: &Path,
-    staged_cli: &Path,
-    staged_agent: &Path,
-) -> anyhow::Result<ExitCode> {
-    let install_dir = cli_path
-        .parent()
-        .ok_or_else(|| anyhow!("infra CLI path has no parent"))?;
-    let rollback_agent = install_dir.join("infra-agent.rollback.exe");
-    let rollback_cli = install_dir.join("infra.rollback.exe");
-    let _ = fs::remove_file(&rollback_agent);
-
-    let previous_runtime = read_runtime(state_dir).ok().flatten();
-    windows_stop_agent();
-    if let Some(runtime) = &previous_runtime {
-        wait_for_process_exit(runtime.pid, Duration::from_secs(10)).await?;
-    }
-
-    fs::rename(agent_path, &rollback_agent)
-        .with_context(|| format!("stage rollback copy of {}", agent_path.display()))?;
-    if let Err(error) = fs::rename(staged_agent, agent_path) {
-        let _ = fs::rename(&rollback_agent, agent_path);
-        let _ = fs::remove_file(staged_cli);
-        let _ = windows_start_agent();
-        return Err(error).context("activate downloaded infra-agent");
-    }
-
-    let reconnect = async {
-        windows_start_agent()?;
-        wait_for_online_reconnect(
-            state_dir,
-            previous_runtime.as_ref(),
-            Duration::from_secs(25),
-        )
-        .await
-    }
-    .await;
-    if let Err(error) = reconnect {
-        windows_stop_agent();
-        let _ = fs::remove_file(agent_path);
-        let rollback_result = fs::rename(&rollback_agent, agent_path);
-        if rollback_result.is_ok() {
-            let _ = windows_start_agent();
-            let _ = wait_for_online_reconnect(state_dir, None, Duration::from_secs(25)).await;
-        }
-        let _ = fs::remove_file(staged_cli);
-        return Err(anyhow!(
-            "new infra-agent failed its reconnect health check and rollback was attempted: {error:#}"
-        ));
-    }
-
-    let helper = install_dir.join(format!(".infra-update-helper-{}.ps1", std::process::id()));
-    write_windows_cli_update_helper(
-        &helper,
-        cli_path,
-        staged_cli,
-        &rollback_cli,
-        std::process::id(),
-    )?;
-    Command::new("powershell.exe")
-        .args([
-            "-NoLogo",
-            "-NoProfile",
-            "-NonInteractive",
-            "-ExecutionPolicy",
-            "Bypass",
-            "-File",
-        ])
-        .arg(&helper)
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .spawn()
-        .context("start Windows CLI replacement helper")?;
-
-    println!(
-        "Infra agent updated from {base} and is online. The verified CLI replacement is staged and will be applied immediately after this command exits; the prior CLI is retained as infra.rollback.exe."
-    );
-    Ok(ExitCode::SUCCESS)
-}
-
-#[cfg(windows)]
-fn windows_stop_agent() {
-    let _ = Command::new("schtasks")
-        .args(["/End", "/TN", "Infra MCP Agent"])
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .status();
-}
-
-#[cfg(windows)]
-fn windows_start_agent() -> anyhow::Result<()> {
-    let status = Command::new("schtasks")
-        .args(["/Run", "/TN", "Infra MCP Agent"])
-        .status()?;
-    if !status.success() {
-        return Err(anyhow!("failed to start Infra MCP Agent scheduled task"));
-    }
-    Ok(())
-}
-
-#[cfg(windows)]
-async fn wait_for_process_exit(pid: u32, timeout: Duration) -> anyhow::Result<()> {
-    let deadline = tokio::time::Instant::now() + timeout;
-    while process_alive(pid) {
-        if tokio::time::Instant::now() >= deadline {
-            return Err(anyhow!("agent PID {pid} did not stop for update"));
-        }
-        tokio::time::sleep(Duration::from_millis(100)).await;
-    }
-    Ok(())
-}
-
-#[cfg(windows)]
-fn ps_quote_path(path: &Path) -> String {
-    path.to_string_lossy().replace('\'', "''")
-}
-
-#[cfg(windows)]
-fn write_windows_cli_update_helper(
-    helper: &Path,
-    cli_path: &Path,
-    staged_cli: &Path,
-    rollback_cli: &Path,
-    parent_pid: u32,
-) -> anyhow::Result<()> {
-    let cli = ps_quote_path(cli_path);
-    let staged = ps_quote_path(staged_cli);
-    let rollback = ps_quote_path(rollback_cli);
-    let script = format!(
-        r#"$ErrorActionPreference = 'Stop'
-$parentPid = {parent_pid}
-$deadline = (Get-Date).AddSeconds(20)
-while ((Get-Process -Id $parentPid -ErrorAction SilentlyContinue) -and (Get-Date) -lt $deadline) {{ Start-Sleep -Milliseconds 100 }}
-if (Get-Process -Id $parentPid -ErrorAction SilentlyContinue) {{ exit 12 }}
-$cli = '{cli}'
-$staged = '{staged}'
-$rollback = '{rollback}'
-try {{
-  if (Test-Path -LiteralPath $rollback) {{ Remove-Item -LiteralPath $rollback -Force }}
-  Move-Item -LiteralPath $cli -Destination $rollback -Force
-  Move-Item -LiteralPath $staged -Destination $cli -Force
-  Remove-Item -LiteralPath $MyInvocation.MyCommand.Path -Force -ErrorAction SilentlyContinue
-  exit 0
-}} catch {{
-  if (-not (Test-Path -LiteralPath $cli) -and (Test-Path -LiteralPath $rollback)) {{ Move-Item -LiteralPath $rollback -Destination $cli -Force }}
-  exit 13
-}}
-"#
-    );
-    fs::write(helper, script).with_context(|| format!("write {}", helper.display()))
+    update_handoff::apply(state_dir, install_dir, &staged_cli, &staged_agent, guard).await
 }
 
 fn release_asset_descriptor() -> anyhow::Result<(String, &'static str)> {
@@ -874,6 +660,7 @@ fn collect_status(state_dir: &Path, check_startup: bool) -> anyhow::Result<Local
         state_dir: state_dir.to_string_lossy().into_owned(),
         configured: config.is_some(),
         enrolled: identity_path(state_dir).exists(),
+        update_status: update_handoff::status(state_dir),
         process_alive: alive,
         connection,
         startup: check_startup.then(startup::status),
@@ -1345,6 +1132,9 @@ fn ensure_no_args(args: &[String]) -> anyhow::Result<()> {
 
 fn print_status(status: &LocalStatus) {
     println!("Infra status");
+    if let Some(update) = &status.update_status {
+        println!("Update {}: {} ({})", update.id, update.phase, update.detail);
+    }
     println!("State dir: {}", status.state_dir);
     println!("Configured: {}", yes_no(status.configured));
     println!("Enrolled: {}", yes_no(status.enrolled));
@@ -1406,7 +1196,7 @@ fn yes_no(value: bool) -> &'static str {
 fn print_help() {
     println!(
         "Infra device CLI\n\n\
-Usage:\n  infra status [--verify [--timeout-ms 15000]] [--json] [--state-dir PATH]\n  infra doctor [--json] [--state-dir PATH]\n  infra setup [--gateway WS_URL] [--agent PATH] [--no-startup] [--state-dir PATH]\n  infra install --gateway WS_URL [--code CODE] [--name NAME] [--agent PATH] [--no-startup] [--state-dir PATH]\n  infra repair [--state-dir PATH]\n  infra reconnect [--state-dir PATH]\n  infra update [--version TAG] [--repo OWNER/REPO] [--base-url URL] [--trusted-update-key BASE64] [--state-dir PATH]\n  infra uninstall [--remove-state] [--state-dir PATH]\n"
+Usage:\n  infra status [--verify [--timeout-ms 15000]] [--json] [--state-dir PATH]\n  infra doctor [--json] [--state-dir PATH]\n  infra activate --source-dir PATH --install-dir PATH [--state-dir PATH] [setup options]\n  infra setup [--gateway WS_URL] [--agent PATH] [--no-startup] [--state-dir PATH]\n  infra install --gateway WS_URL [--code CODE] [--name NAME] [--agent PATH] [--no-startup] [--state-dir PATH]\n  infra repair [--state-dir PATH]\n  infra reconnect [--state-dir PATH]\n  infra update [--version TAG] [--repo OWNER/REPO] [--base-url URL] [--trusted-update-key BASE64] [--state-dir PATH]\n  infra uninstall [--remove-state] [--state-dir PATH]\n"
     );
 }
 

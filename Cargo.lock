@@ -1388,7 +1388,6 @@ dependencies = [
  "infra-platform",
  "infra-protocol",
  "portable-pty",
- "process-wrap",
  "regex",
  "reqwest",
  "serde",
@@ -1422,6 +1421,7 @@ dependencies = [
  "tempfile",
  "tokio",
  "url",
+ "uuid",
 ]
 
 [[package]]
@@ -1471,8 +1471,11 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "keyring",
+ "process-wrap",
  "serde",
  "sysinfo",
+ "tempfile",
+ "tokio",
 ]
 
 [[package]]
