@@ -104,7 +104,9 @@ jobs:
         env:
           INFRA_RELEASE_SIGNING_KEY_B64: ${{ secrets.INFRA_RELEASE_SIGNING_KEY_B64 }}
           INFRA_RELEASE_PUBLIC_KEY_B64: ${{ vars.INFRA_RELEASE_PUBLIC_KEY_B64 }}
-        run: python3 scripts/sign-release.py --directory release --version "$GITHUB_REF_NAME" --source-commit "$GITHUB_SHA"
+        run: |
+          INFRA_SOURCE_COMMIT="$(git rev-parse HEAD)"
+          python3 scripts/sign-release.py --directory release --version "$GITHUB_REF_NAME" --source-commit "$INFRA_SOURCE_COMMIT"
       - name: Publish GitHub release
         env:
           GH_TOKEN: ${{ github.token }}

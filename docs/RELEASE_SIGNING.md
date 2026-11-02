@@ -74,7 +74,7 @@ for Linux, macOS and Windows x64/ARM64 pairs, matching filename-bound checksum
 sidecars, nonempty regular files and no unexpected publishable entries. Existing
 manifest/signature outputs can be regenerated. Symlink inputs/outputs are rejected.
 The signed manifest includes `source_commit`; the workflow supplies its full tagged
-`GITHUB_SHA`. This is a signed provenance claim, not a reproducible-build proof or
+checked-out commit, including for annotated tags. This is a signed provenance claim, not a reproducible-build proof or
 OS executable signature. Python 3.9+, Cargo and the existing `cryptography` signing
 dependency are used; no production key is needed for the fixture tests.
 
