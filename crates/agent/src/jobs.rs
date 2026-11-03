@@ -7,11 +7,13 @@ use infra_protocol::{
     ReconcileKind,
 };
 use serde::{Deserialize, Serialize};
+#[cfg(not(windows))]
+use std::process::Command;
 use std::{
     fs,
     io::{Read, Seek, SeekFrom, Write},
     path::{Path, PathBuf},
-    process::{Command, Stdio},
+    process::Stdio,
     sync::{Arc, Mutex},
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
@@ -218,11 +220,7 @@ pub fn run_worker(dir: &Path) -> anyhow::Result<()> {
     write_meta(dir, &meta)?;
 
     #[cfg(windows)]
-    let mut command = {
-        let mut c = Command::new("cmd.exe");
-        c.args(["/D", "/S", "/C", &meta.command]);
-        c
-    };
+    let mut command = infra_platform::command_runner::windows_shell(&meta.command);
     #[cfg(not(windows))]
     let mut command = {
         let mut c = Command::new("/bin/sh");

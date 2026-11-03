@@ -68,21 +68,32 @@ or change internal transaction rollback.
 Unix waits for native activation. Windows cannot replace its currently executing
 CLI reliably, so a small local PowerShell relay waits for that parent to exit,
 runs the same locked native operation, records the result and cleans the source
-directory. A bounded short launcher uses the ordinary `Open` shell verb to start
-the relay without inherited capture pipes; it does not request elevation. Only
-that launcher uses root-process ownership because the relay deliberately outlives
-it. Normal execution/startup commands retain process-tree ownership. See
-[Start-Process](https://learn.microsoft.com/en-us/powershell/module/microsoft.powershell.management/start-process?view=powershell-5.1).
-Direct Rust spawning with null stdio still inherits other inheritable Windows
-handles ([Rust 1.99 source](https://github.com/rust-lang/rust/blob/1.99.0/library/std/src/sys/process/windows.rs));
-CI exposed the resulting capture-EOF wait after the updater had printed pending. It does not implement another swap/rollback state machine.
+directory. A bounded short PowerShell launcher calls local `Win32_Process.Create`
+through CIM, which brokers the relay outside the MCP caller's Job Object and
+without inherited capture pipes. No remote CIM connection, elevation verb, new
+service/task, or job breakaway permission is used. The relay checks its user SID
+and effective administrator status against its caller before native activation;
+a mismatch fails closed and the receipt records `context_verified: false`.
+The short launcher uses normal process-tree ownership; the old root-only runner
+exception is removed. See Microsoft's [Job Objects](https://learn.microsoft.com/en-us/windows/win32/procthread/job-objects)
+and [process creation](https://learn.microsoft.com/en-us/windows/win32/cimwin32prov/create-method-in-class-win32-process).
+Local CIM availability and permissions are now an explicit dependency; failure
+returns an uncertain handoff with inspection guidance, never an elevated fallback.
+The relay is UTF-8 with a BOM for Windows PowerShell 5.1 Unicode paths.
+
+Direct Rust spawning with null stdio previously leaked capture handles. The
+subsequent shell-verb relay passed direct invocation but died after MCP exec
+returned. The caller-lifetime fixture exposed this second failure. This handoff
+still uses the existing native swap/rollback state machine.
 
 Windows returns **pending**, not completed. `infra status --json` adds
 `update_status` for the latest request. Per-request receipts live under
 `state/updates`; old completions cannot overwrite the newest request. A missing
 owner or stale pending receipt is `outcome_unknown`, never automatic success or
 automatic replay. Receipt history and relay logs are retained for diagnosis;
-retention cleanup and real MCP/terminal helper-lifetime acceptance remain open.
+retention cleanup remains open. MCP/terminal helper-lifetime acceptance is now
+exercised by the owned Windows fixture below; record its hosted result before
+claiming that boundary passes.
 
 Failure after activation attempts restoration and fresh signed verification of
 the previous pair. A restored pre-readiness version may remain unverified; the
@@ -113,3 +124,34 @@ No live host, daily-use profile or excluded production gateway is used by these
 tests. Physical Windows standard-user/login/reboot/sleep/network, permissions,
 first-install trust, rollback across actual released versions and burn-in remain
 release gates.
+
+
+## MCP caller lifetime acceptance
+
+The Windows-owned fixture runs the same signed bad-agent update three ways:
+local CLI capture, gateway MCP `exec`, and gateway MCP `terminal`. It closes the
+terminal and verifies its worker exits while activation remains pending. The
+fixture binary delays only its second build-info probe to leave time for caller
+cleanup before controller stop; production binaries have no test delay or mode.
+
+Each attempt is issued once. An interrupted exec response may report uncertain
+outcome and must not request automatic replay. An independent observer checks the
+per-request receipt, detects a vanished relay, verifies failed-readiness rollback,
+compares both original hashes and exact identity bytes, obtains fresh signed
+connection evidence, and executes a new command through MCP after recovery.
+These are transport/tool-path tests, not actual AI model or physical-PC acceptance.
+
+The first hosted run exposed quoted-path corruption in Windows MCP exec before
+the update started. Exec and job commands now preserve the intentional shell
+program with `cmd /D /S /C` and one raw outer quote pair, following
+[Rust's cmd.exe guidance](https://doc.rust-lang.org/stable/std/os/windows/process/trait.CommandExt.html#tymethod.raw_arg).
+This applies only to user-requested shell programs; structured executable calls
+still pass individual arguments. A Windows regression test checks a PowerShell
+script path and argument containing spaces, a quoted literal ampersand, and an
+intentional shell operator. Terminal command-builder quoting is separate from
+this fix; the update fixture types its command into an already open shell.
+
+The shared test client accepts only explicit loopback HTTP origins, ignores proxy
+environment settings and refuses redirects. The fixture owner credential is passed
+via an owned temporary file, never command-line arguments or committed content.
+No live Infra connector, production endpoint or daily-use startup is involved.

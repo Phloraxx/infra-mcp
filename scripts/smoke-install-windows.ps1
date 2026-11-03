@@ -165,7 +165,9 @@ try {
   }
   Write-Host "Windows bootstrap smoke PASS: verified preflight, spaces in paths, signed enrollment, resilient Scheduled Task launch, CLI status and live agent handshake"
 
-  python (Join-Path $Root "scripts\test-install-safety.py") --binaries (Join-Path $Root "target\release") --live-fixture-root $TempRoot --live-state $State --live-install $Install
+  $FixtureTokenFile = Join-Path $TempRoot "fixture-owner-token"
+  [IO.File]::WriteAllText($FixtureTokenFile, $Admin, ([System.Text.UTF8Encoding]::new($false)))
+  python (Join-Path $Root "scripts\test-install-safety.py") --binaries (Join-Path $Root "target\release") --live-fixture-root $TempRoot --live-state $State --live-install $Install --mcp-base-url $Base --mcp-token-file $FixtureTokenFile
   if ($LASTEXITCODE -ne 0) { throw "Native Windows pair/locked-file/failed-readiness rollback acceptance failed" }
 
   # New happy path: no code or friendly name. Pair a second local test profile

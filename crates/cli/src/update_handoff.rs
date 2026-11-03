@@ -14,6 +14,8 @@ pub struct UpdateStatus {
     pub detail: String,
     pub owner_pid: u32,
     pub updated_unix_ms: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context_verified: Option<bool>,
 }
 pub fn status(state: &Path) -> Option<UpdateStatus> {
     let mut status: UpdateStatus = fs::read(receipt_path(state, current_id(state)?))
@@ -55,6 +57,7 @@ fn record_owner(state: &Path, id: Uuid, phase: &str, detail: &str, owner_pid: u3
         detail: detail.into(),
         owner_pid,
         updated_unix_ms: infra_local_state::now_ms(),
+        context_verified: None,
     };
     let path = receipt_path(state, id);
     let temporary = state.join(format!(".update-status-{id}"));
@@ -189,30 +192,49 @@ pub async fn apply(
         let profile = quote(state);
         let parent = std::process::id();
         let text = format!(
-            r#"$ErrorActionPreference='Stop'
+            r#"param([Parameter(Mandatory=$true)][string]$ExpectedSid,[Parameter(Mandatory=$true)][ValidateSet(0,1)][int]$ExpectedAdmin)
+$ErrorActionPreference='Stop'
 $phase='outcome_unknown'
+$context_verified=$false
 try {{
   $deadline=(Get-Date).AddSeconds(20)
   while ((Get-Process -Id {parent} -ErrorAction SilentlyContinue) -and (Get-Date) -lt $deadline) {{ Start-Sleep -Milliseconds 100 }}
   if (Get-Process -Id {parent} -ErrorAction SilentlyContinue) {{ $phase='failed';throw 'Original updater did not exit; no activation attempted.' }}
+  $identity=[Security.Principal.WindowsIdentity]::GetCurrent()
+  $admin=([Security.Principal.WindowsPrincipal]::new($identity)).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+  if ($identity.User.Value -ne $ExpectedSid -or [int]$admin -ne $ExpectedAdmin) {{ $phase='failed';throw 'Activation context differs from the caller; no activation attempted.' }}
+  $context_verified=$true
   $arguments=@('activate','--update','--source-dir','"{src}"','--install-dir','"{dest}"','--state-dir','"{profile}"','--expected-pair-file','"{src}\expected-pair.json"')
   $child=Start-Process -FilePath '{staged}' -ArgumentList $arguments -NoNewWindow -Wait -PassThru -RedirectStandardOutput '{log}.out' -RedirectStandardError '{log}.err'
   [IO.File]::WriteAllText('{log}',([IO.File]::ReadAllText('{log}.out')+[IO.File]::ReadAllText('{log}.err')),([System.Text.UTF8Encoding]::new($false)))
   if ($child.ExitCode -eq 0) {{ $phase='complete' }} else {{ $phase='failed' }}
+}} catch {{
+  [IO.File]::AppendAllText('{log}',("Activation relay: "+$_.Exception.Message),([System.Text.UTF8Encoding]::new($false)))
+  throw
 }} finally {{
-  $result=@{{id='{id}';phase=$phase;detail='Inspect the update log if activation failed; recovery files are retained.';owner_pid=$PID;updated_unix_ms=[DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()}} | ConvertTo-Json -Compress
+  $result=@{{id='{id}';phase=$phase;detail='Inspect the update log if activation failed; recovery files are retained.';owner_pid=$PID;updated_unix_ms=[DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds();context_verified=$context_verified}} | ConvertTo-Json -Compress
   [IO.File]::WriteAllText('{status}',$result,([System.Text.UTF8Encoding]::new($false)))
   Remove-Item -LiteralPath '{src}' -Recurse -Force -ErrorAction SilentlyContinue
 }}
 "#
         );
-        fs::write(&script, text)?;
-        // ShellExecute starts the relay without inheriting arbitrary capture
-        // handles from this CLI. Stdio::null alone does not prevent that on
-        // Windows. The short launcher is owned; the relay has its own lifetime.
+        // Windows PowerShell 5.1 needs the BOM to decode Unicode paths in source.
+        fs::write(&script, format!("\u{feff}{text}"))?;
+        // Local Win32_Process.Create is brokered outside the caller's Job
+        // Object. ShellExecute/null stdio alone did not survive MCP exec cleanup.
+        // The relay checks SID and effective administrator status before acting.
         let launcher_script = format!(
-            "$ErrorActionPreference='Stop';$p=Start-Process -FilePath 'powershell.exe' -ArgumentList @('-NoLogo','-NoProfile','-NonInteractive','-ExecutionPolicy','Bypass','-File','\"{}\"') -Verb Open -WindowStyle Hidden -PassThru;$p.Id",
-            quote(&script)
+            r#"$ErrorActionPreference='Stop'
+$identity=[Security.Principal.WindowsIdentity]::GetCurrent()
+$admin=[int](([Security.Principal.WindowsPrincipal]::new($identity)).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator))
+$exe=Join-Path $PSHOME 'powershell.exe'
+$line='"'+$exe+'" -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "{script}" -ExpectedSid '+$identity.User.Value+' -ExpectedAdmin '+$admin
+$startup=New-CimInstance -ClassName Win32_ProcessStartup -ClientOnly -Property @{{ShowWindow=[uint16]0}}
+$created=Invoke-CimMethod -ClassName Win32_Process -MethodName Create -Arguments @{{CommandLine=$line;CurrentDirectory='{src}';ProcessStartupInformation=$startup}}
+if ($created.ReturnValue -ne 0 -or $created.ProcessId -le 0) {{ throw 'Local activation process creation failed; no reliable relay was returned.' }}
+$created.ProcessId
+"#,
+            script = quote(&script),
         );
         let mut launcher = tokio::process::Command::new("powershell.exe");
         launcher.args([
@@ -222,12 +244,9 @@ try {{
             "-Command",
             &launcher_script,
         ]);
-        let launched = infra_platform::command_runner::run_detached_launcher(
-            launcher,
-            Duration::from_secs(15),
-            4096,
-        )
-        .await;
+        let launched =
+            infra_platform::command_runner::run_async(launcher, Duration::from_secs(15), 4096)
+                .await;
         let owner_pid = match launched {
             Ok(output) if output.exit_code == Some(0) && !output.truncated => output
                 .stdout

@@ -10,6 +10,7 @@ import tempfile
 import time
 import urllib.error
 import urllib.request
+from mcp_fixture import FixtureMcp
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 
@@ -43,14 +44,7 @@ def main():
                 else:
                     raise RuntimeError('fixture gateway failed readiness')
 
-                def rpc(method, params):
-                    data = json.dumps({'jsonrpc':'2.0', 'id':1, 'method':method, 'params':params}).encode()
-                    request = urllib.request.Request(base+'/mcp', data=data, headers={
-                        'Authorization':'Bearer '+token, 'Content-Type':'application/json',
-                        'Accept':'application/json, text/event-stream', 'MCP-Protocol-Version':'2025-06-18',
-                    })
-                    with urllib.request.urlopen(request, timeout=5) as response:
-                        return json.load(response)
+                rpc = FixtureMcp(base, token).rpc
 
                 tools = {tool['name']: tool for tool in rpc('tools/list', {})['result']['tools']}
                 assert len(tools) == 15 and 'copy' in tools, set(tools)
