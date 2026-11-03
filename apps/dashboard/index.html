@@ -187,11 +187,16 @@
         <p class="muted small">One command, no extra runtime. Windows downloads to a local file first, then runs it; it will not evaluate an empty web response. This test installer requires trust in the Infra domain. For restricted machines, use a signed package when available.</p>
       </section>
       <section id="pair-approval" class="pair-approval" aria-label="Approve a computer">
-        <h3>2. Approve this computer</h3>
-        <p class="muted small">Your computer will appear below with a six-digit code. Check the code on both screens before allowing access.</p>
+        <h3 id="pair-heading">2. Approve this computer</h3>
+        <p id="pair-approval-copy" class="muted small">Your computer will appear below with a six-digit code. Check the code on both screens before allowing access.</p>
         <div id="pending-pairs" aria-live="polite"><p class="muted small">Checking for computers…</p></div>
         <p id="pair-result" class="small" role="status"></p>
         <p id="pair-error" class="error" role="alert"></p>
+        <div id="pair-actions" class="row-actions hidden">
+          <button id="pair-check" type="button" class="secondary">Check connection again</button>
+          <button id="pair-open" type="button" class="primary hidden">Open device</button>
+          <button id="pair-another" type="button" class="ghost-button">Add another device</button>
+        </div>
       </section>
       <details class="legacy-enrollment">
         <summary>Manual enrollment (older devices)</summary>

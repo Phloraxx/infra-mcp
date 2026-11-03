@@ -95,7 +95,7 @@ async function jsonFetch(url,options={}){
       if(epoch===state.authEpoch){clearPrivateViews();showSignedOut();}
       const error=new Error('Your session ended. Sign in again.');error.status=401;throw error;
     }
-    if(!response.ok){const text=await response.text();let message=text;try{message=JSON.parse(text).error||text;}catch{}throw new Error(message||`HTTP ${response.status}`);}
+    if(!response.ok){const text=await response.text();let message=text;try{message=JSON.parse(text).error||text;}catch{}const error=new Error(message||`HTTP ${response.status}`);error.status=response.status;throw error;}
     return response.status===204?null:response.json();
   });
 }
@@ -252,46 +252,148 @@ $('#copy-quick-install').addEventListener('click',async()=>{
   }catch(error){$('#pair-error').textContent='Clipboard unavailable. Select and copy the command above.';}
 });
 updateQuickInstall();
-let pairPollTimer=null;
-async function refreshPendingPairs(){
-  if(!$('#enroll-dialog').open||!state.authenticated)return;
-  try{
-    const pairs=await jsonFetch('/api/pair/requests');
-    if(!$('#enroll-dialog').open)return;
-    $('#pair-error').textContent='';
-    $('#pending-pairs').innerHTML=pairs.length?pairs.map(pair=>
-      '<div class="pending-pair">'+
-      '<div class="pending-pair-head"><strong>'+esc(pair.device_name)+'</strong><span class="muted small">'+esc(pair.platform)+' · '+esc(pair.arch)+'</span></div>'+
-      '<div class="pending-code">Compare: <strong>'+esc(pair.verification_code)+'</strong></div>'+
-      '<div class="row-actions"><button type="button" class="primary" data-pair-action="approve" data-pair-id="'+esc(pair.request_id)+'" data-pair-code="'+esc(pair.verification_code)+'">Approve this computer</button>'+
-      '<button type="button" class="secondary" data-pair-action="reject" data-pair-id="'+esc(pair.request_id)+'">Reject</button></div></div>'
-    ).join(''):'<p class="muted small">No computers are requesting approval yet.</p>';
-  }catch(error){$('#pair-error').textContent=error.message;}
+const PAIR_WAIT_MS=90000,PAIR_PROOF_MS=30000;
+let pairFlow=null,pairPollRun=null,pairPollTimer=null;
+function resetPairWait(flow){flow.until=performance.now()+PAIR_WAIT_MS;flow.untilWall=Date.now()+PAIR_WAIT_MS;}
+function pairWaitExpired(flow){return performance.now()>=flow.until||Date.now()>=flow.untilWall;}
+function pairProofFresh(flow){const wall=Date.now()-flow.verifiedWall,elapsed=performance.now()-flow.verifiedAt;return wall>=0&&wall<PAIR_PROOF_MS&&elapsed>=0&&elapsed<PAIR_PROOF_MS;}
+function stopPairPolling(){clearTimeout(pairPollTimer);pairPollTimer=null;pairPollRun?.controller.abort();pairPollRun=null;}
+function pairRunCurrent(run){return run===pairPollRun&&run.epoch===state.authEpoch&&state.authenticated&&$('#enroll-dialog').open;}
+function renderPairFlow(){
+  const flow=pairFlow,verified=flow?.phase==='verified';
+  $('#quick-install').classList.toggle('hidden',!!flow?.approved);
+  $('.legacy-enrollment').classList.toggle('hidden',!!flow);
+  $('#pair-approval-copy').classList.toggle('hidden',!!flow);
+  $('#pair-heading').textContent=verified?'3. Computer connected':flow?.approved?'3. Check connection':'2. Approve this computer';
+  $('#pair-result').classList.toggle('pair-verified',verified);
+  $('#pending-pairs').classList.toggle('hidden',!!flow);
+  $('#pair-actions').classList.toggle('hidden',!flow);
+  $('#pair-open').classList.toggle('hidden',!verified);
+  $('#pair-check').classList.toggle('hidden',verified||flow?.phase==='pending');
+  $('#pair-check').disabled=!!flow&&['approving','observing','waiting','checking'].includes(flow.phase);
+  $('#pair-another').disabled=flow?.phase==='approving';
+  $('#pair-another').textContent=flow?.phase==='pending'?'Review pairing request':'Add another device';
+  if(!flow)return;
+  const name=flow.name||'This computer';
+  const messages={approving:'Approving this computer…',observing:'Checking whether approval completed…',
+    waiting:`Approved. Waiting for ${name} to connect…`,checking:`Approved. Checking the connection to ${name}…`,
+    verified:`${name} · Connection verified. The computer responded to a fresh check.`,
+    paused:flow.approved?'Approved, but the connection could not be verified. Keep Infra running on that computer, check its network, then check again.':'Approval could not be confirmed. Check again to inspect the request without sending another approval.',
+    expired:'This pairing request expired. Run setup again on that computer, then choose Add another device to review its request.',
+    missing:'This pairing request is no longer available. Run setup again on that computer, then choose Add another device to review a new request.',
+    pending:'Approval has not been recorded. Review the pairing request and compare the codes on both screens before approving.',
+    stale:'The last connection check expired. Check the connection again before opening the device.'};
+  $('#pair-result').textContent=messages[flow.phase]||messages.observing;
 }
-$('#enroll-dialog').addEventListener('close',()=>{clearInterval(pairPollTimer);pairPollTimer=null;});
+function startPairPolling(){
+  stopPairPolling();
+  if(!state.authenticated||!$('#enroll-dialog').open)return;
+  const run={epoch:state.authEpoch,controller:new AbortController(),busy:false};pairPollRun=run;
+  refreshPendingPairs(run);
+}
+async function refreshPendingPairs(run){
+  if(!pairRunCurrent(run)||run.busy)return;
+  run.busy=true;
+  const flow=pairFlow,options={signal:run.controller.signal};
+  const current=()=>pairRunCurrent(run)&&!run.paused&&pairFlow===flow;
+  try{
+    if(!flow){
+      const pairs=await jsonFetch('/api/pair/requests',options);
+      if(!current())return;
+      $('#pair-error').textContent='';
+      $('#pending-pairs').innerHTML=pairs.length?pairs.map(pair=>
+        '<div class="pending-pair">'+
+        '<div class="pending-pair-head"><strong>'+esc(pair.device_name)+'</strong><span class="muted small">'+esc(pair.platform)+' · '+esc(pair.arch)+'</span></div>'+
+        '<div class="pending-code">Compare: <strong>'+esc(pair.verification_code)+'</strong></div>'+
+        '<div class="row-actions"><button type="button" class="primary" data-pair-action="approve" data-pair-id="'+esc(pair.request_id)+'" data-pair-code="'+esc(pair.verification_code)+'">Approve this computer</button>'+
+        '<button type="button" class="secondary" data-pair-action="reject" data-pair-id="'+esc(pair.request_id)+'">Reject</button></div></div>'
+      ).join(''):'<p class="muted small">No computers are requesting approval yet.</p>';
+      return;
+    }
+    if(flow.phase==='verified'){
+      if(!pairProofFresh(flow)){flow.phase='stale';renderPairFlow();}
+      return;
+    }
+    if(flow.phase==='approving'||['paused','expired','missing','stale','pending'].includes(flow.phase))return;
+    if(pairWaitExpired(flow)){flow.phase='paused';renderPairFlow();return;}
+    let record;
+    try{record=await jsonFetch('/api/pair/'+encodeURIComponent(flow.id),options);}
+    catch(error){if(current()&&error.status===404){flow.phase='missing';renderPairFlow();return;}throw error;}
+    if(!current())return;
+    if(record.request_id!==flow.id)throw new Error('Pairing request mismatch');
+    if(record.state==='expired'){flow.phase='expired';renderPairFlow();return;}
+    if(record.state==='pending'){flow.phase='pending';renderPairFlow();return;}
+    if(record.state!=='approved'||typeof record.device_id!=='string'||!record.device_id)throw new Error('Invalid pairing status');
+    if(flow.device&&flow.device!==record.device_id)throw new Error('Approved computer changed');
+    flow.approved=true;flow.device=record.device_id;flow.name=record.device_name;flow.phase='waiting';renderPairFlow();
+    const devices=await jsonFetch('/api/devices',options);
+    if(!current())return;
+    const device=devices.find(item=>item.device_id===flow.device);
+    if(!device?.online||device.revoked)return;
+    flow.phase='checking';renderPairFlow();
+    const reply=await jsonFetch('/api/devices/'+encodeURIComponent(flow.device)+'/operations',
+      {...options,method:'POST',body:JSON.stringify({op:'status'})});
+    if(!current())return;
+    if(reply.status!=='ok'||!Number.isInteger(reply.body?.pid)||reply.body.pid<=0||!Number.isInteger(reply.body?.protocol)||reply.body.protocol<=0)
+      throw new Error('The computer did not return a valid connection check');
+    // A registry row is insufficient. This response traversed the dispatcher and
+    // its exact authenticated connection; it is a point-in-time check, not a lease.
+    flow.phase='verified';flow.verifiedAt=performance.now();flow.verifiedWall=Date.now();$('#pair-error').textContent='';renderPairFlow();
+    scheduleRefresh();
+  }catch(error){
+    if(current()){
+      $('#pair-error').textContent='Connection check unavailable. Keep Infra running on the computer and check its network. Approval will not be sent again.';
+      if(flow){flow.phase=pairWaitExpired(flow)?'paused':flow.approved?'waiting':'observing';renderPairFlow();}
+    }
+  }finally{
+    run.busy=false;
+    if(pairRunCurrent(run)&&!run.paused)pairPollTimer=setTimeout(()=>refreshPendingPairs(run),2500);
+  }
+}
+$('#enroll-dialog').addEventListener('close',stopPairPolling);
 $('#pending-pairs').addEventListener('click',async event=>{
   const button=event.target.closest('button[data-pair-action]');
-  if(!button)return;
+  if(!button||pairFlow||!pairPollRun)return;
   const id=button.dataset.pairId,action=button.dataset.pairAction;
-  button.disabled=true;$('#pair-error').textContent='';
-  try{
-    if(action==='approve'){
-      await jsonFetch('/api/pair/'+encodeURIComponent(id)+'/approve',{method:'POST',body:JSON.stringify({verification_code:button.dataset.pairCode})});
-      $('#pair-result').textContent='Approved. Waiting for this computer to connect…';
-    }else{
-      await jsonFetch('/api/pair/'+encodeURIComponent(id)+'/reject',{method:'POST'});
-      $('#pair-result').textContent='Pairing request rejected.';
+  const run=pairPollRun,options={signal:run.controller.signal};
+  // Pause list polling during the mutation so its DOM cannot re-enable approval.
+  clearTimeout(pairPollTimer);pairPollTimer=null;run.paused=true;
+  if(action==='approve'){
+    const flow={id,phase:'approving',approved:false};resetPairWait(flow);pairFlow=flow;
+    $('#pair-error').textContent='';renderPairFlow();
+    try{
+      await jsonFetch('/api/pair/'+encodeURIComponent(id)+'/approve',
+        {...options,method:'POST',body:JSON.stringify({verification_code:button.dataset.pairCode})});
+    }catch(error){
+      if(pairRunCurrent(run))$('#pair-error').textContent='The approval response was not confirmed. Checking its recorded state; approval will not be sent again.';
+    }finally{
+      if(pairFlow===flow){flow.phase='observing';if(pairRunCurrent(run)){renderPairFlow();startPairPolling();}}
     }
-    await refreshPendingPairs();scheduleRefresh();
-  }catch(error){$('#pair-error').textContent=error.message;button.disabled=false;}
+  }else{
+    $$('#pending-pairs button').forEach(control=>control.disabled=true);
+    try{await jsonFetch('/api/pair/'+encodeURIComponent(id)+'/reject',{...options,method:'POST'});if(pairRunCurrent(run))$('#pair-result').textContent='Pairing request rejected.';}
+    catch(error){if(pairRunCurrent(run))$('#pair-error').textContent=error.message;}
+    finally{if(pairRunCurrent(run))startPairPolling();}
+  }
+});
+$('#pair-check').addEventListener('click',()=>{
+  if(!pairFlow)return;
+  pairFlow.phase='observing';resetPairWait(pairFlow);$('#pair-error').textContent='';renderPairFlow();startPairPolling();
+});
+$('#pair-another').addEventListener('click',()=>{
+  pairFlow=null;$('#pair-result').textContent='';$('#pair-error').textContent='';renderPairFlow();startPairPolling();
+});
+$('#pair-open').addEventListener('click',()=>{
+  if(pairFlow?.phase!=='verified')return;
+  if(!pairProofFresh(pairFlow)){pairFlow.phase='stale';renderPairFlow();return;}
+  const device=pairFlow.device;pairFlow=null;$('#enroll-dialog').close();navigateDevice(device);
+  $('#view-title').tabIndex=-1;$('#view-title').focus();
 });
 $('#add-device').addEventListener('click',()=>{
   $('#enroll-start').classList.remove('hidden');$('#enroll-result').classList.add('hidden');
   $('#pair-result').textContent='';$('#pair-error').textContent='';
-  $('#enroll-dialog').showModal();
-  refreshPendingPairs();
-  clearInterval(pairPollTimer);
-  pairPollTimer=setInterval(refreshPendingPairs,2500);
+  if(pairFlow){pairFlow.phase='observing';resetPairWait(pairFlow);}
+  $('#enroll-dialog').showModal();renderPairFlow();startPairPolling();
 });
 $('#create-enrollment').addEventListener('click',async()=>{const button=$('#create-enrollment');button.disabled=true;button.textContent='Creating…';try{state.enrollment=await jsonFetch('/api/enrollments',{method:'POST',body:JSON.stringify({ttl_seconds:300})});$('#enrollment-code').textContent=state.enrollment.code;$('#enrollment-expiry').textContent=`Expires ${new Date(state.enrollment.expires_at_unix_ms).toLocaleTimeString()}`;$('#enroll-start').classList.add('hidden');$('#enroll-result').classList.remove('hidden');updateInstallCommand();}catch(error){alert(error.message);}finally{button.disabled=false;button.textContent='Create enrollment code';}});
 function gatewayWs(){const url=new URL(location.href);url.protocol=url.protocol==='https:'?'wss:':'ws:';url.pathname='/agent';url.search='';url.hash='';return url.toString();}
@@ -448,6 +550,7 @@ $('#terminal-open').addEventListener('submit',event=>{
 });
 
 function clearPrivateViews(){
+  stopPairPolling();pairFlow=null;$('#pending-pairs').replaceChildren();$('#pair-result').textContent='';$('#pair-error').textContent='';renderPairFlow();
   state.authEpoch++;state.refreshPending=false;state.devices=[];state.sessions=[];state.activity=[];state.file=null;state.enrollment=null;detachSession();
   clearFileListing();
   ['#file-content','#files-list','#session-output','#device-status-output','#enrollment-code','#install-command'].forEach(s=>$(s).replaceChildren());

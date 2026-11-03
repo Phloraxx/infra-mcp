@@ -21,6 +21,10 @@ let sessions = [
 ];
 let overviewMode=null, overviewCalls=0, hangEnrollment=false, enrollmentCalls=0;
 let fileListMode='legacy',failFilePage=false,filePageDelay=0;
+const pairId='00000000-0000-4000-8000-000000000004',pairDeviceId='00000000-0000-4000-8000-000000000005';
+let pairState='pending',pairApproveState='approved',pairOnline=false,pairReply='ok',pairDelay=0,hangApproval=false,approvalCalls=0,pairChecks=0;
+const pairRecord=()=>({request_id:pairId,device_name:'Windows Test PC',platform:'windows',arch:'x86_64',verification_code:'482731',state:pairState,device_id:pairState==='approved'?pairDeviceId:null});
+const fixtureDevices=()=>pairState==='approved'?[...devices,{device_id:pairDeviceId,device_name:'Windows Test PC',platform:'windows',arch:'x86_64',agent_version:'test',online:pairOnline,capabilities:['terminal','files']}]:devices;
 const hungResponses=new Set();
 const hang=(res,body=false)=>{hungResponses.add(res);res.on('close',()=>hungResponses.delete(res));if(body){res.writeHead(200,{'Content-Type':'application/json'});res.write('{"devices":');}};
 let authenticated=false, output='fixture PTY ready\r\n', failWrite=false, failRead=false, delayedRead=false, readDelay=0;
@@ -35,13 +39,21 @@ const server=http.createServer(async(req,res)=>{
   if(req.url.startsWith('/api/')){
     if(!authenticated)return send({error:'Authentication required'},401);
     if(req.url==='/api/devices/online/rename'&&req.method==='POST'){let body='';for await(const chunk of req)body+=chunk;devices[0].device_name=JSON.parse(body).name||badName;return send({ok:true});}
-    if(req.url==='/api/pair/requests'&&req.method==='GET')return send([{request_id:'00000000-0000-4000-8000-000000000004',device_name:'Windows Test PC',platform:'windows',arch:'x86_64',verification_code:'482731'}]);
-    if(req.url==='/api/pair/00000000-0000-4000-8000-000000000004/approve'&&req.method==='POST')return send({state:'approved',device_id:'paired-fixture'});
+    if(req.url==='/api/pair/requests'&&req.method==='GET')return send(pairState==='pending'?[pairRecord()]:[]);
+    if(req.url==='/api/pair/'+pairId&&req.method==='GET')return pairState==='missing'?send({error:'Pairing request unavailable'},404):send(pairRecord());
+    if(req.url==='/api/pair/'+pairId+'/approve'&&req.method==='POST'){approvalCalls++;pairState=pairApproveState;if(hangApproval)return hang(res);return send(pairRecord());}
     if(req.url==='/api/pair/00000000-0000-4000-8000-000000000004/reject'&&req.method==='POST')return send({ok:true});
     if(req.url==='/api/enrollments'&&req.method==='POST'){enrollmentCalls++;if(hangEnrollment)return hang(res);return send({code:'fixture-5-minute-code',expires_at_unix_ms:Date.now()+300000});}
     if(req.url==='/api/events'){res.writeHead(200,{'Content-Type':'text/event-stream'});res.write(': connected\n\n');streams.add(res);res.on('close',()=>streams.delete(res));return;}
-    if(req.url==='/api/overview'){overviewCalls++;if(overviewMode)return hang(res,overviewMode==='body');return send({devices,sessions,activity:[]});}
-    if(req.url==='/api/devices')return send(devices);
+    if(req.url==='/api/overview'){overviewCalls++;if(overviewMode)return hang(res,overviewMode==='body');return send({devices:fixtureDevices(),sessions,activity:[]});}
+    if(req.url==='/api/devices')return send(fixtureDevices());
+    if(req.url==='/api/devices/'+pairDeviceId+'/operations'){
+      pairChecks++;const reply=pairReply,delay=pairDelay;
+      let body='';for await(const chunk of req)body+=chunk;
+      assert.deepEqual(JSON.parse(body),{op:'status'});
+      if(delay)await new Promise(resolve=>setTimeout(resolve,delay));
+      return send(reply==='ok'?{status:'ok',body:{pid:321,protocol:1}}:reply==='malformed'?{status:'ok',body:{}}:{status:'deadline_exceeded'});
+    }
     if(req.url==='/api/sessions')return send(sessions);
     if(req.url==='/api/activity')return send([]);
     if(req.url==='/api/devices/online/operations'){
@@ -177,8 +189,27 @@ const server=http.createServer(async(req,res)=>{
     assert.match(quickCommand,/finally[\s\S]*Remove-Item/);
     await page.waitForFunction(()=>document.querySelector('#pending-pairs').textContent.includes('Windows Test PC'));
     assert.match(await page.locator('#pending-pairs').textContent(),/482731/);
+    const originalPairDecoyName=devices[0].device_name;devices[0].device_name='Windows Test PC';
     await page.locator('#pending-pairs [data-pair-action="approve"]').click();
     await page.waitForFunction(()=>document.querySelector('#pair-result').textContent.includes('Approved'));
+    assert.equal(await page.locator('#pair-open').isVisible(),false,'Approval alone must not mean connected');
+    pairOnline=true;pairReply='failed';
+    await page.waitForFunction(()=>document.querySelector('#pair-error').textContent.includes('Connection check unavailable'));
+    assert.equal(await page.locator('#pair-open').isVisible(),false,'Online metadata without a live reply must not pass');
+    pairReply='malformed';const malformedBefore=pairChecks;
+    for(let n=0;pairChecks===malformedBefore&&n<120;n++)await page.waitForTimeout(50);
+    assert(pairChecks>malformedBefore,'Malformed reply fixture was not reached');
+    await page.waitForTimeout(100);
+    assert.equal(await page.locator('#pair-open').isVisible(),false,'Malformed status must not pass');
+    pairReply='ok';
+    await page.locator('#pair-open:not(.hidden)').waitFor();
+    assert.equal(approvalCalls,1,'Connection checks must never replay approval');
+    if(process.env.INFRA_QA_PAIRING_SCREENSHOT)await page.locator('#enroll-dialog').screenshot({path:process.env.INFRA_QA_PAIRING_SCREENSHOT});
+    await page.locator('#pair-open').click();
+    await page.waitForURL('**/#device/'+pairDeviceId+'/overview');
+    assert.equal(await page.locator('#enroll-dialog').isVisible(),false);
+    pairState='pending';pairOnline=false;devices[0].device_name=originalPairDecoyName;
+    await page.goto(base);await page.locator('#add-device').click();
     await page.locator('.legacy-enrollment summary').click();
     await page.locator('#create-enrollment').click();
     await page.waitForFunction(()=>document.querySelector('#enrollment-code').textContent.includes('fixture-5-minute-code'));
@@ -349,6 +380,102 @@ const server=http.createServer(async(req,res)=>{
       await page.evaluate(()=>refresh());
       await page.waitForFunction(()=>document.querySelector('#gateway-label').textContent==='Gateway online');
     }
+    // Separate context: virtual time checks the real wait/expiry UI without
+    // waiting 90 seconds or changing production budgets.
+    const pairPage=await browser.newPage({viewport:{width:390,height:844}});
+    await pairPage.clock.install();
+    const waitFixture=async(predicate,message)=>{
+      for(let n=0;!predicate()&&n<240;n++)await new Promise(resolve=>setTimeout(resolve,25));
+      assert(predicate(),message);
+    };
+    try{
+      pairState='pending';pairOnline=false;pairReply='ok';
+      await pairPage.goto(base);await pairPage.locator('#add-device').click();
+      const before=approvalCalls;
+      await pairPage.locator('[data-pair-action="approve"]').click();
+      await pairPage.waitForFunction(()=>document.querySelector('#pair-result').textContent.includes('Approved'));
+      await pairPage.clock.fastForward(95_000);
+      await pairPage.locator('#pair-check:not([disabled])').waitFor();
+      assert.match(await pairPage.locator('#pair-result').textContent(),/connection could not be verified/);
+      assert.equal(await pairPage.locator('#pair-open').isVisible(),false);
+      assert.equal(approvalCalls,before+1);
+      pairOnline=true;
+      await pairPage.locator('#pair-check').click();
+      await pairPage.locator('#pair-open:not(.hidden)').waitFor();
+      assert.equal(approvalCalls,before+1,'Explicit connection retry must be read-only apart from status');
+      assert(await pairPage.locator('#enroll-dialog').evaluate(node=>node.scrollWidth<=node.clientWidth+1),'Pairing dialog overflows on mobile');
+      if(process.env.INFRA_QA_PAIRING_MOBILE_SCREENSHOT)await pairPage.locator('#enroll-dialog').screenshot({path:process.env.INFRA_QA_PAIRING_MOBILE_SCREENSHOT});
+      await pairPage.clock.fastForward(31_000);
+      await pairPage.locator('#pair-check:not([disabled])').waitFor();
+      assert.match(await pairPage.locator('#pair-result').textContent(),/last connection check expired/);
+      assert.equal(await pairPage.locator('#pair-open').isVisible(),false);
+
+      // Server records approval but its response never reaches the browser.
+      pairState='pending';hangApproval=true;
+      await pairPage.locator('#pair-another').click();
+      const lostBefore=approvalCalls;
+      await pairPage.locator('[data-pair-action="approve"]').click();
+      await waitFixture(()=>approvalCalls===lostBefore+1,'Approval fixture was not reached');
+      await pairPage.clock.fastForward(11_000);
+      await pairPage.locator('#pair-open:not(.hidden)').waitFor();
+      hangApproval=false;
+      assert.equal(approvalCalls,lostBefore+1,'Lost response must be observed without approval replay');
+
+      // If approval did not commit, explicitly review the request; no replay.
+      pairState='pending';pairApproveState='pending';
+      await pairPage.locator('#pair-another').click();
+      await pairPage.locator('[data-pair-action="approve"]').click();
+      await pairPage.waitForFunction(()=>document.querySelector('#pair-result').textContent.includes('Approval has not been recorded'));
+      const unrecorded=approvalCalls;
+      await pairPage.locator('#pair-another').click();
+      await pairPage.locator('[data-pair-action="approve"]').waitFor();
+      assert.equal(approvalCalls,unrecorded);
+
+      // Expired requests explain recovery rather than reporting Connected.
+      pairApproveState='expired';
+      await pairPage.locator('[data-pair-action="approve"]').click();
+      await pairPage.waitForFunction(()=>document.querySelector('#pair-result').textContent.includes('pairing request expired'));
+      assert.equal(await pairPage.locator('#pair-open').isVisible(),false);
+
+      pairState='pending';pairApproveState='missing';
+      await pairPage.locator('#pair-another').click();
+      await pairPage.locator('[data-pair-action="approve"]').click();
+      await pairPage.waitForFunction(()=>document.querySelector('#pair-result').textContent.includes('request is no longer available'));
+      assert.equal(await pairPage.locator('#pair-open').isVisible(),false);
+
+      // A late successful status from a closed dialog cannot verify a reopened
+      // flow whose new check fails. The observer cancels the old request.
+      pairState='pending';pairApproveState='approved';pairReply='ok';pairDelay=800;
+      await pairPage.locator('#pair-another').click();
+      const delayedBefore=pairChecks;
+      await pairPage.locator('[data-pair-action="approve"]').click();
+      await waitFixture(()=>pairChecks>delayedBefore,'Delayed check was not reached');
+      await pairPage.locator('#enroll-dialog').evaluate(node=>node.close());
+      pairReply='failed';pairDelay=0;
+      await pairPage.locator('#add-device').click();
+      await pairPage.waitForFunction(()=>document.querySelector('#pair-error').textContent.includes('Connection check unavailable'));
+      await new Promise(resolve=>setTimeout(resolve,1000));
+      assert.equal(await pairPage.locator('#pair-open').isVisible(),false,'Old dialog response restored success');
+
+      // Session expiry closes and clears private pairing state, including an
+      // outstanding response. No prior label or comparison code can return.
+      await pairPage.locator('#enroll-dialog').evaluate(node=>node.close());
+      pairReply='ok';pairDelay=800;
+      const logoutBefore=pairChecks;
+      await pairPage.locator('#add-device').click();
+      await waitFixture(()=>pairChecks>logoutBefore,'Logout check was not reached');
+      authenticated=false;
+      await pairPage.evaluate(()=>jsonFetch('/api/pair/requests').catch(()=>{}));
+      assert.equal(await pairPage.locator('#enroll-dialog').isVisible(),false);
+      assert.equal(await pairPage.locator('#pair-result').textContent(),'');
+      assert.equal(await pairPage.locator('#pending-pairs').textContent(),'');
+      await new Promise(resolve=>setTimeout(resolve,1000));
+      assert.equal(await pairPage.locator('#pair-result').textContent(),'');
+    }finally{
+      await pairPage.close();authenticated=true;pairState='pending';pairApproveState='approved';pairOnline=false;pairReply='ok';pairDelay=0;hangApproval=false;
+    }
+    await page.reload();await page.locator('#overview-devices [data-device="online"]').waitFor();
+
     // A mutation may have reached the server even if its response never arrives.
     // The browser reports uncertainty and must never replay it automatically.
     hangEnrollment=true;
@@ -371,6 +498,6 @@ const server=http.createServer(async(req,res)=>{
     assert.equal(await page.evaluate(()=>state.listing),null);
     assert.equal(await page.locator('#files-path').inputValue(),'.');
     assert.deepEqual(errors,[]);
-    console.log('Dashboard browser gate PASS: auth/device/XSS/terminal/session/CSP coverage; file pages with keyboard/mobile navigation, byte-shortened offsets, retained error recovery, stale-response isolation, legacy fallback and private-state clearing; bounded header/body timeout recovery and mutation no-replay.');
+    console.log('Dashboard browser gate PASS: pairing completion with live proof, uncertainty/no replay, bounded recovery, expiry and dialog/auth isolation; auth/device/XSS/terminal/session/CSP coverage; file pages with keyboard/mobile navigation, byte-shortened offsets, retained error recovery, stale-response isolation, legacy fallback and private-state clearing; bounded header/body timeout recovery and mutation no-replay.');
   }finally{for(const response of hungResponses)response.destroy();await browser.close();for(const stream of streams)stream.end();await new Promise(resolve=>server.close(resolve));}
 })().catch(error=>{console.error(error);server.close();process.exitCode=1;});
