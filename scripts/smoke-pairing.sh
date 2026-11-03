@@ -65,6 +65,17 @@ while True:
 assert len(pairs)==1,pairs
 pair=pairs[0]
 assert pair['state']=='pending'
+owner_path='/api/pair/'+pair['request_id']
+try:
+    call(owner_path,auth=False)
+    raise AssertionError('unprotected owner pairing status!')
+except urllib.error.HTTPError as e:assert e.code==401,e
+assert call(owner_path)['state']=='pending'
+for path,expected in [('/api/pair/not-a-uuid',400),('/api/pair/00000000-0000-4000-8000-000000000099',404)]:
+    try:
+        call(path)
+        raise AssertionError('invalid/missing owner pairing request was accepted')
+    except urllib.error.HTTPError as e:assert e.code==expected,e
 try:
     call('/api/pair/'+pair['request_id']+'/approve','POST',{'verification_code':pair['verification_code']},auth=False)
     raise AssertionError('unauthenticated approval accepted!')
@@ -84,6 +95,11 @@ try:
 except urllib.error.HTTPError as e:assert e.code==401,e
 approved=call('/api/pair/'+pair['request_id']+'/approve','POST',{'verification_code':pair['verification_code']})
 assert approved['state']=='approved' and approved['device_id'],approved
+observed=call(owner_path)
+assert observed['state']=='approved' and observed['device_id']==approved['device_id']
+assert 'public_key' not in observed
+with urllib.request.urlopen(urllib.request.Request(url+owner_path,headers=h),timeout=4) as response:
+    assert response.headers['Cache-Control']=='no-store'
 retry=call('/api/pair/'+pair['request_id']+'/approve','POST',{'verification_code':pair['verification_code']})
 assert retry['device_id']==approved['device_id']
 print('Pairing owner approval PASS (protected API, correct code, idempotency).')
@@ -125,7 +141,12 @@ while True:
   if matching:
     assert len(devices)==1,devices
     assert matching[0]['connection_generation'] is not None
-    print('End-to-end pairing PASS: same identity, live signed agent, one device, current generation.')
+    check=urllib.request.Request(base+'/api/devices/'+identity['device_id']+'/operations',
+        data=json.dumps({'op':'status'}).encode(),method='POST',
+        headers={**h,'Content-Type':'application/json','X-Infra-CSRF':'1'})
+    with urllib.request.urlopen(check,timeout=5) as response: proof=json.load(response)
+    assert proof['status']=='ok' and proof['body']['pid']>0 and proof['body']['protocol']>0
+    print('End-to-end pairing PASS: same identity, one device, current generation and fresh signed dashboard status operation.')
     break
   if time.monotonic()>deadline:raise AssertionError(f'agent never connected: {devices}')
   time.sleep(.25)

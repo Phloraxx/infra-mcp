@@ -162,6 +162,19 @@ impl Store {
             .map_err(StoreError::from)
     }
 
+    // Owner-only observation after an approval response is lost. Device-side
+    // status still requires proof of the pending signing key above.
+    pub fn owner_pair_status(&self, request_id: &str) -> Result<PairView, StoreError> {
+        let conn = self.connection()?;
+        conn.query_row(
+            "SELECT request_id, code, device_name, platform, arch, agent_version, expires_at_ms, approved_at_ms, device_id FROM pair_requests WHERE request_id=?1",
+            params![request_id],
+            row_pair,
+        )
+        .optional()?
+        .ok_or(StoreError::PairInvalid)
+    }
+
     pub fn approve_pair(&self, request_id: &str, code: &str) -> Result<PairView, StoreError> {
         let mut conn = self.connection()?;
         let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
@@ -252,6 +265,7 @@ mod tests {
             .request_pair(&id, &key, "My PC", "windows", "x86_64", "v1")
             .unwrap();
         assert_eq!(initial.state, "pending");
+        assert_eq!(store.owner_pair_status(&id).unwrap().state, "pending");
         assert_eq!(initial.verification_code.len(), 6);
         assert_eq!(store.pending_pairs().unwrap().len(), 1);
         assert_eq!(
@@ -276,6 +290,10 @@ mod tests {
         let approved = store.approve_pair(&id, &initial.verification_code).unwrap();
         assert_eq!(approved.state, "approved");
         assert!(approved.device_id.is_some());
+        assert_eq!(
+            store.owner_pair_status(&id).unwrap().device_id,
+            approved.device_id
+        );
         assert_eq!(
             store
                 .approve_pair(&id, &initial.verification_code)
@@ -313,6 +331,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(store.pair_status(&id, &key).unwrap().state, "expired");
+        assert_eq!(store.owner_pair_status(&id).unwrap().state, "expired");
         assert!(matches!(
             store.approve_pair(&id, "123456"),
             Err(StoreError::PairMismatch)

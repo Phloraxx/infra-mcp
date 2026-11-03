@@ -1,5 +1,22 @@
 # One-command Infra setup
 
+**3 November dashboard completion candidate:** approval now advances to an
+independent connection check and an **Open device** action. An authenticated,
+non-cacheable `GET /api/pair/{request_id}` observes the recorded approval, including
+when its POST response was lost. No approval is automatically replayed. The UI
+matches the approved device ID, then requires a fresh successful status operation
+through the existing authenticated agent dispatcher; an online registry row alone
+cannot complete setup. Device-side pairing status still requires its signing key.
+
+Connection observation has a 90-second wait window and the existing ten-second
+budget for each in-flight request. Failure offers **Check connection again**;
+unrecorded or expired approval explains how to review/resume pairing. Successful
+proof expires after 30 seconds. Dialog close aborts reads, reopening resumes only
+observation, and sign-out clears private progress. Progress is held only in the
+current page, not persisted across reloads. Desktop/mobile browser fixtures and
+owned loopback native pairing cover this source flow; physical Windows, actual
+AI clients and authenticated release distribution remain separate gates.
+
 **Native activation candidate:** [installation transactions](INSTALL_TRANSACTION.md)
 now consolidate locking, pair replacement/recovery and native setup. The adapters
 require new compatible release artifacts before promotion; the old pinned RC

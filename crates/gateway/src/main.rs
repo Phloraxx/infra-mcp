@@ -1276,6 +1276,7 @@ fn build_app(state: AppState) -> Router {
         .route("/api/events", get(dashboard_events))
         .route("/api/enrollments", post(create_enrollment))
         .route("/api/pair/requests", get(list_pending_pairs))
+        .route("/api/pair/{request_id}", get(owner_pair_status))
         .route("/api/pair/{request_id}/approve", post(approve_pair))
         .route("/api/pair/{request_id}/reject", post(reject_pair))
         .route("/api/devices/{device_id}/rename", post(rename_device))
@@ -2193,6 +2194,25 @@ async fn list_pending_pairs(State(state): State<AppState>) -> Response {
         Ok(records) => Json(records).into_response(),
         Err(_) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
     }
+}
+
+async fn owner_pair_status(
+    State(state): State<AppState>,
+    Path(request_id): Path<String>,
+) -> Response {
+    if Uuid::parse_str(&request_id).is_err() {
+        return StatusCode::BAD_REQUEST.into_response();
+    }
+    let mut response = match state.store.owner_pair_status(&request_id) {
+        Ok(record) => Json(record).into_response(),
+        Err(StoreError::PairInvalid) => StatusCode::NOT_FOUND.into_response(),
+        Err(_) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+    };
+    response.headers_mut().insert(
+        header::CACHE_CONTROL,
+        axum::http::HeaderValue::from_static("no-store"),
+    );
+    response
 }
 
 async fn approve_pair(
