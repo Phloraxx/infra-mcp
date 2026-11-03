@@ -165,6 +165,22 @@ try {
   }
   Write-Host "Windows bootstrap smoke PASS: verified preflight, spaces in paths, signed enrollment, resilient Scheduled Task launch, CLI status and live agent handshake"
 
+  # A second profile must not replace, restart or delete the existing task.
+  $Foreign = Join-Path $TempRoot "Foreign Profile"
+  New-Item -ItemType Directory -Path $Foreign | Out-Null
+  Copy-Item -LiteralPath (Join-Path $State "config.json") -Destination (Join-Path $Foreign "config.json")
+  Set-Content -LiteralPath (Join-Path $Foreign "identity.json") -Value 'fixture-metadata-only'
+  $BeforeOwnership = Export-ScheduledTask -TaskName "Infra MCP Agent"
+  foreach ($Action in @('repair','reconnect','uninstall')) {
+    $OutputPath = Join-Path $TempRoot ("foreign-" + $Action)
+    $Attempt = Start-Process -FilePath (Join-Path $Install "infra.exe") -ArgumentList ($Action + ' --state-dir "' + $Foreign + '"') -PassThru -Wait -NoNewWindow -RedirectStandardOutput ($OutputPath + '.out') -RedirectStandardError ($OutputPath + '.err')
+    if ($Attempt.ExitCode -eq 0 -or -not ((Get-Content -LiteralPath ($OutputPath + '.err') -Raw) -match 'startup_owner_mismatch')) {
+      throw "Foreign profile $Action did not refuse the existing startup owner"
+    }
+    if ((Export-ScheduledTask -TaskName "Infra MCP Agent") -ne $BeforeOwnership) { throw "Foreign profile changed startup registration" }
+  }
+  Write-Host "Windows startup ownership PASS: foreign repair/reconnect/uninstall refused; original task preserved"
+
   $FixtureTokenFile = Join-Path $TempRoot "fixture-owner-token"
   [IO.File]::WriteAllText($FixtureTokenFile, $Admin, ([System.Text.UTF8Encoding]::new($false)))
   python (Join-Path $Root "scripts\test-install-safety.py") --binaries (Join-Path $Root "target\release") --live-fixture-root $TempRoot --live-state $State --live-install $Install --mcp-base-url $Base --mcp-token-file $FixtureTokenFile

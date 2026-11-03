@@ -16,7 +16,7 @@
   <section id="signin" class="signin" aria-label="Sign in">
     <div class="signin-showcase">
       <div class="signin-showcase-brand"><img class="brand-mark" src="/assets/logo.png" alt="" width="38" height="38"><strong>infra</strong></div>
-      <div class="signin-showcase-message"><span class="brand-caption">YOUR PRIVATE CONTROL PLANE</span><h1>One place.<br>Every device.</h1><p>Quietly connected. Ready whenever you are.</p></div>
+      <div class="signin-showcase-message"><h1>Your devices.<br>Within reach.</h1><p>Connect your computers. Pick up your work.</p></div>
       <div class="signin-showcase-bottom"><span class="showcase-link"><span class="showcase-link-dot"></span> SECURE BY DESIGN</span><span>PERSONAL INFRASTRUCTURE</span></div>
     </div>
     <div class="signin-main">
@@ -57,7 +57,7 @@
       </div>
     </aside>
 
-    <main>
+    <main id="main-content">
       <header class="topbar">
         <div class="title-block"><span id="breadcrumb-view" class="page-kicker">Your workspace</span><h1 id="view-title">Overview</h1><p id="view-subtitle">Your devices and active work.</p></div>
         <div class="topbar-actions"><button id="add-device" class="primary" aria-label="Add device"><span class="button-plus">+</span> Add device</button></div>
@@ -110,14 +110,19 @@
         </nav>
 
         <div id="device-overview" class="device-pane panel panel-large">
-          <div class="section-head"><div><h2>Capabilities</h2><p>What this agent currently advertises.</p></div><div class="row-actions"><button id="device-status" class="secondary">Check agent</button><button id="device-rename" class="secondary">Rename</button><button id="device-permissions" class="secondary hidden">Check permissions</button></div></div>
+          <section id="device-health" class="connection-health" aria-label="Connection health">
+            <div><h2 id="health-title">Check this computer’s connection</h2><p id="health-guidance" role="status" aria-live="polite"></p></div>
+            <button id="device-status" class="secondary">Check connection</button>
+          </section>
+          <details id="device-diagnostics" class="diagnostics"><summary>Technical details</summary><pre id="device-status-output" class="status-output hidden"></pre></details>
+          <div class="section-head"><div><h2>Tools on this computer</h2><p>Some tools need permission on the computer.</p></div><div class="row-actions"><button id="device-rename" class="secondary">Rename</button><button id="device-permissions" class="secondary hidden">Check permissions</button></div></div>
           <form id="device-rename-form" class="rename-form hidden">
             <label>Device display name<input id="device-rename-name" maxlength="120" autocomplete="off" placeholder="Use computer name"></label>
             <div class="row-actions"><button class="primary" type="submit">Save name</button><button id="device-rename-cancel" type="button" class="secondary">Cancel</button></div>
             <p id="device-rename-error" class="error" role="alert"></p>
           </form>
           <div id="device-capabilities" class="capability-grid"></div>
-          <pre id="device-status-output" class="status-output hidden"></pre>
+          <p id="permission-result" class="permission-result" role="status" aria-live="polite"></p>
         </div>
 
         <div id="device-terminal" class="device-pane panel terminal-launch hidden">

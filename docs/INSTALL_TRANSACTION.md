@@ -8,7 +8,7 @@ rollback or cached-health logic. Normal reruns can use an existing activation-v1
 CLI for native setup; explicit version requests bypass that fast path.
 
 **A compatible new release must be published before these adapters are promoted.**
-The older pinned `v0.1.0-rc.1` artifact predates `--build-info`/native activation;
+The previous `v0.1.0-rc.1` artifact predates `--build-info`/native activation;
 it is rejected before installed files are changed. Development uses `--source-dir`
 or `-SourceDir`. Download SHA-256 sidecars remain integrity checks; first-install
 publisher authentication and OS signing remain separate gates. Signed update
@@ -155,3 +155,21 @@ The shared test client accepts only explicit loopback HTTP origins, ignores prox
 environment settings and refuses redirects. The fixture owner credential is passed
 via an owned temporary file, never command-line arguments or committed content.
 No live Infra connector, production endpoint or daily-use startup is involved.
+
+
+## Startup ownership in v0.1.1-rc.1
+
+Lifecycle commands refuse an existing startup entry belonging to another
+installation/profile, including repair, reconnect and uninstall. Updated commands
+hold a shared per-user OS file lock through registration changes, so participating
+profiles cannot race to replace the fixed registration name. The check is also
+performed before native activation changes files. Unknown/inaccessible Windows
+task queries fail closed. Existing pre-lock CLI versions and manual OS edits do
+not participate in this lock. Custom POSIX registrations which do not match the
+expected owned unit/plist require explicit owner review rather than replacement.
+
+Owned fixtures verify foreign-profile refusal and retained original registration;
+physical standard-user/logon/reboot acceptance remains separate. The bootstrap
+now targets the compatible `v0.1.1-rc.1` developer prerelease; publication of all
+signed platform pairs must finish before promotion. No installed agent is updated
+merely by deploying the gateway.

@@ -79,6 +79,9 @@ pub async fn activate(state: &Path, mut args: Vec<String>) -> Result<ExitCode> {
     if probe(&source.join(activation::AGENT), "infra-agent").await? != env!("CARGO_PKG_VERSION") {
         bail!("candidate CLI/agent package versions do not match");
     }
+    if !no_startup {
+        startup::ensure_owned_registration(&agent, state)?;
+    }
     let transaction = PairTransaction::prepare(&install, state, &source)?;
     if transaction.changed()
         && !no_startup
@@ -142,6 +145,7 @@ async fn stop_owned_if_running(agent: &Path, state: &Path) -> Result<()> {
     if !super::process_alive(runtime.pid) {
         return Ok(());
     }
+    let _registration = startup::owned_registration(agent, state)?;
     if !startup::owns(agent, state)? {
         bail!(
             "startup_owner_mismatch: refusing to stop startup belonging to another install/profile"

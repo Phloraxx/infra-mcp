@@ -1,6 +1,5 @@
 use anyhow::{Context, anyhow};
 use serde::Serialize;
-#[cfg(not(windows))]
 use std::fs;
 use std::time::Duration;
 use std::{
@@ -39,6 +38,7 @@ pub fn sibling_agent_binary() -> anyhow::Result<PathBuf> {
 
 #[cfg(target_os = "linux")]
 pub fn install(agent: &Path, state_dir: &Path) -> anyhow::Result<()> {
+    let _registration = owned_registration(agent, state_dir)?;
     let path = linux_unit_path()?;
     let parent = path
         .parent()
@@ -55,6 +55,7 @@ pub fn install(agent: &Path, state_dir: &Path) -> anyhow::Result<()> {
 
 #[cfg(target_os = "macos")]
 pub fn install(agent: &Path, state_dir: &Path) -> anyhow::Result<()> {
+    let _registration = owned_registration(agent, state_dir)?;
     let path = macos_plist_path()?;
     let parent = path
         .parent()
@@ -79,6 +80,7 @@ pub fn install(agent: &Path, state_dir: &Path) -> anyhow::Result<()> {
 
 #[cfg(windows)]
 pub fn install(agent: &Path, state_dir: &Path) -> anyhow::Result<()> {
+    let _registration = owned_registration(agent, state_dir)?;
     // schtasks /TR is ambiguous for quoted executable + arguments when paths
     // contain spaces: Task Scheduler may preserve the outer quotes inside its
     // *Execute* field and fail to launch the program. Supply structured fields
@@ -395,6 +397,85 @@ pub fn stop() -> anyhow::Result<()> {
 pub fn owns(agent: &Path, state: &Path) -> anyhow::Result<bool> {
     Ok(fs::read_to_string(linux_unit_path()?)? == render_systemd_unit(agent, state))
 }
+
+/// Hold the shared OS-registration lock through the action, across all profiles.
+/// Participating installers never unlink this file; process exit releases it.
+pub fn owned_registration(agent: &Path, state: &Path) -> anyhow::Result<fs::File> {
+    #[cfg(target_os = "linux")]
+    let path = linux_unit_path()?.with_file_name(".infra-startup.lock");
+    #[cfg(target_os = "macos")]
+    let path = macos_plist_path()?.with_file_name(".infra-startup.lock");
+    #[cfg(windows)]
+    let path = PathBuf::from(
+        std::env::var_os("USERPROFILE")
+            .ok_or_else(|| anyhow!("USERPROFILE unavailable; cannot lock startup"))?,
+    )
+    .join(".infra-startup.lock");
+    fs::create_dir_all(
+        path.parent()
+            .ok_or_else(|| anyhow!("startup lock has no parent"))?,
+    )?;
+    let mut options = fs::OpenOptions::new();
+    options.create(true).read(true).write(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let guard = options.open(path)?;
+    guard.try_lock().map_err(|_| anyhow!("startup_busy: another lifecycle command is managing startup; inspect it before retrying"))?;
+    ensure_owned_registration(agent, state)?;
+    Ok(guard)
+}
+
+/// Fixed OS registration names are shared across profiles. Never replace or
+/// control another profile's entry, and never treat an inaccessible query as absent.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+pub fn ensure_owned_registration(agent: &Path, state: &Path) -> anyhow::Result<()> {
+    #[cfg(target_os = "linux")]
+    let path = linux_unit_path()?;
+    #[cfg(target_os = "macos")]
+    let path = macos_plist_path()?;
+    ensure_registration_file(&path, agent, state)
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn ensure_registration_file(path: &Path, agent: &Path, state: &Path) -> anyhow::Result<()> {
+    #[cfg(target_os = "linux")]
+    let expected = render_systemd_unit(agent, state);
+    #[cfg(target_os = "macos")]
+    let expected = render_launchd_plist(agent, state);
+    match fs::read_to_string(path) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Ok(value) if value == expected => Ok(()),
+        Ok(_) => Err(anyhow!(
+            "startup_owner_mismatch: startup belongs to a different installation/profile; use that installation to manage it"
+        )),
+        Err(error) => Err(error.into()),
+    }
+}
+
+#[cfg(windows)]
+pub fn ensure_owned_registration(agent: &Path, state: &Path) -> anyhow::Result<()> {
+    let executable = powershell_single_quote(&agent.to_string_lossy());
+    let arguments = powershell_single_quote(&format!("--state-dir \"{}\"", state.display()));
+    let script = format!(
+        "$ErrorActionPreference='Stop';$tasks=@(Get-ScheduledTask | Where-Object {{ $_.TaskName -eq '{WINDOWS_TASK}' }});if($tasks.Count -eq 0){{exit 0}};if($tasks.Count -ne 1){{exit 2}};$a=@($tasks[0].Actions);if($a.Count -ne 1 -or $a[0].Execute -ne '{executable}' -or $a[0].Arguments -ne '{arguments}'){{exit 2}}"
+    );
+    let output = bounded_output(Command::new("powershell.exe").args([
+        "-NoLogo",
+        "-NoProfile",
+        "-NonInteractive",
+        "-Command",
+        &script,
+    ]))?;
+    if output.exit_code != Some(0) {
+        return Err(anyhow!(
+            "startup_owner_mismatch: startup is inaccessible or belongs to a different installation/profile; use its owning installation to manage it"
+        ));
+    }
+    Ok(())
+}
 #[cfg(target_os = "macos")]
 pub fn owns(agent: &Path, state: &Path) -> anyhow::Result<bool> {
     Ok(fs::read_to_string(macos_plist_path()?)? == render_launchd_plist(agent, state))
@@ -494,6 +575,26 @@ mod tests {
         assert!(unit.contains("ExecStart=\"/home/example/Infra Agent/infra-agent\" --state-dir \"/home/example/state dir\""));
         assert!(unit.contains("Restart=always"));
         assert!(unit.contains("KillMode=process"));
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[test]
+    fn foreign_registration_is_preserved_and_owned_registration_is_accepted() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("registration");
+        let agent = Path::new("/example/infra-agent");
+        let state = Path::new("/example/profile");
+        ensure_registration_file(&path, agent, state).unwrap();
+        #[cfg(target_os = "linux")]
+        let owned = render_systemd_unit(agent, state);
+        #[cfg(target_os = "macos")]
+        let owned = render_launchd_plist(agent, state);
+        fs::write(&path, &owned).unwrap();
+        ensure_registration_file(&path, agent, state).unwrap();
+        let error =
+            ensure_registration_file(&path, agent, Path::new("/other/profile")).unwrap_err();
+        assert!(error.to_string().contains("startup_owner_mismatch"));
+        assert_eq!(fs::read_to_string(path).unwrap(), owned);
     }
 
     #[test]

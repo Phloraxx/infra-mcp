@@ -2,7 +2,7 @@
 set -eu
 
 REPO="Phloraxx/infra-mcp"
-VERSION="v0.1.0-rc.1"
+VERSION="v0.1.1-rc.1"
 VERSION_REQUESTED=0
 # Prereleases are excluded by GitHub releases/latest. Pin the published test tag.
 GATEWAY=""
@@ -24,7 +24,7 @@ Options:
   --gateway WS_URL        Advanced: alternate gateway; default: existing config or Infra public gateway
   --code CODE             Legacy manual enrollment only
   --name NAME             Legacy manual enrollment label
-  --version VERSION        GitHub release tag; default: v0.1.0-rc.1 (test prerelease)
+  --version VERSION        GitHub release tag; default: v0.1.1-rc.1 (test prerelease)
   --install-dir PATH       default: ~/.local/bin
   --state-dir PATH         default: ~/.infra-mcp-v1
   --source-dir PATH        copy locally built infra + infra-agent (development)

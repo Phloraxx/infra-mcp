@@ -19,8 +19,8 @@ AI clients and authenticated release distribution remain separate gates.
 
 **Native activation candidate:** [installation transactions](INSTALL_TRANSACTION.md)
 now consolidate locking, pair replacement/recovery and native setup. The adapters
-require new compatible release artifacts before promotion; the old pinned RC
-does not implement this interface. This is candidate code, not deployed setup.
+target `v0.1.1-rc.1`; all compatible signed artifacts must be published before
+promotion. The previous RC does not implement this interface. This is candidate code, not deployed setup.
 
 **2 November 2026 candidate update:** fresh nonce/status roundtrip verification
 replaces the cached-online/PID shortcut in native setup and repair. See

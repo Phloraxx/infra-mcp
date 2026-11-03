@@ -685,3 +685,55 @@ dialog{background:#191f29;color:#e7eaf3;border:1px solid #344052;box-shadow:0 32
 #copy-quick-install{margin-top:10px}
 #pair-result.pair-verified{padding:16px;border:1px solid #345d4a;border-radius:9px;background:#192b24;color:var(--good);font-size:14px;line-height:1.6}
 #pair-actions{flex-wrap:wrap}
+
+/* Release usability: readable status, one useful next action, labelled phone navigation. */
+:root{--muted:#a5afbe;--subtle:#8f9aab}
+body{font-size:14px}
+button,a,input,select,summary{touch-action:manipulation}
+main{padding-top:38px}
+.topbar{margin-bottom:30px}
+.page-kicker,.nav-label,.overview-intro{display:none!important}
+.title-block p,.overview-stack .section-head p,.device-meta,.session-meta{font-size:12px;color:var(--muted)}
+.summary-grid{padding:20px 0;margin-bottom:22px}
+.summary-card strong{margin-top:10px;font-size:32px;font-variant-numeric:tabular-nums}
+.attention-row .secondary{margin-top:12px;min-height:44px}
+.connection-health{display:flex;justify-content:space-between;align-items:center;gap:24px;padding:20px;border:1px solid var(--line-strong);border-radius:10px;background:var(--surface-soft)}
+.connection-health h2{font-size:18px;letter-spacing:-.025em}
+.connection-health p{max-width:66ch;margin-top:8px;font-size:14px;line-height:1.6;color:#bcc6d5}
+.connection-health button{flex-shrink:0;min-height:44px}
+.connection-health.verified{border-color:#426b55;background:#192b24}
+.connection-health.verified h2{color:#a5dbb9}
+.diagnostics{margin:12px 0 28px;padding:10px 0;color:var(--muted)}
+.diagnostics summary{cursor:pointer;min-height:32px;line-height:32px}
+.permission-result{white-space:pre-line;font-size:14px;line-height:1.7;color:var(--ink);margin-top:16px}
+.permission-result:empty{display:none}
+.first-device{text-align:left;padding:12px 0 20px}
+.first-device>.ui-icon{height:40px;width:40px;color:var(--accent);margin-bottom:16px}
+.first-device h3{font-size:20px}.first-device p{max-width:42ch;line-height:1.7;margin:10px 0 20px}
+.signin-showcase{background:#151a20 url('/assets/workspace.png') center bottom/100% auto no-repeat;justify-content:flex-start}
+.signin-showcase:after,.signin-showcase:before{display:none}
+.signin-showcase-message{margin:90px 0 auto}
+.signin-showcase h1{font-size:clamp(46px,5vw,72px);line-height:1.1;margin:0 0 20px}
+.signin-showcase-message p{font-size:16px;color:#c1c9d3}
+.signin-showcase-bottom{margin-top:auto;font-family:inherit;font-size:11px;letter-spacing:0}
+.signin-kicker,.brand-workspace{display:none!important}
+.signin-subtitle{font-size:14px}
+dialog{overscroll-behavior:contain}
+@media(max-width:900px){.connection-health{align-items:flex-start;flex-direction:column;gap:16px}.connection-health button{width:100%}}
+@media(max-width:650px){
+  .sidebar{height:auto;display:grid;grid-template-columns:repeat(5,minmax(0,1fr));grid-template-areas:'brand brand brand brand brand' 'primary primary primary primary settings';padding:10px 12px 8px;gap:8px;overflow:visible}
+  .sidebar .brand{grid-area:brand;margin:0;padding:4px 8px;justify-self:start}
+  .sidebar .primary-nav{grid-area:primary;display:grid;grid-template-columns:repeat(4,minmax(0,1fr))}
+  .sidebar>nav:not(.primary-nav){grid-area:settings;display:grid;grid-template-columns:minmax(0,1fr)}
+  .sidebar .nav{width:100%;min-width:0;min-height:52px;padding:6px 2px;gap:5px;flex-direction:column;font-size:10px!important}
+  .sidebar .nav>span:not(.nav-icon){display:block!important;white-space:nowrap;font-size:10px}
+  .sidebar .nav-divider,.sidebar .sidebar-foot{display:none!important}
+  main{padding:24px 18px 60px}.topbar{margin-bottom:24px;gap:14px}.title-block h1{font-size:30px}
+  .summary-grid{padding:0}.summary-card{padding:14px!important}.summary-card strong{font-size:28px;margin-top:7px}
+  .connection-health{padding:16px}.connection-health p{font-size:14px}
+  .primary,.secondary,.ghost-button,.icon-button,.tab{min-height:44px}
+  .icon-button{min-width:44px}
+}
+.signin-showcase h1{letter-spacing:-.035em}
+.overview-devices-panel .device-meta,.overview-sessions-panel .session-meta,.attention-row .session-meta{font-size:12px;color:var(--muted)}
+@media(max-width:650px){.sidebar .nav>span:not(.nav-icon){font-size:11px}.sidebar .nav{font-size:11px!important}}

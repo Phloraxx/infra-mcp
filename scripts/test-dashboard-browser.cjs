@@ -20,7 +20,7 @@ let sessions = [
   {id:transferId,kind:'transfer',status:'ready',device_id:'online',device_name:badName,device_online:true,started_at_unix_ms:Date.now()}
 ];
 let overviewMode=null, overviewCalls=0, hangEnrollment=false, enrollmentCalls=0;
-let fileListMode='legacy',failFilePage=false,filePageDelay=0;
+let fileListMode='legacy',failFilePage=false,filePageDelay=0,statusReply='ok';
 const pairId='00000000-0000-4000-8000-000000000004',pairDeviceId='00000000-0000-4000-8000-000000000005';
 let pairState='pending',pairApproveState='approved',pairOnline=false,pairReply='ok',pairDelay=0,hangApproval=false,approvalCalls=0,pairChecks=0;
 const pairRecord=()=>({request_id:pairId,device_name:'Windows Test PC',platform:'windows',arch:'x86_64',verification_code:'482731',state:pairState,device_id:pairState==='approved'?pairDeviceId:null});
@@ -60,7 +60,7 @@ const server=http.createServer(async(req,res)=>{
       let body='';for await(const chunk of req)body+=chunk;
       const op=JSON.parse(body);operations.push(op);const a=op.action;
       const ok=value=>send({status:'ok',body:value});
-      if(op.op==='status')return ok({pid:100,protocol:1});
+      if(op.op==='status')return statusReply==='ok'?ok({pid:100,protocol:1}):send({status:'deadline_exceeded'});
       if(op.op==='desktop'&&a.action==='permissions')return ok({accessibility:{granted:false},screen_recording:{granted:true},ready:false});
       if(op.op==='terminal'){
         if(a.action==='read'){
@@ -103,7 +103,7 @@ const server=http.createServer(async(req,res)=>{
     }
     return send({error:'not found'},404);
   }
-  const routes={'/logo.png':'assets/logo.png','/assets/logo.png':'assets/logo.png','/favicon.ico':'assets/favicon.ico','/favicon.png':'assets/favicon.png','/apple-touch-icon.png':'assets/apple-touch-icon.png','/':'index.html','/app.js':'app.js','/styles.css':'styles.css','/vendor/xterm.js':'vendor/xterm.js','/vendor/xterm.css':'vendor/xterm.css'};
+  const routes={'/logo.png':'assets/logo.png','/assets/logo.png':'assets/logo.png','/assets/workspace.png':'assets/workspace.png','/favicon.ico':'assets/favicon.ico','/favicon.png':'assets/favicon.png','/apple-touch-icon.png':'assets/apple-touch-icon.png','/':'index.html','/app.js':'app.js','/styles.css':'styles.css','/vendor/xterm.js':'vendor/xterm.js','/vendor/xterm.css':'vendor/xterm.css'};
   const name=routes[req.url];if(!name){res.writeHead(404);res.end();return;}
   const type=name.endsWith('.js')?'text/javascript':name.endsWith('.css')?'text/css':name.endsWith('.png')?'image/png':name.endsWith('.ico')?'image/x-icon':'text/html';
   res.writeHead(200,{'Content-Type':type,'Content-Security-Policy':"default-src 'self'; connect-src 'self'; img-src 'self' data:; style-src 'self' 'unsafe-inline'; script-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'"});res.end(fs.readFileSync(path.join(root,name)));
@@ -120,6 +120,7 @@ const server=http.createServer(async(req,res)=>{
     assert(await page.locator('.signin-showcase-brand img.brand-mark').evaluate(img=>img.complete&&img.naturalWidth>0),'Infra logo did not load');
     assert.equal(await page.locator('.signin-showcase-brand img.brand-mark').getAttribute('src'),'/assets/logo.png');
     assert.equal(await page.locator('.signin-main .brand-mark').count(),1);
+    const art=await page.request.get(base+'/assets/workspace.png');assert.equal(art.status(),200);assert.match(art.headers()['content-type'],/image\/png/);
 
 
     const darkMetrics=await page.evaluate(()=>{
@@ -230,11 +231,17 @@ const server=http.createServer(async(req,res)=>{
     await page.locator('#device-rename-form button[type="submit"]').click();
     await page.waitForFunction(()=>document.querySelector('#device-rename-form').classList.contains('hidden'));
     assert.equal(await page.locator('#view-title').textContent(),'Developer Mac');
-    await page.locator('#device-status').click();await page.locator('#device-status-output').waitFor();
+    await page.locator('#device-status').click();await page.waitForFunction(()=>document.querySelector('#health-title').textContent==='Connection verified');
+    await page.locator('#device-diagnostics summary').click();await page.locator('#device-status-output').waitFor();
     assert.match(await page.locator('#device-status-output').textContent(),/PID: 100/);
+    statusReply='failed';await page.locator('#device-status').click();
+    await page.waitForFunction(()=>document.querySelector('#health-title').textContent==='Could not verify the connection');
+    assert.equal(await page.locator('#device-health.verified').count(),0);
+    statusReply='ok';await page.locator('#device-status').click();
+    await page.waitForFunction(()=>document.querySelector('#health-title').textContent==='Connection verified');
     devices[0].device_name=badName;
     await page.locator('#device-permissions').click();
-    await page.waitForFunction(()=>document.querySelector('#device-status-output').textContent.includes('Needs permission'));
+    await page.waitForFunction(()=>document.querySelector('#permission-result').textContent.includes('Needs permission'));
     await page.locator('[data-device-tab="files"]').click();await page.locator('#files-browse button').first().click();
     await page.locator('[data-file-path]').waitFor();
     assert.equal(await page.locator('#files-list [data-file-path] svg.ui-icon').count(),1);await page.locator('[data-file-path]').click();await page.locator('#file-preview:not(.hidden)').waitFor();
@@ -351,6 +358,7 @@ const server=http.createServer(async(req,res)=>{
 
       await page.setViewportSize({width,height:810});
       await page.goto(base+'/#overview');
+      if(width<=650){assert(await page.locator('.sidebar .nav').first().evaluate(node=>node.getBoundingClientRect().height>=44));assert(await page.locator('.sidebar .nav>span').last().isVisible());}
       await page.locator('#overview-devices .device-row').first().waitFor();
       assert(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth+1),'Overview overflowed at '+width+'px: '+JSON.stringify(await page.evaluate(()=>[...document.querySelectorAll('body *')].filter(e=>e.getBoundingClientRect().right>innerWidth+1).slice(0,16).map(e=>[e.tagName,e.id,e.className,Math.round(e.getBoundingClientRect().right),e.parentElement?.outerHTML.slice(0,260)]))));
       await page.goto(base+'/#devices');

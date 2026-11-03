@@ -1299,6 +1299,7 @@ fn build_app(state: AppState) -> Router {
         .route("/vendor/xterm.js", get(dashboard_terminal_js))
         .route("/vendor/xterm.css", get(dashboard_terminal_css))
         .route("/assets/logo.png", get(dashboard_logo))
+        .route("/assets/workspace.png", get(dashboard_workspace))
         .route("/favicon.png", get(dashboard_favicon))
         .route("/favicon.ico", get(dashboard_favicon_ico))
         .route("/apple-touch-icon.png", get(dashboard_touch_icon))
@@ -1356,6 +1357,12 @@ async fn dashboard_css() -> Response {
 async fn dashboard_logo() -> Response {
     image_response(
         include_bytes!("../../../apps/dashboard/assets/logo.png"),
+        "image/png",
+    )
+}
+async fn dashboard_workspace() -> Response {
+    image_response(
+        include_bytes!("../../../apps/dashboard/assets/workspace.png"),
         "image/png",
     )
 }

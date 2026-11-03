@@ -176,6 +176,8 @@ async fn run() -> anyhow::Result<ExitCode> {
         }
         "reconnect" => {
             ensure_no_args(&args)?;
+            let _registration =
+                startup::owned_registration(&startup::sibling_agent_binary()?, &state_dir)?;
             let previous_runtime = read_runtime(&state_dir).ok().flatten();
             startup::restart()?;
             let runtime = wait_for_online_reconnect(
@@ -209,6 +211,8 @@ async fn run() -> anyhow::Result<ExitCode> {
                 .cloned()
                 .collect::<Vec<_>>();
             ensure_no_args(&unknown)?;
+            let _registration =
+                startup::owned_registration(&startup::sibling_agent_binary()?, &state_dir)?;
             let stopped_workers = cleanup_persistent_workers(&state_dir);
             startup::uninstall()?;
             if remove_state && state_dir.exists() {

@@ -139,3 +139,16 @@ repair and internal transaction rollback remain supported. Release automation
 checks tags/build metadata and exact platform inventory/checksums before signing,
 and records the tagged source commit. See [RELEASE_SIGNING.md](RELEASE_SIGNING.md)
 for replay limits, fixture acceptance and first-install distribution gates.
+
+
+## 3 November release candidate
+
+`v0.1.1-rc.1` assembles the stabilization and pairing-completion work with
+actionable dashboard connection checks, readable mobile navigation, an original
+ChatGPT Images sign-in asset, and guarded startup ownership across profiles.
+Native artifacts and bootstrap defaults share the same SemVer. Promotion requires
+green integration checks, a complete signed release, a fresh SQLite backup, an
+isolated copied-database smoke and a guarded gateway rollout with rollback.
+Gateway replacement does not upgrade enrolled agents or certify OS signing, first
+bootstrap provenance or physical lifecycle behavior. Live deployment requires
+explicit session authorization; ordinary development remains on owned fixtures.
