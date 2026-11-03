@@ -744,8 +744,10 @@ mod tests {
             r#"powershell.exe -NoLogo -NoProfile -NonInteractive -File "{}" "value with spaces & literal" && echo shell-operator-ok"#,
             script.display()
         );
-        let OperationResult::Ok { body } = exec(command, None, 10_000).await else {
-            panic!("quoted Windows shell command failed");
+        // This checks quoting, not PowerShell cold-start latency on hosted CI.
+        let result = exec(command, None, 30_000).await;
+        let OperationResult::Ok { body } = result else {
+            panic!("quoted Windows shell command failed: {result:?}");
         };
         let output: ExecOutput = serde_json::from_value(body).unwrap();
         assert_eq!(output.exit_code, Some(0), "{}", output.stderr);
