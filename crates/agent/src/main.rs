@@ -697,11 +697,7 @@ async fn exec(command: String, cwd: Option<String>, timeout_ms: u64) -> Operatio
         };
     }
     #[cfg(windows)]
-    let mut cmd = {
-        let mut c = Command::new("cmd.exe");
-        c.args(["/D", "/S", "/C", &command]);
-        c
-    };
+    let mut cmd = Command::from(command_runner::windows_shell(&command));
     #[cfg(not(windows))]
     let mut cmd = {
         let mut c = Command::new("/bin/sh");
@@ -736,6 +732,25 @@ mod tests {
         assert_eq!(output.exit_code, Some(0));
         assert!(output.stdout.contains("infra-v1-test"));
         assert!(!output.truncated);
+    }
+
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn exec_preserves_quoted_paths_arguments_and_shell_operators() {
+        let root = tempfile::tempdir().unwrap();
+        let script = root.path().join("quoted path with spaces.ps1");
+        std::fs::write(&script, "param([string]$Value)\nWrite-Output $Value\n").unwrap();
+        let command = format!(
+            r#"powershell.exe -NoLogo -NoProfile -NonInteractive -File "{}" "value with spaces & literal" && echo shell-operator-ok"#,
+            script.display()
+        );
+        let OperationResult::Ok { body } = exec(command, None, 10_000).await else {
+            panic!("quoted Windows shell command failed");
+        };
+        let output: ExecOutput = serde_json::from_value(body).unwrap();
+        assert_eq!(output.exit_code, Some(0), "{}", output.stderr);
+        assert!(output.stdout.contains("value with spaces & literal"));
+        assert!(output.stdout.contains("shell-operator-ok"));
     }
 
     #[cfg(unix)]

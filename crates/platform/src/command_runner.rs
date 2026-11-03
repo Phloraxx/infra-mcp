@@ -13,6 +13,18 @@ use tokio::io::{AsyncRead, AsyncReadExt};
 
 const CLEANUP_TIMEOUT: Duration = Duration::from_secs(2);
 
+/// `script` is an intentional shell program, not a single executable argument.
+/// cmd.exe does not decode the C-runtime escaping applied by `Command::arg`.
+#[cfg(windows)]
+pub fn windows_shell(script: &str) -> Command {
+    use std::os::windows::process::CommandExt;
+    let mut command = Command::new("cmd.exe");
+    command.args(["/D", "/S", "/C"]);
+    // /S removes this outer pair; preserve the caller's internal shell syntax.
+    command.raw_arg(format!("\"{script}\""));
+    command
+}
+
 #[derive(Debug, Serialize)]
 pub struct CommandOutput {
     pub exit_code: Option<i32>,

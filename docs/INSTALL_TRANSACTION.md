@@ -132,6 +132,16 @@ compares both original hashes and exact identity bytes, obtains fresh signed
 connection evidence, and executes a new command through MCP after recovery.
 These are transport/tool-path tests, not actual AI model or physical-PC acceptance.
 
+The first hosted run exposed quoted-path corruption in Windows MCP exec before
+the update started. Exec and job commands now preserve the intentional shell
+program with `cmd /D /S /C` and one raw outer quote pair, following
+[Rust's cmd.exe guidance](https://doc.rust-lang.org/stable/std/os/windows/process/trait.CommandExt.html#tymethod.raw_arg).
+This applies only to user-requested shell programs; structured executable calls
+still pass individual arguments. A Windows regression test checks a PowerShell
+script path and argument containing spaces, a quoted literal ampersand, and an
+intentional shell operator. Terminal command-builder quoting is separate from
+this fix; the update fixture types its command into an already open shell.
+
 The shared test client accepts only explicit loopback HTTP origins, ignores proxy
 environment settings and refuses redirects. The fixture owner credential is passed
 via an owned temporary file, never command-line arguments or committed content.
