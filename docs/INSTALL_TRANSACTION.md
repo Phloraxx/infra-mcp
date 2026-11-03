@@ -68,14 +68,23 @@ or change internal transaction rollback.
 Unix waits for native activation. Windows cannot replace its currently executing
 CLI reliably, so a small local PowerShell relay waits for that parent to exit,
 runs the same locked native operation, records the result and cleans the source
-directory. A bounded short launcher uses the ordinary `Open` shell verb to start
-the relay without inherited capture pipes; it does not request elevation. Only
-that launcher uses root-process ownership because the relay deliberately outlives
-it. Normal execution/startup commands retain process-tree ownership. See
-[Start-Process](https://learn.microsoft.com/en-us/powershell/module/microsoft.powershell.management/start-process?view=powershell-5.1).
-Direct Rust spawning with null stdio still inherits other inheritable Windows
-handles ([Rust 1.99 source](https://github.com/rust-lang/rust/blob/1.99.0/library/std/src/sys/process/windows.rs));
-CI exposed the resulting capture-EOF wait after the updater had printed pending. It does not implement another swap/rollback state machine.
+directory. A bounded short PowerShell launcher calls local `Win32_Process.Create`
+through CIM, which brokers the relay outside the MCP caller's Job Object and
+without inherited capture pipes. No remote CIM connection, elevation verb, new
+service/task, or job breakaway permission is used. The relay checks its user SID
+and effective administrator status against its caller before native activation;
+a mismatch fails closed and the receipt records `context_verified: false`.
+The short launcher uses normal process-tree ownership; the old root-only runner
+exception is removed. See Microsoft's [Job Objects](https://learn.microsoft.com/en-us/windows/win32/procthread/job-objects)
+and [process creation](https://learn.microsoft.com/en-us/windows/win32/cimwin32prov/create-method-in-class-win32-process).
+Local CIM availability and permissions are now an explicit dependency; failure
+returns an uncertain handoff with inspection guidance, never an elevated fallback.
+The relay is UTF-8 with a BOM for Windows PowerShell 5.1 Unicode paths.
+
+Direct Rust spawning with null stdio previously leaked capture handles. The
+subsequent shell-verb relay passed direct invocation but died after MCP exec
+returned. The caller-lifetime fixture exposed this second failure. This handoff
+still uses the existing native swap/rollback state machine.
 
 Windows returns **pending**, not completed. `infra status --json` adds
 `update_status` for the latest request. Per-request receipts live under

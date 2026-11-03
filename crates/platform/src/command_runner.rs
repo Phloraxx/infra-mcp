@@ -82,30 +82,9 @@ async fn capture<R: AsyncRead + Unpin>(
 /// One deadline covers both command completion and pipe EOF. Reader futures are
 /// owned here, so timeout/cancellation closes pipes without detached reader tasks.
 pub async fn run_async(
-    command: tokio::process::Command,
-    timeout: Duration,
-    limit: usize,
-) -> Result<CommandOutput, CommandError> {
-    run_async_inner(command, timeout, limit, true).await
-}
-
-/// Capture a short Windows launcher which deliberately releases a background
-/// process. Only the launcher is owned; its descendants must have separate I/O.
-/// Normal commands must use `run_async` for process-tree termination.
-#[cfg(windows)]
-pub async fn run_detached_launcher(
-    command: tokio::process::Command,
-    timeout: Duration,
-    limit: usize,
-) -> Result<CommandOutput, CommandError> {
-    run_async_inner(command, timeout, limit, false).await
-}
-
-async fn run_async_inner(
     mut command: tokio::process::Command,
     timeout: Duration,
     limit: usize,
-    own_tree: bool,
 ) -> Result<CommandOutput, CommandError> {
     command
         .stdin(Stdio::null())
@@ -114,13 +93,9 @@ async fn run_async_inner(
     let mut wrapped = CommandWrap::from(command);
     wrapped.wrap(KillOnDrop);
     #[cfg(unix)]
-    if own_tree {
-        wrapped.wrap(ProcessGroup::leader());
-    }
+    wrapped.wrap(ProcessGroup::leader());
     #[cfg(windows)]
-    if own_tree {
-        wrapped.wrap(JobObject);
-    }
+    wrapped.wrap(JobObject);
     let mut child = OwnedChild(
         wrapped
             .spawn()

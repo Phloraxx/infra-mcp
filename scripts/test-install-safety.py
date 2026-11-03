@@ -135,6 +135,7 @@ def live_updates(args, root, candidate, info):
                         assert fixture_process_alive(receipt['owner_pid']), f'{mode}: activation relay died without a completion receipt'
                     time.sleep(.2)
                 assert receipt.get('phase') == 'failed', (mode, receipt.get('phase'))
+                assert receipt.get('context_verified') is True, f'{mode}: relay identity/privilege context was not verified'
                 log = (profile / f'update-{update_id}.log').read_bytes().decode('utf-8', errors='replace')
                 assert 'connection_unverified' in log and 'previous pair restored' in log, (mode, log)
                 assert hashes(target) == original and (profile / 'identity.json').read_bytes() == identity
