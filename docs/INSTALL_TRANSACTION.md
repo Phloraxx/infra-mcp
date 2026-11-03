@@ -82,7 +82,9 @@ Windows returns **pending**, not completed. `infra status --json` adds
 `state/updates`; old completions cannot overwrite the newest request. A missing
 owner or stale pending receipt is `outcome_unknown`, never automatic success or
 automatic replay. Receipt history and relay logs are retained for diagnosis;
-retention cleanup and real MCP/terminal helper-lifetime acceptance remain open.
+retention cleanup remains open. MCP/terminal helper-lifetime acceptance is now
+exercised by the owned Windows fixture below; record its hosted result before
+claiming that boundary passes.
 
 Failure after activation attempts restoration and fresh signed verification of
 the previous pair. A restored pre-readiness version may remain unverified; the
@@ -113,3 +115,24 @@ No live host, daily-use profile or excluded production gateway is used by these
 tests. Physical Windows standard-user/login/reboot/sleep/network, permissions,
 first-install trust, rollback across actual released versions and burn-in remain
 release gates.
+
+
+## MCP caller lifetime acceptance
+
+The Windows-owned fixture runs the same signed bad-agent update three ways:
+local CLI capture, gateway MCP `exec`, and gateway MCP `terminal`. It closes the
+terminal and verifies its worker exits while activation remains pending. The
+fixture binary delays only its second build-info probe to leave time for caller
+cleanup before controller stop; production binaries have no test delay or mode.
+
+Each attempt is issued once. An interrupted exec response may report uncertain
+outcome and must not request automatic replay. An independent observer checks the
+per-request receipt, detects a vanished relay, verifies failed-readiness rollback,
+compares both original hashes and exact identity bytes, obtains fresh signed
+connection evidence, and executes a new command through MCP after recovery.
+These are transport/tool-path tests, not actual AI model or physical-PC acceptance.
+
+The shared test client accepts only explicit loopback HTTP origins, ignores proxy
+environment settings and refuses redirects. The fixture owner credential is passed
+via an owned temporary file, never command-line arguments or committed content.
+No live Infra connector, production endpoint or daily-use startup is involved.
