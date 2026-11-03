@@ -40,7 +40,7 @@ const server=http.createServer(async(req,res)=>{
     if(!authenticated)return send({error:'Authentication required'},401);
     if(req.url==='/api/devices/online/rename'&&req.method==='POST'){let body='';for await(const chunk of req)body+=chunk;devices[0].device_name=JSON.parse(body).name||badName;return send({ok:true});}
     if(req.url==='/api/pair/requests'&&req.method==='GET')return send(pairState==='pending'?[pairRecord()]:[]);
-    if(req.url==='/api/pair/'+pairId&&req.method==='GET')return send(pairRecord());
+    if(req.url==='/api/pair/'+pairId&&req.method==='GET')return pairState==='missing'?send({error:'Pairing request unavailable'},404):send(pairRecord());
     if(req.url==='/api/pair/'+pairId+'/approve'&&req.method==='POST'){approvalCalls++;pairState=pairApproveState;if(hangApproval)return hang(res);return send(pairRecord());}
     if(req.url==='/api/pair/00000000-0000-4000-8000-000000000004/reject'&&req.method==='POST')return send({ok:true});
     if(req.url==='/api/enrollments'&&req.method==='POST'){enrollmentCalls++;if(hangEnrollment)return hang(res);return send({code:'fixture-5-minute-code',expires_at_unix_ms:Date.now()+300000});}
@@ -435,6 +435,12 @@ const server=http.createServer(async(req,res)=>{
       pairApproveState='expired';
       await pairPage.locator('[data-pair-action="approve"]').click();
       await pairPage.waitForFunction(()=>document.querySelector('#pair-result').textContent.includes('pairing request expired'));
+      assert.equal(await pairPage.locator('#pair-open').isVisible(),false);
+
+      pairState='pending';pairApproveState='missing';
+      await pairPage.locator('#pair-another').click();
+      await pairPage.locator('[data-pair-action="approve"]').click();
+      await pairPage.waitForFunction(()=>document.querySelector('#pair-result').textContent.includes('request is no longer available'));
       assert.equal(await pairPage.locator('#pair-open').isVisible(),false);
 
       // A late successful status from a closed dialog cannot verify a reopened

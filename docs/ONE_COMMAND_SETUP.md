@@ -10,7 +10,7 @@ cannot complete setup. Device-side pairing status still requires its signing key
 
 Connection observation has a 90-second wait window and the existing ten-second
 budget for each in-flight request. Failure offers **Check connection again**;
-unrecorded or expired approval explains how to review/resume pairing. Successful
+unrecorded, expired or unavailable approval explains how to review/resume pairing. Successful
 proof expires after 30 seconds. Dialog close aborts reads, reopening resumes only
 observation, and sign-out clears private progress. Progress is held only in the
 current page, not persisted across reloads. Desktop/mobile browser fixtures and

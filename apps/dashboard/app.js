@@ -95,7 +95,7 @@ async function jsonFetch(url,options={}){
       if(epoch===state.authEpoch){clearPrivateViews();showSignedOut();}
       const error=new Error('Your session ended. Sign in again.');error.status=401;throw error;
     }
-    if(!response.ok){const text=await response.text();let message=text;try{message=JSON.parse(text).error||text;}catch{}throw new Error(message||`HTTP ${response.status}`);}
+    if(!response.ok){const text=await response.text();let message=text;try{message=JSON.parse(text).error||text;}catch{}const error=new Error(message||`HTTP ${response.status}`);error.status=response.status;throw error;}
     return response.status===204?null:response.json();
   });
 }
@@ -280,6 +280,7 @@ function renderPairFlow(){
     verified:`${name} · Connection verified. The computer responded to a fresh check.`,
     paused:flow.approved?'Approved, but the connection could not be verified. Keep Infra running on that computer, check its network, then check again.':'Approval could not be confirmed. Check again to inspect the request without sending another approval.',
     expired:'This pairing request expired. Run setup again on that computer, then choose Add another device to review its request.',
+    missing:'This pairing request is no longer available. Run setup again on that computer, then choose Add another device to review a new request.',
     pending:'Approval has not been recorded. Review the pairing request and compare the codes on both screens before approving.',
     stale:'The last connection check expired. Check the connection again before opening the device.'};
   $('#pair-result').textContent=messages[flow.phase]||messages.observing;
@@ -313,9 +314,11 @@ async function refreshPendingPairs(run){
       if(!pairProofFresh(flow)){flow.phase='stale';renderPairFlow();}
       return;
     }
-    if(flow.phase==='approving'||['paused','expired','stale','pending'].includes(flow.phase))return;
+    if(flow.phase==='approving'||['paused','expired','missing','stale','pending'].includes(flow.phase))return;
     if(pairWaitExpired(flow)){flow.phase='paused';renderPairFlow();return;}
-    const record=await jsonFetch('/api/pair/'+encodeURIComponent(flow.id),options);
+    let record;
+    try{record=await jsonFetch('/api/pair/'+encodeURIComponent(flow.id),options);}
+    catch(error){if(current()&&error.status===404){flow.phase='missing';renderPairFlow();return;}throw error;}
     if(!current())return;
     if(record.request_id!==flow.id)throw new Error('Pairing request mismatch');
     if(record.state==='expired'){flow.phase='expired';renderPairFlow();return;}
