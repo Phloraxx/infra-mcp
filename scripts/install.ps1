@@ -2,7 +2,7 @@ param(
   [string]$Gateway = "",
   [string]$Code = "",
   [string]$Name = "",
-  [string]$Version = "v0.1.1-rc.1", # Published test tag; GitHub latest excludes prereleases.
+  [string]$Version = "v0.1.1-rc.2", # Published test tag; GitHub latest excludes prereleases.
   [string]$InstallDir = "$env:LOCALAPPDATA\Infra\bin",
   [string]$StateDir = "$env:USERPROFILE\.infra-mcp-v1",
   [string]$SourceDir = "",

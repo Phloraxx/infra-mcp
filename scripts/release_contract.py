@@ -6,6 +6,7 @@ import json
 import os
 from pathlib import Path
 import subprocess
+import tomllib
 from functools import lru_cache
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -15,13 +16,25 @@ TARGETS = ('linux-x86_64', 'linux-aarch64', 'macos-x86_64',
 
 @lru_cache(maxsize=1)
 def package_version():
-    result = subprocess.run(['cargo', 'metadata', '--manifest-path', str(ROOT / 'Cargo.toml'),
-                             '--locked', '--no-deps', '--format-version', '1'],
-                            capture_output=True, text=True, timeout=30)
-    if result.returncode:
-        raise ValueError('cannot load Cargo package metadata; ensure the repository toolchain and lockfile are available')
-    packages = json.loads(result.stdout)['packages']
-    return next(package['version'] for package in packages if package['name'] == 'infra-cli')
+    # Signing must be independent of a warm Cargo cache or registry network access.
+    # Validate the workspace, every local crate, and the checked-in lockfile.
+    with (ROOT / 'Cargo.toml').open('rb') as source:
+        workspace = tomllib.load(source)
+    version = workspace['workspace']['package']['version']
+    with (ROOT / 'Cargo.lock').open('rb') as source:
+        lockfile = tomllib.load(source)
+    locked = {}
+    for package in lockfile['package']:
+        locked.setdefault(package['name'], []).append(package['version'])
+    for path in sorted((ROOT / 'crates').glob('*/Cargo.toml')):
+        with path.open('rb') as source:
+            package = tomllib.load(source)['package']
+        name = package['name']
+        if package.get('version') != {'workspace': True}:
+            raise ValueError(f'{name} does not inherit the workspace version')
+        if locked.get(name) != [version]:
+            raise ValueError(f'{name} lockfile version differs from workspace version')
+    return version
 
 
 def validate_tag(tag):

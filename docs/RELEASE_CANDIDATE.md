@@ -1,4 +1,4 @@
-# Infra v0.1.1-rc.1 Release Candidate — native desktop agents
+# Infra v0.1.1-rc.2 Release Candidate — native desktop agents
 
 This is an **early test release**, not a recommended production installation.
 
