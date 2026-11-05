@@ -52,7 +52,7 @@ jobs:
           $InfraPython = if ($IsWindows) { 'python' } else { 'python3' }
           & $InfraPython scripts/release_contract.py --tag "$env:GITHUB_REF_NAME"
           if ($LASTEXITCODE -ne 0) { throw "Release tag/package version check failed" }
-      - run: cargo build --release -p infra-agent -p infra-cli
+      - run: cargo build --release --locked -p infra-agent -p infra-cli
         env:
           INFRA_RELEASE_PUBLIC_KEY_B64: ${{ vars.INFRA_RELEASE_PUBLIC_KEY_B64 }}
       - name: Check native pair build metadata

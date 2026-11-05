@@ -157,7 +157,7 @@ via an owned temporary file, never command-line arguments or committed content.
 No live Infra connector, production endpoint or daily-use startup is involved.
 
 
-## Startup ownership in v0.1.1-rc.1
+## Startup ownership in v0.1.1-rc.2
 
 Lifecycle commands refuse an existing startup entry belonging to another
 installation/profile, including repair, reconnect and uninstall. Updated commands
@@ -170,6 +170,6 @@ expected owned unit/plist require explicit owner review rather than replacement.
 
 Owned fixtures verify foreign-profile refusal and retained original registration;
 physical standard-user/logon/reboot acceptance remains separate. The bootstrap
-now targets the compatible `v0.1.1-rc.1` developer prerelease; publication of all
+now targets the compatible `v0.1.1-rc.2` developer prerelease; publication of all
 signed platform pairs must finish before promotion. No installed agent is updated
 merely by deploying the gateway.
