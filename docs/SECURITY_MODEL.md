@@ -60,6 +60,8 @@ MCP client authentication is separate from device authentication.
 
 Use standards-compatible OAuth/token validation for the public MCP endpoint. Do not treat the internal device credential as user authentication.
 
+The current private-deployment mode already separates owner/client authentication from device authentication: MCP requires an admin bearer credential, while the browser exchanges that credential for a 12-hour HMAC-signed `HttpOnly; SameSite=Strict` cookie. The cookie is derived from the admin credential, survives gateway process restart, and becomes invalid when the admin credential rotates. Cookie-authenticated state-changing API calls require a same-origin custom CSRF header. This private mode is not a claim that standards-compatible public OAuth is complete.
+
 For personal deployment, keep scope design simple but explicit, for example:
 
 - read/control owner session
@@ -170,3 +172,47 @@ If a device is lost:
 - remove active sessions/transfers
 
 If gateway credentials are suspected compromised, rotate them without requiring all device filesystems to be reinstalled when possible.
+
+## 14. Current implementation notes
+
+Implemented now: per-device Ed25519 keys, short-lived one-time enrollment codes stored only as hashes, fresh challenge-response authentication, independent device revocation, connection-generation replacement, protocol heartbeat/stale-socket retirement, and authenticated private-mode gateway access. A non-loopback bind requires a >=32-byte admin credential; MCP uses bearer authentication and protected dashboard APIs accept bearer or a signed browser session. There is no unauthenticated non-loopback override.
+
+The agent identity format is versioned. Version 2 stores only device identity metadata plus a random credential key ID on disk when a native OS credential store is usable; the Ed25519 private signing key is stored through macOS Keychain Services, Windows Credential Manager, or Linux Secret Service. Legacy version-1 identities migrate automatically after a read-back verification of the native store. Real macOS ARM64 acceptance has verified migration to `native_keyring`, removal of the private key from `identity.json`, and signed reconnect. Headless Linux systems without a working Secret Service explicitly use a `0600` private-file fallback. `infra doctor` never retrieves the signing key merely to test it; after successful signed authentication the agent records only the storage mode and verification timestamp in `runtime.json`, which doctor uses as non-secret proof. `infra uninstall --remove-state` removes native credentials before deleting their metadata, and preserves state if native cleanup fails. Standards-compatible public MCP OAuth is still pending.
+
+Persistent PTY workers accept control only on loopback and require a random capability token stored in private session metadata. Structured file access intentionally has the same user-level filesystem reach as the agent; permanent deletion is explicit and recoverable `trash` is not yet implemented.
+
+## 14. Current installer and dashboard boundary
+
+The current bootstrap installers verify SHA-256 release sidecars before installing native binaries. This protects against accidental corruption but is not the final release trust model; signed/authenticated release metadata and steady-state updater rollback remain required. Development `--source-dir` installation intentionally bypasses download verification and must never be presented as the normal remote install path.
+
+The embedded dashboard now has a private-mode login/session boundary. Static assets, health, device enrollment consumption, and the authenticated agent WebSocket remain reachable without an owner browser session because they have their own trust semantics; MCP and device/session/activity/admin APIs are protected. The dashboard posts the admin credential once to `/api/auth/session`, receives an HMAC-signed `HttpOnly; SameSite=Strict` cookie, clears the credential field, and never stores the admin credential in Web Storage. State-changing cookie-authenticated API calls require `X-Infra-CSRF: 1`. A non-loopback gateway will not start without an admin credential, but Infra still expects TLS/Tailscale or a trusted TLS-terminating reverse proxy; the Rust gateway does not yet provide the final public OAuth/TLS edge.
+
+SQLite audit events store only bounded metadata (time, device association, action family, outcome and request ID). Tool payloads, stdout/stderr, file contents, enrollment codes and private device keys are deliberately excluded.
+
+## 15. Structured external-tool boundary
+
+The current structured service/container/Git/listener implementations invoke platform-native commands or established CLIs with direct argv arrays; user-controlled identifiers are never concatenated into a shell command. OS permissions remain authoritative. Linux service mutation is currently restricted to `systemctl --user`; Windows SCM actions may fail when the current user lacks rights; there is no hidden elevation path.
+
+Structured inspection also reduces accidental secret exposure. Docker inspect recursively redacts common password/token/secret/key fields and sensitive environment variables. Git remote HTTP(S) userinfo is removed before returning URLs and common command output URL tokens are sanitized. macOS launchd status returns only selected non-secret status keys instead of raw `launchctl print` output. Explicit logs/diffs can still contain application/user-authored sensitive content and should be requested deliberately.
+
+
+## Dashboard owner password mode
+
+`INFRA_DASHBOARD_AUTH_FILE` enables a single owner account separate from the MCP
+admin credential. Provision it with `infra-gateway init-auth FILE USERNAME
+HTTPS_ORIGIN`, feeding the password through stdin rather than process argv. The
+file contains the Argon2id PHC hash, username, public origin and random session
+signing secret; Unix permissions are 0600. It never contains the cleartext password.
+
+Owner-mode browser sign-in accepts username/password only. Legacy token exchange
+continues solely when owner mode is not configured, for isolated development
+smokes. Verification runs off the async executor, with two concurrent verification
+slots and a global maximum of 12 login/change attempts per minute. Password-change
+requests require the current password plus the existing authenticated/CSRF boundary;
+success rotates the session signing secret and keeps the current browser signed in
+with a new cookie. All earlier browser cookies become invalid. Configuration is
+written atomically. Bearer MCP clients are independent of browser password changes.
+
+The configured public HTTPS host blocks `/mcp` in both gateway routing and the
+Cloudflare ingress. The origin remains on its private interface; password mode is
+not a replacement for public MCP OAuth. Static and API responses use no-store.

@@ -1,0 +1,101 @@
+name: Rust
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  dashboard:
+    name: Dashboard browser
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Install isolated browser test dependency
+        run: npm install --prefix "$RUNNER_TEMP/infra-dashboard-browser" --no-package-lock --ignore-scripts --no-audit --no-fund playwright@1.62.1
+      - name: Install Chromium
+        run: node "$RUNNER_TEMP/infra-dashboard-browser/node_modules/playwright/cli.js" install --with-deps chromium
+      - name: Test dashboard interactions
+        run: NODE_PATH="$RUNNER_TEMP/infra-dashboard-browser/node_modules" node scripts/test-dashboard-browser.cjs
+  check:
+    name: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, ubuntu-24.04-arm, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.99.0
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo fmt --all -- --check
+      - run: cargo clippy --workspace --all-targets -- -D warnings
+      - run: cargo test --workspace
+      - if: matrix.os == 'ubuntu-latest'
+        run: ./scripts/smoke-v1.sh
+      - if: matrix.os == 'ubuntu-latest'
+        run: ./scripts/smoke-install-dashboard.sh
+      - name: Release version policy acceptance
+        if: matrix.os == 'ubuntu-latest'
+        run: python3 scripts/test-release-policy.py
+      - name: Release packaging contract acceptance
+        if: matrix.os == 'ubuntu-latest'
+        run: |
+          python3 -m venv "$RUNNER_TEMP/infra-release-fixture"
+          "$RUNNER_TEMP/infra-release-fixture/bin/pip" install --disable-pip-version-check cryptography
+          "$RUNNER_TEMP/infra-release-fixture/bin/python" scripts/test-release-signing.py
+      - name: Native installer transaction acceptance
+        if: matrix.os == 'ubuntu-latest'
+        run: python3 scripts/test-install-safety.py
+      - if: matrix.os == 'ubuntu-latest'
+        run: ./scripts/smoke-dashboard-password.sh
+      - if: matrix.os == 'ubuntu-latest'
+        run: ./scripts/smoke-pairing.sh
+      - name: MCP schema and error contract smoke
+        if: matrix.os == 'ubuntu-latest'
+        run: python3 scripts/smoke-mcp-contract.py
+      - name: Build native acceptance binaries
+        if: matrix.os == 'macos-latest' || matrix.os == 'windows-latest'
+        run: cargo build --release -p infra-agent -p infra-cli
+      - name: Check native release metadata
+        if: matrix.os == 'macos-latest' || matrix.os == 'windows-latest'
+        shell: pwsh
+        run: |
+          $InfraPython = if ($IsWindows) { 'python' } else { 'python3' }
+          & $InfraPython scripts/release_contract.py --binaries target/release
+          if ($LASTEXITCODE -ne 0) { throw "Native release metadata check failed" }
+      - name: Upload macOS ARM64 acceptance binaries
+        if: matrix.os == 'macos-latest'
+        uses: actions/upload-artifact@v4
+        with:
+          name: infra-acceptance-macos-aarch64
+          path: |
+            target/release/infra
+            target/release/infra-agent
+          if-no-files-found: error
+          retention-days: 7
+      - name: Windows installer and signed enrollment smoke
+        if: matrix.os == 'windows-latest'
+        shell: powershell
+        run: |
+          cargo build -p infra-gateway
+          if ($LASTEXITCODE -ne 0) { throw "Gateway build failed" }
+          .\scripts\smoke-install-windows.ps1
+      - name: Upload Windows x64 acceptance binaries
+        if: matrix.os == 'windows-latest'
+        uses: actions/upload-artifact@v4
+        with:
+          name: infra-acceptance-windows-x86_64
+          path: |
+            target/release/infra.exe
+            target/release/infra-agent.exe
+          if-no-files-found: error
+          retention-days: 7

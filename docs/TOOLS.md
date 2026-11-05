@@ -1,5 +1,60 @@
 # MCP tool model
 
+## Current stabilization contract — 2 November 2026
+
+The MCP-contract branch adds typed action enums and argument descriptions to the
+existing tool families. Conditional required fields are still checked by the
+gateway rather than a deeply nested schema. Unknown actions are rejected during
+deserialization. The raw gateway exposes 15 tools including cross-device `copy`;
+a host/connector may need its catalog refreshed before showing that tool.
+
+Tool failures now use `isError: true` and structured `error_code`, `retryable`, and
+`next_action` fields. Existing `status`, request IDs, stdout/stderr, exit code and
+legacy error strings are retained. Nonzero one-shot command exit codes are tool
+failures even when the dispatch succeeded. An `outcome_unknown` result is never
+retryable automatically; explicit pre-execution `agent_busy` rejection is.
+Offline/missing devices and invalid arguments have distinct codes.
+
+Successful screenshots include native MCP image content plus concise metadata
+text. The structured JSON retains image bytes for existing consumers. This is
+wire-format support, not certification of every multimodal client.
+
+Desktop Windows exec/jobs use `cmd.exe`; Unix uses `/bin/sh`. Android exec remains
+restricted. Use jobs for lengthy work, terminals for interactive/stateful work,
+and preserve handles/byte offsets across reconnects.
+
+### Directory listing pagination
+
+`files(action: "list", path: "...", offset: 0, length: 100)` requests at most
+100 entries. **For list only, offset/length count entries; read still counts
+bytes.** Continue with the returned `next_offset` while `has_more` is true.
+Never calculate the next offset from the requested length: the 512 KiB response
+budget can shorten a page. The maximum/default length is 1,000 and the maximum
+offset is 100,000. Zero/excessive lengths and excessive offsets fail explicitly.
+
+The agent sorts all names in ascending native filename order, reads metadata
+only for the page, and returns `offset`, `next_offset`, `has_more`, `total_entries`,
+`limit`, `order`, `pagination_supported`, and `snapshot: false`. Existing `path`,
+`entries`, and `truncated` remain; `truncated` matches `has_more`. Empty/beyond-end
+pages have no more entries. Names that cannot be displayed as UTF-8 remain lossy
+in JSON, as before; distinct native names still occupy distinct positions.
+
+Each call scans at most 100,000 names; a larger directory fails with guidance
+to use bounded search or a narrower directory. These offsets are **not a frozen
+snapshot**. If names are added/removed/renamed between requests, restart at zero
+to avoid missed/repeated positions. Exact snapshot enumeration is not promised.
+
+Explicit list `offset` or `length` requires the **live connection** capability
+`files.list_page`. Current native agents advertise it. Older native/Android
+agents do not: the gateway returns `unsupported` before dispatch, rather than
+letting an old agent silently ignore pagination fields. Omitting both fields
+preserves their legacy bounded list operation, which may lack continuation
+metadata. Android pagination is not implemented by this native-agent change.
+
+`scripts/smoke-mcp-contract.py` checks the actual HTTP tool list, schemas, shell
+guidance, and structured errors against an isolated loopback fixture. The older
+conceptual/future lists below are not the callable API contract.
+
 Infra should expose a compact, predictable MCP surface. Tool design is optimized for model selection and low call count rather than mirroring every OS command.
 
 The names below are conceptual; exact MCP schema details may evolve.
@@ -193,23 +248,30 @@ Return progress, bytes transferred, total bytes, throughput, and verified hash.
 
 ## 13. `desktop`
 
-Later-phase actions:
+Implemented replacement-critical actions:
 
-- displays
-- windows/apps
-- screenshot
+- `permissions` (non-destructive readiness probe)
+- `displays`
+- `windows`
+- `screenshot` (full display or bounded region)
+- `focus` application
+- `click` coordinates
+- `type_text`
+- `key` / modifier chord
+- `clipboard_get` / `clipboard_set`
+
+The first implementation targets macOS and Windows using OS-provided desktop facilities. Screenshot payloads are JPEG/base64 and bounded to fit the authenticated 8 MiB control-frame limit; macOS reports clear Screen Recording / Accessibility permission failures instead of silently succeeding. Raw coordinate input is intentionally available as the minimum viable Remote Desktop Commander replacement path.
+
+Still targeted after cutover-critical parity:
+
 - accessibility/UI tree
-- find element
-- focus
-- click semantic element
-- type text
-- key/chord
+- semantic element discovery/click
 - scroll
-- mouse fallback
-- clipboard get/set
-- wait_for condition
+- richer mouse buttons/drag
+- `wait_for` conditions
+- multi-display semantic targeting
 
-Prefer semantic target selectors such as application/window/role/name over raw coordinates.
+Prefer semantic target selectors such as application/window/role/name when that layer becomes available, while retaining coordinates as a deterministic fallback.
 
 ## Device selection
 
@@ -242,3 +304,21 @@ Tools should optimize for model consumption:
 - timestamps only where they add value
 
 Avoid returning huge raw process lists, terminal histories, or file contents when a filtered request can answer the question.
+
+## Current implemented subset — 2026-10-15
+
+Available through the Rust MCP gateway now: `devices`, `exec`, `files`, `search`, `processes`, `jobs`, `terminal`, `transfer`, `system`, `network`, `services`, `containers`, and `git`.
+
+- `files`: byte-range UTF-8 read, atomic-style write, append, exact edit with expected replacement count, SHA-256 hash, list, stat, mkdir, copy, move, explicit permanent delete; recoverable `trash` currently reports unsupported.
+- `search`: filename or content mode, regex/literal, case control, hidden-file control, git-ignore-aware walking, glob file filtering, bounded results and bounded context.
+- `jobs`: start/list/read/cancel with worker process and byte-offset spool.
+- `terminal`: open/list/read/write/resize/close using persistent PTY/ConPTY workers.
+- `transfer`: persistent upload/download begin/chunk/commit/status/list/cancel, explicit byte offsets, idempotent upload retries, bounded base64 chunks, staging files and SHA-256 verification. Device-to-device relay is orchestration on top of the two device endpoints and is not optimized yet.
+
+- `system`: summary, disks/filesystems and network-interface counters/addresses.
+- `network`: listener discovery, DNS resolution and TCP reachability. Listener PID/process metadata is returned when the platform utility exposes it.
+- `services`: list/status/start/stop/restart. Linux is deliberately user-service scope until a privileged helper exists; macOS uses the current GUI domain; Windows uses SCM with the current user's OS permissions.
+- `containers`: Docker list/inspect/log/start/stop/restart via direct argv execution. Inspect redacts sensitive env/key fields by default.
+- `git`: status/diff/log/branches/remotes/fetch/pull/push via direct argv execution, noninteractive credentials, fast-forward-only pull, and returned HTTP remote credential redaction.
+
+Still targeted: line-range reads, unified patch, tail/watch, richer process signals, deeper pagination/filtering, semantic desktop control and privileged operations.

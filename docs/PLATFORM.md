@@ -61,7 +61,7 @@ Unix PTY with correct zsh/bash environment behavior. Avoid assuming interactive 
 
 ### Credentials
 
-Store long-lived device identity in Keychain when feasible.
+Long-lived device signing keys are now stored through Keychain Services when available. `identity.json` retains only versioned metadata/key ID in native-store mode; legacy file identities migrate automatically after credential read-back verification.
 
 ### Desktop
 
@@ -90,7 +90,7 @@ Use ConPTY for interactive terminal sessions. Process-tree cancellation must acc
 
 ### Credentials
 
-Use DPAPI/Credential Manager or another platform-protected facility appropriate for the identity material.
+Long-lived device signing keys are now stored through Windows Credential Manager. `identity.json` retains only versioned metadata/key ID in native-store mode. Broader Windows state-directory ACL hardening remains pending.
 
 ### Files
 
@@ -130,3 +130,17 @@ Examples:
 - `privileged_helper`
 
 This lets the gateway fail cleanly before dispatching unsupported actions.
+
+
+## Android (new planning target — not yet an Infra agent)
+
+The signed Android-first-class-device plan is in [ANDROID_AGENT_PLAN.md](ANDROID_AGENT_PLAN.md); wire interoperability is in [ANDROID_PROTOCOL_ADAPTER.md](ANDROID_PROTOCOL_ADAPTER.md). The imported v0.1 Java APK source is at `apps/android-agent/`.
+
+- Android 16/API 36 was observed on the first target device, but do not hardcode device-specific identity. The prototype currently targets API 35 with minSdk 28.
+- Use existing `DeviceHello.platform = "android"`, `arch = "aarch64"` (from runtime), per-device Ed25519 enrollment and verified outbound `wss://.../agent`. No separate Android MCP server.
+- Use Android foreground service and visible Stop UI; Android may suspend/kick out long-lived network tasks. No promise of background-start exemptions, always-on or boot persistence.
+- Do not equate Android app UID with ADB shell/Linux user. Generic `exec`, `pty`, root, system files, containers and OS service tools are unsupported by default.
+- Scoped files are app workspace plus SAF user-chosen trees; expose the appropriate `files`/`transfer` subsets with explicit unsupported and permission-denied results. No blanket storage access.
+- Protect Ed25519 identity at rest with AndroidKeyStore-wrapped encryption where native Ed25519 signing keys aren't portable.
+- Optional later screen control needs Accessibility and MediaProjection with separate on-phone consent. No permission escalation while pairing.
+- Disconnect/outcome-unknown semantics, capability reporting, revocation and gateway auth must match the Rust protocol.

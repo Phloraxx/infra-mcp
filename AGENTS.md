@@ -2,6 +2,20 @@
 
 This file is the starting context for coding agents working in this repository.
 
+## Reliability stabilization — 2026-11-02
+
+Read [STABILIZATION_STATUS.md](docs/STABILIZATION_STATUS.md) for the current local
+reliability changes and validation limits. Use isolated local fixtures or hosted
+CI for this work; do not access or restart live production devices/gateways.
+Source changes and passing tests do not establish deployment or physical-device
+acceptance. Preserve later installer fixes when integrating timeout work.
+
+## Current required context — 2026-10-23
+
+Before planning or coding, read **[One-command setup](docs/ONE_COMMAND_SETUP.md)** first for the near-term installer priority, followed by **[Infra onboarding redesign](docs/ONBOARDING_REDESIGN.md)** for pairing and UX. Also read **[Current reality](docs/CURRENT_REALITY.md)** and **[Next steps](docs/NEXT_STEPS.md)**. These are the canonical current-state/near-term-plan documents; dated 2026-10-15/16/18 portions below are historical. The newest Rust feature commits implement name resolution, responsive dashboard refresh, bounded resumable `copy`, signed native updater, and classified disconnect diagnostics; **do not claim they are deployed**.
+
+Priorities: no mandatory Tailscale; simple public WSS/443 with signed agent identity; OAuth/MCP compatibility; measurable reconnect and latency; effortless owner install and honest errors; no unnecessary framework/rewrite. The repository is public: **never commit credentials, device UUIDs, private IPs, raw logs or sensitive operational topology**. The original worktree contains uncommitted OAuth loopback changes and must not be reset/overwritten; work in a separate branch/worktree and reconcile explicitly. Release docs record an older signed RC and historical key provisioning; do not infer current secret availability or first-install trust from it. Bootstrap installers remain checksum-only.
+
 ## Mission
 
 Build **Infra v1**: a native, lightweight, cross-platform remote-control system optimized for ChatGPT/MCP. It must eventually replace both the separately deployed Node-based Infra v0.3 prototype and Desktop Commander for the owner's normal workflows.
@@ -78,9 +92,9 @@ The regular agent must not quietly become root/SYSTEM. The privileged helper is 
 
 Never commit real pairing credentials, private keys, OAuth secrets, machine tokens, passwords, or live environment files. Audit metadata should identify actions while avoiding command output or file contents unless explicitly configured.
 
-## Initial Rust workspace proposal
+## Current Rust workspace
 
-Create only when implementation begins:
+Implementation has begun. Preserve and extend this workspace:
 
 ```text
 Cargo.toml
@@ -89,7 +103,9 @@ crates/
   gateway/
   agent/
   platform/
-  privileged-helper/
+  local-state/
+  cli/
+  privileged-helper/   # planned; not created yet
 ```
 
 Suggested dependency categories, not mandates:
@@ -105,6 +121,13 @@ Suggested dependency categories, not mandates:
 - file notifications: `notify`
 
 Do not adopt a heavy framework solely because it is convenient for one platform.
+
+
+## Current implementation checkpoint
+
+As of 2026-10-16 the branch contains working SQLite persistence/audit metadata, one-time Ed25519 enrollment/challenge authentication, MCP `devices`/`exec`/`files`/`search`/`processes`/`jobs`/`terminal`/`transfer` plus structured `system`/`network`/`services`/`containers`/`git`, durable workers, persistent PTYs, reconnect reconciliation, native bootstrap installers/startup adapters, an `infra` lifecycle/doctor CLI, and an embedded dashboard foundation. Linux ARM64 has a real side-by-side user-service burn-in proving fresh PTY I/O across gateway and controller restarts. A real Mac burn-in now verifies cross-device enrollment/exec plus fresh same-PTY I/O and same-job continuation across controller restart, fresh same-PTY I/O after gateway restart, and zero leaked launchd worker registrations/processes afterward; macOS uses self-cleaning independent launchd workers, stable boot identity, and bounded blocking control sockets. Windows ConPTY startup-query/close/shutdown handling now passes the full Windows CI suite and native x64 artifact build; only real-device Windows acceptance remains gated. Device identity metadata is now v2: signing keys migrate into the native OS credential store when available, while headless Linux exposes an explicit private-file fallback through `infra doctor`. Gateway liveness now retires stale sockets through protocol heartbeats/RPC timeout and refreshes session reconciliation periodically, so online/session state must not be inferred from socket existence alone. Private-mode gateway access is authenticated: MCP uses the admin bearer credential and the browser exchanges it for a restart-stable HMAC-signed HttpOnly session with CSRF protection; public standards-compatible OAuth remains pending. Real Mac acceptance has migrated the v1 identity into Keychain-backed `native_keyring` metadata with no private key on disk and successfully reconnected. `infra doctor` must not read native secret bytes; the agent records only a non-secret storage/verification timestamp after successful signed authentication. Abandoned `starting` PTY/job metadata without a worker PID expires after a startup grace so failed spawns cannot remain active forever. The dashboard now also has device detail, a locally bundled xterm.js browser terminal using the same PTY IDs as MCP, session filters/output/cancel, and directory browsing/bounded text preview. Its authenticated operations API shares MCP dispatch/audit; it is not a second execution backend. A dedicated owner sign-in screen now hides the app before authentication. Owner mode uses an Argon2id password file, independent session signing secret, bounded/rate-limited verification and password-change session rotation. The branded HTTPS dashboard blocks public MCP while signed agents and one-time enrollments retain their own authentication. Full file transfers, doctor/repair, permissions and updater UX remain unfinished. Read `docs/IMPLEMENTATION_STATUS.md` before choosing the next task; do not recreate these features.
+
+The live Node v0.3 deployment remains separate and must not be modified as a side effect of v1 development.
 
 ## Testing expectations
 
@@ -138,3 +161,29 @@ Do not perform a destructive cutover as part of an implementation PR.
 It is not enough to match a checklist. Infra should require fewer model tool calls for normal work, reconnect more reliably, cover more of the owner's devices, use substantially fewer resources, provide stronger session persistence, and expose a more coherent MCP interface.
 
 If a proposed feature makes the product significantly harder to install, repair, or understand, challenge the design before implementing it.
+
+
+## Android first-class agent track (planning, 2026-10-18)
+
+The initial Android companion source is now at `apps/android-agent/`. It is **v0.1 inbound HTTP prototype only** and has not implemented Infra signed WSS, device enrollment or MCP device registration.
+
+New work must start with:
+- `docs/ANDROID_AGENT_PLAN.md` (goal, architecture, product phases and Android restrictions)
+- `docs/ANDROID_PROTOCOL_ADAPTER.md` (Rust/Java wire interop, signed authentication)
+- `docs/ANDROID_SECURITY_AND_TESTS.md` (permission boundary and negative tests)
+- `apps/android-agent/AGENTS.md` (module-specific limitations and workflow)
+
+Use the existing Rust gateway's `/enroll` + `/agent` endpoints and signed Ed25519 protocol; don't create a second MCP server or use the temporary Oracle HTTP bridge as production architecture. Android runs under its app sandbox; unlike desktop agents, it must not advertise generic shell/PTY/process/filesystem capability unless a real separately authorized implementation exists. Never modify production during planning.
+
+
+## Android P1 prototype status (2026-10-18)
+
+`apps/android-agent/` now includes Java `DeviceIdentity`, `GatewayEnrollment` and `GatewayAgentService` for the existing v1 signed protocol. A side-by-side v0.2 development APK compiles and installs. Rust and Android JVM signed-message golden vector tests pass. **Actual signed enrollment and live MCP device discovery have NOT yet passed acceptance.** Keep the legacy local-HTTP route and live gateway unchanged until that acceptance.
+
+## SenseGuide metadata bridge (experimental)
+
+The phone-side receiver `apps/android-agent/.../ImportDiagnosticsActivity.java` is a one-shot, **owner-approved** reader of an explicitly granted SenseGuide diagnostic-report URI, not a system logging API or automatic camera telemetry. Report persists under the app-private workspace and is then retrievable with existing signed `files` RPC. Follow `docs/SENSEGUIDE_DEBUG_BRIDGE.md`, especially permission denial tests and strict size/authority validation. Never commit diagnostic reports, unredacted test data or session tokens.
+
+## Android v0.3 safety gates
+
+When modifying `apps/android-agent`, read `docs/ANDROID_V03_DEVELOPMENT.md`. Always enforce scoped workspace paths and SHA-256 for signed binary transfers. The only installable APK from developer controls is the separately named SenseGuide Diagnostics lab package, and the on-device owner plus Android package installer must confirm; no silent installs. `exec` is allowlisted and **never** a system shell. Accessibility is a user-enabled Android Settings service with separate five-minute on-device grant, restricted to foreground SenseGuide screenshot/tap/back, no background capture, typed text, clipboard or other apps. Reboot autoreconnect is opt-in and subject to OS restrictions. Do not silently enable any privileged permission or infer success from a build without live acceptance.

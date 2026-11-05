@@ -1,0 +1,4 @@
+<resources>
+  <string name="app_name">Infra Phone</string>
+  <string name="accessibility_description">Optional remote control gestures for the owner, only while the Infra Phone agent session is running. Does not read screen text.</string>
+</resources>

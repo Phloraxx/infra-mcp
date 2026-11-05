@@ -1,0 +1,33 @@
+[package]
+name = "infra-gateway"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+argon2 = "0.5.3"
+base64.workspace = true
+ed25519-dalek.workspace = true
+getrandom.workspace = true
+hmac.workspace = true
+axum.workspace = true
+futures-util.workspace = true
+infra-protocol = { path = "../protocol" }
+serde.workspace = true
+serde_json.workspace = true
+rmcp.workspace = true
+schemars.workspace = true
+rusqlite.workspace = true
+sha2.workspace = true
+thiserror.workspace = true
+tempfile.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+uuid.workspace = true
+url.workspace = true
+
+[dev-dependencies]
+tokio-tungstenite.workspace = true

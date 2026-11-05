@@ -1,0 +1,608 @@
+use anyhow::{Context, anyhow};
+use serde::Serialize;
+use std::fs;
+use std::time::Duration;
+use std::{
+    path::{Path, PathBuf},
+    process::Command,
+};
+
+#[cfg(target_os = "macos")]
+use std::process::Stdio;
+
+#[cfg(target_os = "macos")]
+const LABEL: &str = "io.phloraxx.infra-agent";
+#[cfg(windows)]
+const WINDOWS_TASK: &str = "Infra MCP Agent";
+
+#[derive(Debug, Clone, Serialize)]
+pub struct StartupStatus {
+    pub mechanism: &'static str,
+    pub installed: bool,
+    pub active: bool,
+    pub reliable: bool,
+    pub detail: String,
+}
+
+pub fn sibling_agent_binary() -> anyhow::Result<PathBuf> {
+    let current = std::env::current_exe().context("resolve infra CLI path")?;
+    let parent = current
+        .parent()
+        .ok_or_else(|| anyhow!("infra CLI path has no parent"))?;
+    #[cfg(windows)]
+    let name = "infra-agent.exe";
+    #[cfg(not(windows))]
+    let name = "infra-agent";
+    Ok(parent.join(name))
+}
+
+#[cfg(target_os = "linux")]
+pub fn install(agent: &Path, state_dir: &Path) -> anyhow::Result<()> {
+    let _registration = owned_registration(agent, state_dir)?;
+    let path = linux_unit_path()?;
+    let parent = path
+        .parent()
+        .ok_or_else(|| anyhow!("unit path has no parent"))?;
+    fs::create_dir_all(parent)?;
+    fs::write(&path, render_systemd_unit(agent, state_dir))?;
+    command_ok(user_systemctl().args(["daemon-reload"]))?;
+    command_ok(user_systemctl().args(["enable", "infra-agent.service"]))?;
+    // `enable --now` is a no-op for an already-running service. Always restart so an
+    // idempotent reinstall/repair actually switches to the binary that was just installed.
+    command_ok(user_systemctl().args(["restart", "infra-agent.service"]))?;
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
+pub fn install(agent: &Path, state_dir: &Path) -> anyhow::Result<()> {
+    let _registration = owned_registration(agent, state_dir)?;
+    let path = macos_plist_path()?;
+    let parent = path
+        .parent()
+        .ok_or_else(|| anyhow!("plist path has no parent"))?;
+    fs::create_dir_all(parent)?;
+    fs::write(&path, render_launchd_plist(agent, state_dir))?;
+    let domain = format!("gui/{}", current_uid()?);
+    let _ = bounded_output(
+        Command::new("launchctl")
+            .args(["bootout", &domain, path.to_string_lossy().as_ref()])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null()),
+    );
+    command_ok(Command::new("launchctl").args([
+        "bootstrap",
+        &domain,
+        path.to_string_lossy().as_ref(),
+    ]))?;
+    command_ok(Command::new("launchctl").args(["enable", &format!("{domain}/{LABEL}")]))?;
+    Ok(())
+}
+
+#[cfg(windows)]
+pub fn install(agent: &Path, state_dir: &Path) -> anyhow::Result<()> {
+    let _registration = owned_registration(agent, state_dir)?;
+    // schtasks /TR is ambiguous for quoted executable + arguments when paths
+    // contain spaces: Task Scheduler may preserve the outer quotes inside its
+    // *Execute* field and fail to launch the program. Supply structured fields
+    // through the built-in Windows ScheduledTasks PowerShell module instead.
+    let executable = powershell_single_quote(&agent.to_string_lossy());
+    let arguments = powershell_single_quote(&format!(
+        "--state-dir \"{}\"",
+        state_dir.display().to_string().replace('"', "")
+    ));
+    let script = format!(
+        "$ErrorActionPreference='Stop'; \
+         $action=New-ScheduledTaskAction -Execute '{executable}' -Argument '{arguments}'; \
+         $logon=New-ScheduledTaskTrigger -AtLogOn; \
+         $retry=New-ScheduledTaskTrigger -Once -At (Get-Date).AddMinutes(1) -RepetitionInterval (New-TimeSpan -Minutes 5) -RepetitionDuration (New-TimeSpan -Days 3650); \
+         $settings=New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -ExecutionTimeLimit (New-TimeSpan -Seconds 0) -RestartCount 3 -RestartInterval (New-TimeSpan -Minutes 1) -StartWhenAvailable; \
+         $principal=New-ScheduledTaskPrincipal -UserId ([Security.Principal.WindowsIdentity]::GetCurrent().Name) -LogonType Interactive -RunLevel Limited; \
+         Register-ScheduledTask -TaskName '{WINDOWS_TASK}' -Action $action -Trigger @($logon,$retry) -Settings $settings -Principal $principal -Force | Out-Null"
+    );
+    command_ok(Command::new("powershell.exe").args([
+        "-NoProfile",
+        "-NonInteractive",
+        "-Command",
+        &script,
+    ]))
+    .map_err(|error| {
+        if error.to_string().to_ascii_lowercase().contains("access is denied") {
+            anyhow!(
+                "Infra Scheduled Task is administrator-owned or task permissions are restricted. Run infra repair once in Administrator PowerShell; enrollment and running agent were not changed: {error}"
+            )
+        } else {
+            error
+        }
+    })?;
+    // /Run leaves already-running tasks and their durable work alone.
+    command_ok(Command::new("schtasks").args(["/Run", "/TN", WINDOWS_TASK]))?;
+    Ok(())
+}
+
+#[cfg(windows)]
+fn powershell_single_quote(value: &str) -> String {
+    value.replace(char::from(39), "''")
+}
+
+#[cfg(target_os = "linux")]
+pub fn uninstall() -> anyhow::Result<()> {
+    let _ = bounded_output(user_systemctl().args(["disable", "--now", "infra-agent.service"]));
+    let path = linux_unit_path()?;
+    if path.exists() {
+        fs::remove_file(path)?;
+    }
+    let _ = bounded_output(user_systemctl().args(["daemon-reload"]));
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
+pub fn uninstall() -> anyhow::Result<()> {
+    let path = macos_plist_path()?;
+    let domain = format!("gui/{}", current_uid()?);
+    let _ = bounded_output(
+        Command::new("launchctl")
+            .args(["bootout", &domain, path.to_string_lossy().as_ref()])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null()),
+    );
+    if path.exists() {
+        fs::remove_file(path)?;
+    }
+    Ok(())
+}
+
+#[cfg(windows)]
+pub fn uninstall() -> anyhow::Result<()> {
+    let _ = bounded_output(Command::new("schtasks").args(["/End", "/TN", WINDOWS_TASK]));
+    let _ = bounded_output(Command::new("schtasks").args(["/Delete", "/TN", WINDOWS_TASK, "/F"]));
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+pub fn restart() -> anyhow::Result<()> {
+    command_ok(user_systemctl().args(["restart", "infra-agent.service"]))
+}
+
+#[cfg(target_os = "linux")]
+pub fn reset_failed() -> anyhow::Result<()> {
+    command_ok(user_systemctl().args(["reset-failed", "infra-agent.service"]))
+}
+#[cfg(target_os = "macos")]
+pub fn restart() -> anyhow::Result<()> {
+    let target = format!("gui/{}/{LABEL}", current_uid()?);
+    command_ok(Command::new("launchctl").args(["kickstart", "-k", &target]))
+}
+
+#[cfg(windows)]
+pub fn restart() -> anyhow::Result<()> {
+    let _ = bounded_output(Command::new("schtasks").args(["/End", "/TN", WINDOWS_TASK]));
+    command_ok(Command::new("schtasks").args(["/Run", "/TN", WINDOWS_TASK]))
+}
+
+#[cfg(target_os = "linux")]
+pub fn status() -> StartupStatus {
+    let installed = linux_unit_path().is_ok_and(|path| path.exists());
+    let active =
+        bounded_output(user_systemctl().args(["is-active", "--quiet", "infra-agent.service"]))
+            .is_ok_and(|output| output.exit_code == Some(0));
+    StartupStatus {
+        mechanism: "systemd-user",
+        installed,
+        active,
+        reliable: installed,
+        detail: if active {
+            "user service active"
+        } else if installed {
+            "unit installed but inactive"
+        } else {
+            "unit not installed"
+        }
+        .into(),
+    }
+}
+
+#[cfg(target_os = "macos")]
+pub fn status() -> StartupStatus {
+    let installed = macos_plist_path().is_ok_and(|path| path.exists());
+    let active = current_uid().is_ok_and(|uid| {
+        bounded_output(Command::new("launchctl").args(["print", &format!("gui/{uid}/{LABEL}")]))
+            .is_ok_and(|output| output.exit_code == Some(0))
+    });
+    StartupStatus {
+        mechanism: "launchd",
+        installed,
+        active,
+        reliable: installed,
+        detail: if active {
+            "LaunchAgent loaded"
+        } else if installed {
+            "plist installed but not loaded"
+        } else {
+            "plist not installed"
+        }
+        .into(),
+    }
+}
+
+#[cfg(windows)]
+pub fn status() -> StartupStatus {
+    // Query task state and recovery settings once, as typed JSON. Human-readable
+    // schtasks output is localized and can contain unrelated "running" text.
+    let output = bounded_output(Command::new("powershell.exe").args([
+        "-NoProfile",
+        "-NonInteractive",
+        "-Command",
+        WINDOWS_STATUS_SCRIPT,
+    ]));
+    if let Ok(output) = output
+        && output.exit_code == Some(0)
+        && let Ok(status) = windows_status_from_json(output.stdout.as_bytes())
+    {
+        return status;
+    }
+    StartupStatus {
+        mechanism: "scheduled-task",
+        installed: false,
+        active: false,
+        reliable: false,
+        detail: "unable to verify the startup task; it may be missing or inaccessible. Run infra doctor under the intended user account".into(),
+    }
+}
+
+#[cfg(windows)]
+const WINDOWS_STATUS_SCRIPT: &str = r#"
+$ErrorActionPreference='Stop'
+$t=Get-ScheduledTask -TaskName 'Infra MCP Agent' -ErrorAction Stop
+$s=$t.Settings
+$logon=@($t.Triggers | Where-Object { $_.CimClass.CimClassName -eq 'MSFT_TaskLogonTrigger' }).Count -gt 0
+$retry=@($t.Triggers | Where-Object { $_.CimClass.CimClassName -eq 'MSFT_TaskTimeTrigger' -and $_.Repetition.Interval -eq 'PT5M' }).Count -gt 0
+$reliable=[bool]($logon -and $retry -and $s.ExecutionTimeLimit -eq 'PT0S' -and
+    $s.RestartCount -ge 1 -and -not $s.DisallowStartIfOnBatteries -and
+    -not $s.StopIfGoingOnBatteries -and $s.StartWhenAvailable)
+[pscustomobject]@{state=[int]$t.State;reliable=$reliable} | ConvertTo-Json -Compress
+"#;
+
+#[cfg(any(windows, test))]
+fn windows_status_from_json(bytes: &[u8]) -> serde_json::Result<StartupStatus> {
+    #[derive(serde::Deserialize)]
+    struct TaskSnapshot {
+        state: u32,
+        reliable: bool,
+    }
+    let task: TaskSnapshot = serde_json::from_slice(bytes)?;
+    // TASK_STATE_RUNNING=4 is the native Task Scheduler enum value, independent
+    // of display language: learn.microsoft.com/windows/win32/api/taskschd/ne-taskschd-task_state
+    let active = task.state == 4;
+    Ok(StartupStatus {
+        mechanism: "scheduled-task",
+        installed: true,
+        active,
+        reliable: task.reliable,
+        detail: if !task.reliable {
+            "task lacks crash/battery/runtime recovery; run infra repair from Administrator PowerShell if the task is administrator-owned"
+        } else if active {
+            "scheduled task running with periodic recovery"
+        } else {
+            "scheduled task installed with recovery but not running"
+        }.into(),
+    })
+}
+
+#[cfg(target_os = "linux")]
+fn user_systemctl() -> Command {
+    let mut command = Command::new("systemctl");
+    command.arg("--user");
+    if std::env::var_os("XDG_RUNTIME_DIR").is_none()
+        && let Ok(uid) = current_uid_linux()
+    {
+        let (runtime, bus) = linux_user_bus_values(&uid);
+        command.env("XDG_RUNTIME_DIR", runtime);
+        if std::env::var_os("DBUS_SESSION_BUS_ADDRESS").is_none() {
+            command.env("DBUS_SESSION_BUS_ADDRESS", bus);
+        }
+    }
+    command
+}
+
+#[cfg(target_os = "linux")]
+fn current_uid_linux() -> anyhow::Result<String> {
+    let output = bounded_output(Command::new("id").arg("-u"))?;
+    if output.exit_code != Some(0) {
+        return Err(anyhow!("id -u failed"));
+    }
+    Ok(output.stdout.trim().to_string())
+}
+
+#[cfg(target_os = "linux")]
+fn linux_user_bus_values(uid: &str) -> (String, String) {
+    let runtime = format!("/run/user/{uid}");
+    let bus = format!("unix:path={runtime}/bus");
+    (runtime, bus)
+}
+
+#[cfg(target_os = "linux")]
+fn linux_unit_path() -> anyhow::Result<PathBuf> {
+    Ok(home_dir()?.join(".config/systemd/user/infra-agent.service"))
+}
+
+#[cfg(target_os = "macos")]
+fn macos_plist_path() -> anyhow::Result<PathBuf> {
+    Ok(home_dir()?.join(format!("Library/LaunchAgents/{LABEL}.plist")))
+}
+
+#[cfg(not(windows))]
+fn home_dir() -> anyhow::Result<PathBuf> {
+    #[cfg(windows)]
+    let key = "USERPROFILE";
+    #[cfg(not(windows))]
+    let key = "HOME";
+    std::env::var_os(key)
+        .map(PathBuf::from)
+        .ok_or_else(|| anyhow!("{key} is not set"))
+}
+
+#[cfg(target_os = "macos")]
+fn current_uid() -> anyhow::Result<String> {
+    let output = bounded_output(Command::new("id").arg("-u"))?;
+    if output.exit_code != Some(0) {
+        return Err(anyhow!("id -u failed"));
+    }
+    Ok(output.stdout.trim().to_string())
+}
+
+fn bounded_output(
+    command: &Command,
+) -> anyhow::Result<infra_platform::command_runner::CommandOutput> {
+    let mut owned = Command::new(command.get_program());
+    owned.args(command.get_args());
+    if let Some(path) = command.get_current_dir() {
+        owned.current_dir(path);
+    }
+    for (name, value) in command.get_envs() {
+        if let Some(value) = value {
+            owned.env(name, value);
+        } else {
+            owned.env_remove(name);
+        }
+    }
+    std::thread::spawn(move || {
+        infra_platform::command_runner::run(owned, Duration::from_secs(15), 64 * 1024)
+    })
+    .join()
+    .map_err(|_| anyhow!("startup query worker failed"))?
+    .map_err(anyhow::Error::msg)
+}
+fn command_ok(command: &mut Command) -> anyhow::Result<()> {
+    let output = bounded_output(command)?;
+    infra_platform::command_runner::require_success(output)
+        .map(|_| ())
+        .map_err(anyhow::Error::msg)
+}
+
+#[cfg(target_os = "linux")]
+pub fn stop() -> anyhow::Result<()> {
+    command_ok(user_systemctl().args(["stop", "infra-agent.service"]))
+}
+#[cfg(target_os = "macos")]
+pub fn stop() -> anyhow::Result<()> {
+    command_ok(
+        Command::new("launchctl").args(["bootout", &format!("gui/{}/{LABEL}", current_uid()?)]),
+    )
+}
+#[cfg(windows)]
+pub fn stop() -> anyhow::Result<()> {
+    command_ok(Command::new("schtasks").args(["/End", "/TN", WINDOWS_TASK]))
+}
+#[cfg(target_os = "linux")]
+pub fn owns(agent: &Path, state: &Path) -> anyhow::Result<bool> {
+    Ok(fs::read_to_string(linux_unit_path()?)? == render_systemd_unit(agent, state))
+}
+
+/// Hold the shared OS-registration lock through the action, across all profiles.
+/// Participating installers never unlink this file; process exit releases it.
+pub fn owned_registration(agent: &Path, state: &Path) -> anyhow::Result<fs::File> {
+    #[cfg(target_os = "linux")]
+    let path = linux_unit_path()?.with_file_name(".infra-startup.lock");
+    #[cfg(target_os = "macos")]
+    let path = macos_plist_path()?.with_file_name(".infra-startup.lock");
+    #[cfg(windows)]
+    let path = PathBuf::from(
+        std::env::var_os("USERPROFILE")
+            .ok_or_else(|| anyhow!("USERPROFILE unavailable; cannot lock startup"))?,
+    )
+    .join(".infra-startup.lock");
+    fs::create_dir_all(
+        path.parent()
+            .ok_or_else(|| anyhow!("startup lock has no parent"))?,
+    )?;
+    let mut options = fs::OpenOptions::new();
+    options.create(true).read(true).write(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let guard = options.open(path)?;
+    guard.try_lock().map_err(|_| anyhow!("startup_busy: another lifecycle command is managing startup; inspect it before retrying"))?;
+    ensure_owned_registration(agent, state)?;
+    Ok(guard)
+}
+
+/// Fixed OS registration names are shared across profiles. Never replace or
+/// control another profile's entry, and never treat an inaccessible query as absent.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+pub fn ensure_owned_registration(agent: &Path, state: &Path) -> anyhow::Result<()> {
+    #[cfg(target_os = "linux")]
+    let path = linux_unit_path()?;
+    #[cfg(target_os = "macos")]
+    let path = macos_plist_path()?;
+    ensure_registration_file(&path, agent, state)
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn ensure_registration_file(path: &Path, agent: &Path, state: &Path) -> anyhow::Result<()> {
+    #[cfg(target_os = "linux")]
+    let expected = render_systemd_unit(agent, state);
+    #[cfg(target_os = "macos")]
+    let expected = render_launchd_plist(agent, state);
+    match fs::read_to_string(path) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Ok(value) if value == expected => Ok(()),
+        Ok(_) => Err(anyhow!(
+            "startup_owner_mismatch: startup belongs to a different installation/profile; use that installation to manage it"
+        )),
+        Err(error) => Err(error.into()),
+    }
+}
+
+#[cfg(windows)]
+pub fn ensure_owned_registration(agent: &Path, state: &Path) -> anyhow::Result<()> {
+    let executable = powershell_single_quote(&agent.to_string_lossy());
+    let arguments = powershell_single_quote(&format!("--state-dir \"{}\"", state.display()));
+    let script = format!(
+        "$ErrorActionPreference='Stop';$tasks=@(Get-ScheduledTask | Where-Object {{ $_.TaskName -eq '{WINDOWS_TASK}' }});if($tasks.Count -eq 0){{exit 0}};if($tasks.Count -ne 1){{exit 2}};$a=@($tasks[0].Actions);if($a.Count -ne 1 -or $a[0].Execute -ne '{executable}' -or $a[0].Arguments -ne '{arguments}'){{exit 2}}"
+    );
+    let output = bounded_output(Command::new("powershell.exe").args([
+        "-NoLogo",
+        "-NoProfile",
+        "-NonInteractive",
+        "-Command",
+        &script,
+    ]))?;
+    if output.exit_code != Some(0) {
+        return Err(anyhow!(
+            "startup_owner_mismatch: startup is inaccessible or belongs to a different installation/profile; use its owning installation to manage it"
+        ));
+    }
+    Ok(())
+}
+#[cfg(target_os = "macos")]
+pub fn owns(agent: &Path, state: &Path) -> anyhow::Result<bool> {
+    Ok(fs::read_to_string(macos_plist_path()?)? == render_launchd_plist(agent, state))
+}
+#[cfg(windows)]
+pub fn owns(agent: &Path, state: &Path) -> anyhow::Result<bool> {
+    let executable = powershell_single_quote(&agent.to_string_lossy());
+    let arguments = powershell_single_quote(&format!("--state-dir \"{}\"", state.display()));
+    let script = format!(
+        "$ErrorActionPreference='Stop';$t=Get-ScheduledTask -TaskName '{WINDOWS_TASK}';[bool](@($t.Actions | Where-Object {{ $_.Execute -eq '{executable}' -and $_.Arguments -eq '{arguments}' }}).Count -eq 1)"
+    );
+    let output = bounded_output(Command::new("powershell.exe").args([
+        "-NoProfile",
+        "-NonInteractive",
+        "-Command",
+        &script,
+    ]))?;
+    Ok(output.exit_code == Some(0) && output.stdout.trim().eq_ignore_ascii_case("true"))
+}
+
+#[cfg(target_os = "linux")]
+fn render_systemd_unit(agent: &Path, state_dir: &Path) -> String {
+    format!(
+        "[Unit]\nDescription=Infra device agent\nAfter=network-online.target\nWants=network-online.target\n\n[Service]\nType=simple\nExecStart={} --state-dir {}\n# Keep PTY/job workers alive when only the connectivity controller restarts.\nKillMode=process\nRestart=always\nRestartSec=2\n\n[Install]\nWantedBy=default.target\n",
+        systemd_quote(agent),
+        systemd_quote(state_dir)
+    )
+}
+
+#[cfg(target_os = "linux")]
+fn systemd_quote(path: &Path) -> String {
+    let value = path
+        .to_string_lossy()
+        .replace('%', "%%")
+        .replace('\\', "\\\\")
+        .replace('"', "\\\"");
+    format!("\"{value}\"")
+}
+
+#[cfg(target_os = "macos")]
+fn render_launchd_plist(agent: &Path, state_dir: &Path) -> String {
+    format!(
+        "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n<plist version=\"1.0\"><dict>\n<key>Label</key><string>{LABEL}</string>\n<key>ProgramArguments</key><array><string>{}</string><string>--state-dir</string><string>{}</string></array>\n<key>RunAtLoad</key><true/>\n<key>KeepAlive</key><true/>\n<key>ProcessType</key><string>Interactive</string>\n</dict></plist>\n",
+        xml_escape(&agent.to_string_lossy()),
+        xml_escape(&state_dir.to_string_lossy())
+    )
+}
+
+#[cfg(target_os = "macos")]
+fn xml_escape(value: &str) -> String {
+    value
+        .replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
+        .replace('\'', "&apos;")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn windows_status_uses_numeric_state_instead_of_localized_text() {
+        let running =
+            windows_status_from_json(br#"{"state":4,"reliable":true,"label":"En cours"}"#).unwrap();
+        assert!(running.installed && running.active && running.reliable);
+        let ready = windows_status_from_json(br#"{"state":3,"reliable":true,"description":"running is only a word in this description"}"#).unwrap();
+        assert!(ready.installed && !ready.active);
+    }
+
+    #[test]
+    fn windows_status_keeps_running_separate_from_startup_reliability() {
+        let task = windows_status_from_json(br#"{"state":4,"reliable":false}"#).unwrap();
+        assert!(task.active);
+        assert!(!task.reliable);
+        assert!(task.detail.contains("lacks"));
+        assert!(windows_status_from_json(br#"{"reliable":true}"#).is_err());
+        assert!(windows_status_from_json(b"Running").is_err());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn linux_user_bus_values_match_systemd_runtime_layout() {
+        let (runtime, bus) = linux_user_bus_values("1001");
+        assert_eq!(runtime, "/run/user/1001");
+        assert_eq!(bus, "unix:path=/run/user/1001/bus");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn systemd_unit_quotes_paths() {
+        let unit = render_systemd_unit(
+            Path::new("/home/example/Infra Agent/infra-agent"),
+            Path::new("/home/example/state dir"),
+        );
+        assert!(unit.contains("ExecStart=\"/home/example/Infra Agent/infra-agent\" --state-dir \"/home/example/state dir\""));
+        assert!(unit.contains("Restart=always"));
+        assert!(unit.contains("KillMode=process"));
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[test]
+    fn foreign_registration_is_preserved_and_owned_registration_is_accepted() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("registration");
+        let agent = Path::new("/example/infra-agent");
+        let state = Path::new("/example/profile");
+        ensure_registration_file(&path, agent, state).unwrap();
+        #[cfg(target_os = "linux")]
+        let owned = render_systemd_unit(agent, state);
+        #[cfg(target_os = "macos")]
+        let owned = render_launchd_plist(agent, state);
+        fs::write(&path, &owned).unwrap();
+        ensure_registration_file(&path, agent, state).unwrap();
+        let error =
+            ensure_registration_file(&path, agent, Path::new("/other/profile")).unwrap_err();
+        assert!(error.to_string().contains("startup_owner_mismatch"));
+        assert_eq!(fs::read_to_string(path).unwrap(), owned);
+    }
+
+    #[test]
+    fn sibling_binary_name_is_platform_specific() {
+        let path = sibling_agent_binary().unwrap();
+        #[cfg(windows)]
+        assert_eq!(path.file_name().unwrap(), "infra-agent.exe");
+        #[cfg(not(windows))]
+        assert_eq!(path.file_name().unwrap(), "infra-agent");
+    }
+}

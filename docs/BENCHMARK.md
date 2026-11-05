@@ -126,6 +126,31 @@ Representative tasks:
 
 Infra should require fewer or equal calls while remaining understandable and auditable.
 
+## Automated safe acceptance
+
+For an already-enrolled device, `scripts/cutover-acceptance.py` runs the non-destructive
+replacement-critical matrix in one pass: online identity, exec, file write/read/edit/hash,
+search, process listing, system/network inspection, PTY, durable jobs, resumable binary
+transfer, and (when advertised) desktop permission/discovery/clipboard/screenshot checks.
+It mutates only a unique temporary directory and restores the clipboard.
+
+```bash
+export INFRA_ACCEPT_GATEWAY_HTTP=http://<private-gateway>:<port>
+export INFRA_ACCEPT_DEVICE_ID=<device-id>
+export INFRA_ACCEPT_ADMIN_TOKEN=<private-admin-token>
+export INFRA_ACCEPT_MCP_HOST=localhost
+python3 scripts/cutover-acceptance.py
+```
+
+Set `INFRA_REQUIRE_DESKTOP=1` for the final workstation cutover gate. Set
+`INFRA_ACCEPT_INTERACTIVE_DESKTOP=1` only when it is safe for the runner to send a harmless
+Escape key after desktop permissions are ready. `INFRA_SKIP_DESKTOP=1` is intended only for
+staging older agents while a native artifact is being updated; it is not valid for final
+workstation cutover.
+
+Reboot, sleep/wake and network-switch tests remain deliberately outside this script because
+they can interrupt the control channel and require explicit real-device scheduling.
+
 ## Reliability burn-in
 
 Before final removal of Desktop Commander:

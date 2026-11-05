@@ -4,7 +4,19 @@ Infra MCP is a personal multi-device control plane that lets ChatGPT operate aut
 
 The product goal is not to be a thin SSH wrapper or a clone of Desktop Commander. The goal is a smaller, faster, more reliable, AI-native remote-control system with persistent terminals, structured system operations, resumable file transfer, multi-device routing, strong auditing, and eventually semantic desktop automation.
 
-> **Current status:** design and migration phase for **Infra v1**. The existing TypeScript code in this repository is an older scaffold and should be treated as legacy/prototype reference. A separately deployed v0.3 prototype has already validated the ChatGPT → gateway → device-agent architecture with shell, files, process inspection, jobs, pairing, and automatic reconnect. The v1 implementation should be built cleanly rather than extending the Node agent indefinitely.
+> **Current status:** **Infra v1 is actively implemented in Rust alongside the working v0.3 deployment.** The Rust control plane now covers signed device enrollment/authentication, persistent SQLite state/audit metadata, MCP `devices`/`exec`/`files`/`search`/`processes`/`jobs`/`terminal`/`transfer` plus structured `system`/`network`/`services`/`containers`/`git`, durable workers and PTYs, resumable binary transfer, native installers/startup adapters, `infra` status/doctor/repair commands, and a live embedded dashboard foundation. The live v0.3 runtime remains untouched until the benchmark/cutover criteria are met.
+
+## Read this first (23 October 2026)
+
+The **preferred near-term installer design** is [docs/ONE_COMMAND_SETUP.md](docs/ONE_COMMAND_SETUP.md), with broader pairing/UX design in [docs/ONBOARDING_REDESIGN.md](docs/ONBOARDING_REDESIGN.md). The underlying current-state review and infrastructure plan remain in [docs/CURRENT_REALITY.md](docs/CURRENT_REALITY.md) and [docs/NEXT_STEPS.md](docs/NEXT_STEPS.md).
+
+**Next direction:** keep the existing Rust gateway, SQLite, outbound authenticated agents, and Android service. Make Tailscale optional rather than required: a private loopback gateway behind an existing HTTPS ingress, signed agents connecting over public `wss://` on 443, tested OAuth for MCP, and smooth installation/recovery. Measure persistent-connection latency and actual failures before introducing another transport or rewriting the UI. The feature branch is not production, and old fallback services stay until acceptance.
+
+## Android companion — Infra Phone v0.3
+
+The **Motorola Edge 60 Stylus** is enrolled as a first-class Android device over the existing signed Infra-MCP gateway. Live-verified v0.3 capabilities include scoped files, SHA-256-checked binary transfers, restricted SenseGuide development commands, user-reviewed APK installation and temporary, owner-enabled SenseGuide-only screenshot/tap access.
+
+**Start with [Android current status](docs/ANDROID_CURRENT_STATUS.md)** for the validated capabilities, owner workflow, privacy and safety constraints, and outstanding reliability tests. Historic desktop/Oracle v0.3 references elsewhere in this README describe a **different legacy deployment**, not the Android app version.
 
 ## Product principles
 
@@ -122,20 +134,19 @@ Supporting documents:
 - [`docs/DEPLOYMENT.md`](docs/DEPLOYMENT.md)
 - [`docs/DECISIONS.md`](docs/DECISIONS.md)
 
-## First implementation milestone
+## Implementation progress
 
-The first useful v1 milestone is deliberately smaller than the complete product:
+The foundation and first persistent-control layer are implemented. See [`docs/IMPLEMENTATION_STATUS.md`](docs/IMPLEMENTATION_STATUS.md) for the exact current state.
 
-- Rust workspace and protocol crate.
-- Rust gateway with MCP health/device listing.
-- Rust agent on Linux ARM64.
-- authenticated pairing/device identity.
-- `exec`, basic `files`, and `processes` parity.
-- persistent reconnect.
-- tests proving the v1 agent can run beside v0.3 without disrupting it.
-
-Only after this foundation works should implementation expand into PTY sessions, resumable binary transfer, structured system modules, privilege helpers, and desktop automation.
+For safe local end-to-end checks, `scripts/smoke-v1.sh` verifies signed enrollment/authentication, MCP execution and identity reconnect. `scripts/smoke-install-dashboard.sh` additionally exercises the embedded dashboard, one-time enrollment, native installer source mode, persisted local config/identity, online reconnect, `infra status`, `infra doctor`, sessions and activity APIs. Both use isolated temporary state and do not deploy or modify v0.3.
 
 ## License
 
 No license has been selected yet. Do not assume third-party redistribution rights until a license is added.
+
+
+## Android companion (planning track)
+
+`apps/android-agent/` contains a separately buildable **v0.1 Android prototype** (device diagnostics, scoped local file API and short-lived private hosting). It does **not** yet directly enroll/connect to this Rust Infra gateway, or provide ADB/root/screen automation.
+
+The first-class Android device roadmap calls for signed outbound WSS to the same gateway so ChatGPT sees the phone in the existing `devices` MCP tool without the temporary Oracle helper. See the [full plan](docs/ANDROID_AGENT_PLAN.md), [protocol adapter](docs/ANDROID_PROTOCOL_ADAPTER.md) and [security/acceptance checklist](docs/ANDROID_SECURITY_AND_TESTS.md).

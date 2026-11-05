@@ -1,4 +1,21 @@
+> **Current primary first-run direction (2026-10-24):** [ONE_COMMAND_SETUP.md](ONE_COMMAND_SETUP.md) defines a dependable thin bootstrap and shared Rust setup. [ONBOARDING_REDESIGN.md](ONBOARDING_REDESIGN.md) defines pairing and broader UX. Both supersede the script/code/name-entry first-run flow below. This page retains the earlier historical foundation and installer requirements.
+
 # Installation and onboarding UX
+
+## Windows task-state inspection — 2 November 2026
+
+Startup status now queries Task Scheduler once through `Get-ScheduledTask` and
+parses a small JSON snapshot containing numeric state and recovery readiness.
+It no longer searches localized `schtasks` text for an English word. Native
+`TASK_STATE_RUNNING` is 4; running and reliable recovery settings are independent
+signals. An unreadable/malformed query cannot claim a healthy task and explains
+that the task may be missing or inaccessible.
+
+The Windows installer smoke requires the native CLI to report the running,
+recovery-enabled task after signed agent readiness. Local cross-platform parsing
+tests cover a non-English label, a misleading description containing "running",
+running-but-unreliable state, and malformed responses. Physical login/reboot and
+restricted-user acceptance remain separate from hosted Windows CI.
 
 ## Desired first-run flow
 
@@ -99,3 +116,42 @@ The same product should own its lifecycle:
 ## Acceptance requirements
 
 A fresh supported machine should reach an Online state through the normal install path without reading documentation. Re-running the installer on an existing healthy installation must be safe and should repair/upgrade rather than create a second logical device.
+
+## Implemented product foundation — 2026-10-15
+
+The repository now implements the first complete onboarding path rather than only the enrollment backend:
+
+- Dashboard **Add device** creates a short-lived one-time enrollment and generates the recommended macOS/Linux or Windows bootstrap command.
+- `scripts/install.sh` and `scripts/install.ps1` install two native binaries: `infra` and `infra-agent`. They require no Node/npm/Python runtime on the target machine.
+- Release mode downloads platform/architecture-specific GitHub Release assets and verifies SHA-256 sidecars before replacement. `--source-dir` / `-SourceDir` exists only for isolated development smoke tests. Cryptographically signed release/update metadata is still a required hardening step.
+- `infra install` writes versioned local config, performs one-time enrollment through `infra-agent --enroll-only`, and then registers automatic startup unless explicitly disabled. The enrollment code is not written to config.
+- The agent subsequently reads its gateway/device name from local config and authenticates with the persisted Ed25519 identity.
+- Startup adapters exist for systemd-user on Linux, LaunchAgent on macOS, and an ONLOGON Scheduled Task on Windows.
+- `infra status`, `doctor`, `repair`, `reconnect`, and `uninstall` operate on the same local state/startup model. `doctor` covers config, identity, credential-storage mode, runtime PID, startup state and gateway health. For native credential storage it never reads the private key itself; an online agent records a non-secret proof after it has loaded the key and completed signed gateway authentication.
+- Re-running `infra install` with an existing identity does not require or consume a new enrollment code; it can re-register startup around the same logical device.
+- The isolated installer/dashboard smoke test proves the configure/enroll/reconnect/status/doctor path without registering a real startup service.
+
+Still required before the UX is considered production-ready: real-device startup/reboot acceptance tests on all primary OSes, better phase-specific installer progress/error codes, native package installers where useful, eliminating/encrypting the explicit headless-Linux credential-file fallback plus broader Windows ACL hardening, `infra update` with staged rollback, permission onboarding, and standards-compatible public OAuth/TLS. Private-mode dashboard/MCP authentication and native Keychain/Credential Manager/Secret Service signing-key storage are already implemented.
+
+
+## Windows startup and automatic update caveats (2026-10-31)
+
+A running Task Scheduler entry alone is not proof of a resilient install.
+Windows logon tasks must explicitly allow battery operation, have no execution
+time limit, restart after transient process exit, and have a periodic recovery
+trigger. A pre-existing administrator-owned task cannot be replaced by a
+non-elevated user; the CLI must report that limitation without destroying
+the signed device identity. A non-elevated per-user startup recovery fallback
+may be installed for an already-enrolled laptop while waiting for an elevated
+Scheduled Task repair. It does not provide pre-login service operation.
+
+Automatic binary updates must use the signed release manifest and staged
+health-checked rollback, not just download GitHub's latest arbitrary EXE.
+As of this change, only v0.1.0-rc.1 is published, marked prerelease.
+GitHub releases/latest excludes prereleases; a missing stable release must be
+reported clearly, not silently replaced with a prerelease. Do not schedule
+unattended production updates until a stable signed release exists, an
+installed-version/no-op check is implemented, and Windows real-device
+rollback acceptance passes. Manual, deliberate testing may pin
+--version v0.1.0-rc.1. Bootstrap checksum sidecars alone do not prove the
+publisher identity.
