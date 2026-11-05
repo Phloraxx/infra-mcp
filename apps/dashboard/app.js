@@ -69,17 +69,46 @@ function decorateStaticIcons(){
   $$('.section-head .text-button span').forEach(element=>element.innerHTML=icon('right'));
 }
 decorateStaticIcons();
-async function jsonFetch(url,options={}){const response=await fetch(url,{...options,credentials:'same-origin',headers:{'Content-Type':'application/json','X-Infra-CSRF':'1',...(options.headers||{})}});if(response.status===401){clearPrivateViews();showSignedOut();const error=new Error('Your session ended. Sign in again.');error.status=401;throw error;}if(!response.ok){const text=await response.text();let message=text;try{message=JSON.parse(text).error||text;}catch{}throw new Error(message||`HTTP ${response.status}`);}return response.status===204?null:response.json();}
+const REQUEST_TIMEOUT_MS=10000;
+// The budget includes response-body reads. No request, especially a mutation, is
+// automatically replayed after timeout: the server may already have acted.
+async function requestWithDeadline(url,options,consume){
+  const controller=new AbortController();
+  const external=options.signal;
+  const abort=()=>controller.abort();
+  if(external?.aborted)abort();else external?.addEventListener('abort',abort,{once:true});
+  let expired=false;
+  const timer=setTimeout(()=>{expired=true;controller.abort();},REQUEST_TIMEOUT_MS);
+  try{return await consume(await fetch(url,{...options,signal:controller.signal}));}
+  catch(error){
+    if(expired){
+      const timeout=new Error('Request timed out. Its outcome may be unknown; check current state before repeating an action.');
+      timeout.code='request_timeout';throw timeout;
+    }
+    throw error;
+  }finally{clearTimeout(timer);external?.removeEventListener('abort',abort);}
+}
+async function jsonFetch(url,options={}){
+  const epoch=state.authEpoch;
+  return requestWithDeadline(url,{...options,credentials:'same-origin',headers:{'Content-Type':'application/json','X-Infra-CSRF':'1',...(options.headers||{})}},async response=>{
+    if(response.status===401){
+      if(epoch===state.authEpoch){clearPrivateViews();showSignedOut();}
+      const error=new Error('Your session ended. Sign in again.');error.status=401;throw error;
+    }
+    if(!response.ok){const text=await response.text();let message=text;try{message=JSON.parse(text).error||text;}catch{}throw new Error(message||`HTTP ${response.status}`);}
+    return response.status===204?null:response.json();
+  });
+}
 function showSignedOut(){state.authenticated=false;state.events?.close();state.events=null;state.streamHealthy=false;clearTimeout(state.refreshTimer);state.refreshTimer=null;$('#app-shell').classList.add('hidden');$('#signin').classList.remove('hidden');$('#login-submit').disabled=false;$('#login-submit').textContent='Sign in';}
 function showSignedIn(){state.authenticated=true;$('#signin').classList.add('hidden');$('#app-shell').classList.remove('hidden');}
 async function authStatus(){
-  try{const response=await fetch('/api/auth/session',{credentials:'same-origin'});if(!response.ok)throw new Error('Authentication status unavailable');const v=await response.json();state.loginMethod=v.login_method||'password';$('#username-label').classList.toggle('hidden',state.loginMethod!=='password');$('#login-username').required=state.loginMethod==='password';$('#password-label').textContent=state.loginMethod==='password'?'Password':'Admin credential';$('#password-change').classList.toggle('hidden',state.loginMethod!=='password');$('#auth-state').textContent=v.authenticated?'Signed in':'Signed out';if(v.authenticated)showSignedIn();else showSignedOut();return !!v.authenticated;}
+  try{const v=await requestWithDeadline('/api/auth/session',{credentials:'same-origin'},async response=>{if(!response.ok)throw new Error('Authentication status unavailable');return response.json();});state.loginMethod=v.login_method||'password';$('#username-label').classList.toggle('hidden',state.loginMethod!=='password');$('#login-username').required=state.loginMethod==='password';$('#password-label').textContent=state.loginMethod==='password'?'Password':'Admin credential';$('#password-change').classList.toggle('hidden',state.loginMethod!=='password');$('#auth-state').textContent=v.authenticated?'Signed in':'Signed out';if(v.authenticated)showSignedIn();else showSignedOut();return !!v.authenticated;}
   catch(error){showSignedOut();$('#login-error').textContent='Cannot reach Infra. Try again shortly.';return false;}
 }
 $('#login-form').addEventListener('submit',async event=>{
   event.preventDefault();const button=$('#login-submit');button.disabled=true;button.textContent='Signing in…';$('#login-error').textContent='';
   const password=$('#login-password').value;const body=state.loginMethod==='password'?{username:$('#login-username').value,password}:{token:password};
-  try{const response=await fetch('/api/auth/session',{method:'POST',credentials:'same-origin',headers:{'Content-Type':'application/json','X-Infra-CSRF':'1'},body:JSON.stringify(body)});if(!response.ok)throw new Error((await response.text())||'Sign-in failed.');$('#login-password').value='';if(await authStatus()){await refresh();route();connectEvents();}}
+  try{await requestWithDeadline('/api/auth/session',{method:'POST',credentials:'same-origin',headers:{'Content-Type':'application/json','X-Infra-CSRF':'1'},body:JSON.stringify(body)},async response=>{if(!response.ok)throw new Error((await response.text())||'Sign-in failed.');});$('#login-password').value='';if(await authStatus()){await refresh();route();connectEvents();}}
   catch(error){$('#login-error').textContent=error.message;}
   finally{button.disabled=false;button.textContent='Sign in';}
 });
@@ -149,6 +178,7 @@ async function refresh(){
       state.lastRefresh=Date.now();
       $('#gateway-dot').classList.add('online');
       $('#gateway-label').textContent='Gateway online';
+      $('#gateway-label').removeAttribute('title');
       render();
       if(location.hash.startsWith('#session/')&&!state.attachment)route();
     }catch(error){
@@ -158,7 +188,8 @@ async function refresh(){
         $('#gateway-label').textContent='Sign in required';
         $('#auth-state').textContent='Signed out';showSignedOut();
       }else{
-        $('#gateway-label').textContent='Gateway unavailable';
+        $('#gateway-label').textContent=state.lastRefresh?'Connection lost · showing last confirmed data':'Gateway unavailable';
+        $('#gateway-label').title=error.message;
         console.error(error);
       }
     }
@@ -203,8 +234,7 @@ function updateQuickInstall(){
   // otherwise fails as a meaningless null-argument exception. Put the payload
   // on disk and terminate the whole block if downloading fails.
   // Only the downloaded file runs with process-scoped execution-policy bypass.
-  const windows=`&{$ErrorActionPreference='Stop';$p="$env:TEMP\\infra.ps1";iwr `+
-    psQuote(base+'/install.ps1')+` -UseBasicParsing -OutFile $p;powershell.exe -NoProfile -EP Bypass -File $p}`;
+  const windows=powershellInstallerCommand(base+'/install.ps1');
   $('#quick-install-command').textContent=state.platform==='windows'
     ? windows
     : 'curl -fsSL '+shellQuote(base+'/install.sh')+' | sh';
@@ -291,7 +321,7 @@ $('#device-rename-form').addEventListener('submit',async event=>{
   }catch(error){$('#device-rename-error').textContent=error.message;}
   finally{button.disabled=false;}
 });
-$('#logout-session').addEventListener('click',async()=>{try{await fetch('/api/auth/session',{method:'DELETE',credentials:'same-origin',headers:{'X-Infra-CSRF':'1'}});}finally{clearPrivateViews();$('#login-password').value='';$('#password-change').reset();showSignedOut();}});
+$('#logout-session').addEventListener('click',async()=>{let failure='';try{await requestWithDeadline('/api/auth/session',{method:'DELETE',credentials:'same-origin',headers:{'X-Infra-CSRF':'1'}},async response=>{if(!response.ok)throw new Error('Sign-out could not be confirmed.');});}catch(error){failure='Local view cleared; server sign-out could not be confirmed. '+error.message;}finally{clearPrivateViews();$('#login-password').value='';$('#password-change').reset();showSignedOut();$('#login-error').textContent=failure;}});
 
 function currentDevice(id=state.device){return state.devices.find(d=>d.device_id===id);}
 function available(id){const d=currentDevice(id);return !!d?.online&&!d.revoked;}

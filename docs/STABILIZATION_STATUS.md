@@ -63,6 +63,18 @@ An added HTTP smoke verifies discovery and error results using disposable local
 state. Full pagination, granular capability metadata and actual client-side image
 acceptance remain open.
 
+The dashboard-recovery slice adds a ten-second budget covering API response
+headers and body reads, visibly stale last-confirmed data, and explicit uncertainty
+for timed-out mutations without replay. Auth and sign-out requests also use the
+bounded helper. The primary Windows copy command reuses the existing unique-temp,
+exit-checking, cleanup-capable bootstrap generator. Browser fixtures passed both
+stalled-header and stalled-body recovery plus a mutation that reached the server
+but never returned a response; existing terminal/auth/responsive tests passed.
+
+The initial reliability PR's hosted Linux x64/ARM64, macOS, Windows (including
+installer smoke), and dashboard jobs passed. This is hosted CI evidence, not
+physical Windows login/reboot or a production deployment.
+
 MCP schema/error/discovery ergonomics, pagination/images, native setup readiness,
 localized Windows task status, update/rollback acceptance, bounded dashboard
 requests, cross-client coverage, and physical sleep/login/reboot tests remain

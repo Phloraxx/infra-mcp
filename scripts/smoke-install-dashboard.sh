@@ -45,7 +45,7 @@ curl -fsS "http://127.0.0.1:$PORT/app.js" -o "$TMP/dashboard.js"
 grep -q 'create-enrollment' "$TMP/dashboard.js"
 grep -q 'powershellInstallerCommand' "$TMP/dashboard.js"
 ! grep -q "' | iex'" "$TMP/dashboard.js"
-grep -q 'UseBasicParsing -OutFile' "$TMP/dashboard.js"
+grep -q 'UseBasicParsing' "$TMP/dashboard.js"
 grep -q "' | sh'" "$TMP/dashboard.js"
 ! grep -qi 'scriptblock.*create' "$TMP/dashboard.js"
 curl -fsS "http://127.0.0.1:$PORT/install.sh" | grep -q 'Infra installer'

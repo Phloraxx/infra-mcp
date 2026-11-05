@@ -19,6 +19,9 @@ let sessions = [
   {id:jobId,kind:'job',status:'running',device_id:'online',device_name:badName,device_online:true,started_at_unix_ms:Date.now()},
   {id:transferId,kind:'transfer',status:'ready',device_id:'online',device_name:badName,device_online:true,started_at_unix_ms:Date.now()}
 ];
+let overviewMode=null, overviewCalls=0, hangEnrollment=false, enrollmentCalls=0;
+const hungResponses=new Set();
+const hang=(res,body=false)=>{hungResponses.add(res);res.on('close',()=>hungResponses.delete(res));if(body){res.writeHead(200,{'Content-Type':'application/json'});res.write('{"devices":');}};
 let authenticated=false, output='fixture PTY ready\r\n', failWrite=false, failRead=false, delayedRead=false, readDelay=0;
 const operations=[], errors=[], streams=new Set();
 const server=http.createServer(async(req,res)=>{
@@ -34,9 +37,9 @@ const server=http.createServer(async(req,res)=>{
     if(req.url==='/api/pair/requests'&&req.method==='GET')return send([{request_id:'00000000-0000-4000-8000-000000000004',device_name:'Windows Test PC',platform:'windows',arch:'x86_64',verification_code:'482731'}]);
     if(req.url==='/api/pair/00000000-0000-4000-8000-000000000004/approve'&&req.method==='POST')return send({state:'approved',device_id:'paired-fixture'});
     if(req.url==='/api/pair/00000000-0000-4000-8000-000000000004/reject'&&req.method==='POST')return send({ok:true});
-    if(req.url==='/api/enrollments'&&req.method==='POST')return send({code:'fixture-5-minute-code',expires_at_unix_ms:Date.now()+300000});
+    if(req.url==='/api/enrollments'&&req.method==='POST'){enrollmentCalls++;if(hangEnrollment)return hang(res);return send({code:'fixture-5-minute-code',expires_at_unix_ms:Date.now()+300000});}
     if(req.url==='/api/events'){res.writeHead(200,{'Content-Type':'text/event-stream'});res.write(': connected\n\n');streams.add(res);res.on('close',()=>streams.delete(res));return;}
-    if(req.url==='/api/overview')return send({devices,sessions,activity:[]});
+    if(req.url==='/api/overview'){overviewCalls++;if(overviewMode)return hang(res,overviewMode==='body');return send({devices,sessions,activity:[]});}
     if(req.url==='/api/devices')return send(devices);
     if(req.url==='/api/sessions')return send(sessions);
     if(req.url==='/api/activity')return send([]);
@@ -154,6 +157,12 @@ const server=http.createServer(async(req,res)=>{
     await page.goto(base);
     await page.locator('#overview-devices [data-device="online"]').waitFor();
     await page.locator('#add-device').click();
+    await page.locator('[data-quick-platform="windows"]').click();
+    const quickCommand=await page.locator('#quick-install-command').textContent();
+    assert.match(quickCommand,/Invoke-WebRequest[\s\S]*-UseBasicParsing[\s\S]*-OutFile/);
+    assert.match(quickCommand,/guid/);
+    assert.match(quickCommand,/LASTEXITCODE/);
+    assert.match(quickCommand,/finally[\s\S]*Remove-Item/);
     await page.waitForFunction(()=>document.querySelector('#pending-pairs').textContent.includes('Windows Test PC'));
     assert.match(await page.locator('#pending-pairs').textContent(),/482731/);
     await page.locator('#pending-pairs [data-pair-action="approve"]').click();
@@ -262,12 +271,39 @@ const server=http.createServer(async(req,res)=>{
     await page.locator('#overview-devices .device-row').first().waitFor();
     assert.equal(await page.evaluate(()=>getComputedStyle(document.documentElement).colorScheme),'dark');
 
+    // Both absent headers and a stalled JSON body must release the coalesced
+    // refresh promise. Last confirmed device data remains visibly stale.
+    for(const mode of ['headers','body']){
+      overviewMode=mode;
+      const before=overviewCalls;
+      await page.evaluate(()=>{void refresh();});
+      await page.waitForFunction(()=>document.querySelector('#gateway-label').textContent.includes('last confirmed data'),{},{timeout:15000});
+      assert(overviewCalls>before);
+      assert.equal(await page.locator('#overview-devices .device-row').count(),2);
+      assert.match(await page.locator('#gateway-label').getAttribute('title'),/timed out/);
+      overviewMode=null;
+      await page.evaluate(()=>refresh());
+      await page.waitForFunction(()=>document.querySelector('#gateway-label').textContent==='Gateway online');
+    }
+    // A mutation may have reached the server even if its response never arrives.
+    // The browser reports uncertainty and must never replay it automatically.
+    hangEnrollment=true;
+    const mutationsBefore=enrollmentCalls;
+    const timeout=await page.evaluate(async()=>{
+      try{await jsonFetch('/api/enrollments',{method:'POST',body:'{}'});return null;}
+      catch(error){return {code:error.code,message:error.message};}
+    });
+    hangEnrollment=false;
+    assert.equal(timeout.code,'request_timeout');
+    assert.match(timeout.message,/outcome may be unknown/);
+    assert.equal(enrollmentCalls,mutationsBefore+1);
+
     await page.setViewportSize({width:1280,height:900});
     await page.locator('[data-view="settings"]').click();await page.locator('#logout-session').click();
     await page.waitForFunction(()=>document.querySelector('#all-devices').textContent.includes('No devices'));
     assert.equal(await page.locator('#app-shell').isVisible(),false);assert.equal(await page.locator('#signin').isVisible(),true);
     assert.equal(await page.locator('#file-content').textContent(),'');assert.equal(await page.locator('#session-output').textContent(),'');
     assert.deepEqual(errors,[]);
-    console.log('Dashboard browser gate PASS: dedicated password sign-in gate, device views, literal rendering/XSS, file preview, filters, shared-ID terminal attach/input/resize/refresh/detach, no write replay, job/transfer cancel and active counts, mobile layout, sign-out clearing and CSP.');
-  }finally{await browser.close();for(const stream of streams)stream.end();await new Promise(resolve=>server.close(resolve));}
+    console.log('Dashboard browser gate PASS: dedicated password sign-in gate, device views, literal rendering/XSS, file preview, filters, shared-ID terminal attach/input/resize/refresh/detach, no write replay, job/transfer cancel and active counts, mobile layout, sign-out clearing, bounded header/body timeout recovery, mutation no-replay and CSP.');
+  }finally{for(const response of hungResponses)response.destroy();await browser.close();for(const stream of streams)stream.end();await new Promise(resolve=>server.close(resolve));}
 })().catch(error=>{console.error(error);server.close();process.exitCode=1;});
