@@ -49,6 +49,11 @@ def main():
                 tools = {tool['name']: tool for tool in rpc('tools/list', {})['result']['tools']}
                 assert len(tools) == 15 and 'copy' in tools, set(tools)
 
+                devices = rpc('tools/call', {'name':'devices','arguments':{}})['result']
+                assert devices['isError'] is False, devices
+                assert isinstance(devices['structuredContent'], dict), devices
+                assert isinstance(devices['structuredContent'].get('devices'), list), devices
+
                 def resolved(schema, node):
                     while '$ref' in node:
                         ref = node['$ref']
