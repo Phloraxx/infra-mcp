@@ -665,10 +665,11 @@ impl InfraMcp {
         name = "devices",
         description = "Discover enrolled devices, online state, capabilities and active persistent work. Select a returned unique device ID for later tools. Offline capabilities and disconnect reasons are cached history; Android capability names do not imply desktop-equivalent access."
     )]
-    async fn devices(&self) -> Result<McpJson<Vec<McpDeviceView>>, ToolError> {
-        Ok(McpJson(device_views(&self.state).await.map_err(
-            |error| ToolError::new("device_registry_error", error.to_string()),
-        )?))
+    async fn devices(&self) -> Result<McpJson<serde_json::Value>, ToolError> {
+        let devices = device_views(&self.state)
+            .await
+            .map_err(|error| ToolError::new("device_registry_error", error.to_string()))?;
+        Ok(McpJson(serde_json::json!({ "devices": devices })))
     }
 
     #[tool(
