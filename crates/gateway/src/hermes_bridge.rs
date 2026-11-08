@@ -19,10 +19,12 @@ pub struct HermesBridge {
     client: Client,
     base: Url,
     key_file: PathBuf,
+    key_in_env_file: bool,
     home: PathBuf,
     source: PathBuf,
     python: PathBuf,
     memory_writes: bool,
+    runs_enabled: bool,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -97,7 +99,14 @@ impl HermesBridge {
             {
                 return None;
             }
-            let key_file = PathBuf::from(env::var_os("INFRA_HERMES_API_KEY_FILE")?);
+            let (key_file, key_in_env_file) = match (
+                env::var_os("INFRA_HERMES_API_KEY_FILE"),
+                env::var_os("INFRA_HERMES_API_ENV_FILE"),
+            ) {
+                (Some(p), None) => (PathBuf::from(p), false),
+                (None, Some(p)) => (PathBuf::from(p), true),
+                _ => return None, // Exactly one credential source.
+            };
             let home = PathBuf::from(env::var_os("INFRA_HERMES_HOME")?);
             let source = PathBuf::from(env::var_os("INFRA_HERMES_SOURCE")?);
             let python = PathBuf::from(env::var_os("INFRA_HERMES_PYTHON")?);
@@ -116,10 +125,12 @@ impl HermesBridge {
                 client,
                 base,
                 key_file,
+                key_in_env_file,
                 home,
                 source,
                 python,
                 memory_writes: env::var("INFRA_HERMES_MEMORY_WRITES").as_deref() == Ok("1"),
+                runs_enabled: env::var("INFRA_HERMES_RUNS_ENABLED").as_deref() == Ok("1"),
             })
         })();
         if result.is_none() {
@@ -152,11 +163,37 @@ impl HermesBridge {
                 ));
             }
         }
-        let key = tokio::fs::read_to_string(&self.key_file)
+        let raw = tokio::fs::read_to_string(&self.key_file)
             .await
             .map_err(|_| unavailable("Hermes bridge key file unreadable"))?;
-        let key = key.trim();
-        if key.is_empty() || key.contains(['\n', '\r']) {
+        let value = if self.key_in_env_file {
+            let candidates: Vec<_> = raw
+                .lines()
+                .filter_map(|line| {
+                    line.trim_start()
+                        .strip_prefix("API_SERVER_KEY=")
+                        .map(str::trim)
+                })
+                .collect();
+            if candidates.len() != 1 {
+                return Err(unavailable(
+                    "Hermes env file must contain exactly one API_SERVER_KEY",
+                ));
+            }
+            let value = candidates[0];
+            if value.len() >= 2
+                && ((value.starts_with('"') && value.ends_with('"'))
+                    || (value.starts_with('\'') && value.ends_with('\'')))
+            {
+                value[1..value.len() - 1].to_owned()
+            } else {
+                value.to_owned()
+            }
+        } else {
+            raw.trim().to_owned()
+        };
+        let key = value.as_str();
+        if key.is_empty() || key.contains(['\n', '\r']) || key.len() > 1024 {
             return Err(unavailable("Hermes bridge key missing or malformed"));
         }
         let mut request = self.client.request(method, url).bearer_auth(key);
@@ -202,6 +239,11 @@ impl HermesBridge {
         match input.action.as_str() {
             "capabilities" => self.api(Method::GET, "v1/capabilities", None, None).await,
             "start" => {
+                if !self.runs_enabled {
+                    return Err(unavailable(
+                        "Hermes task delegation disabled by gateway operator",
+                    ));
+                }
                 let message = input
                     .input
                     .as_deref()
@@ -229,6 +271,11 @@ impl HermesBridge {
                     .await
             }
             "status" | "stop" => {
+                if input.action == "stop" && !self.runs_enabled {
+                    return Err(unavailable(
+                        "Hermes task delegation disabled by gateway operator",
+                    ));
+                }
                 let run_id = input.run_id.ok_or_else(|| invalid("run_id is required"))?;
                 if !run_id.starts_with("run_") || !valid_id(&run_id) {
                     return Err(invalid("Invalid Hermes run_id"));
@@ -446,10 +493,12 @@ mod tests {
             client: Client::new(),
             base: Url::parse(&format!("http://{addr}/")).unwrap(),
             key_file: key,
+            key_in_env_file: false,
             home: scratch.path().to_owned(),
             source: scratch.path().to_owned(),
             python: scratch.path().join("unused"),
             memory_writes: false,
+            runs_enabled: true,
         };
         let response = bridge
             .run(HermesInput {
@@ -465,6 +514,25 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(response["run_id"], "run_fixture");
+        assert_eq!(calls.load(Ordering::Relaxed), 1);
+        let read_only = HermesBridge {
+            runs_enabled: false,
+            ..bridge.clone()
+        };
+        let denied_run = read_only
+            .run(HermesInput {
+                action: "start".into(),
+                input: Some("Must never run.".into()),
+                request_id: Some("client-124".into()),
+                run_id: None,
+                session_id: None,
+                limit: None,
+                offset: None,
+                query: None,
+            })
+            .await
+            .unwrap_err();
+        assert!(format!("{denied_run:?}").contains("disabled"));
         assert_eq!(calls.load(Ordering::Relaxed), 1);
         let denied = bridge
             .memory(HermesMemoryInput {

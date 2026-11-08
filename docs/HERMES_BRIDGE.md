@@ -37,15 +37,17 @@ All values here are examples; substitute paths for your host and keep real crede
 
     INFRA_HERMES_ENABLED=1
     INFRA_HERMES_BASE_URL=http://127.0.0.1:8642/
-    INFRA_HERMES_API_KEY_FILE=/run/user/1000/infra-hermes-api.key
+    INFRA_HERMES_API_ENV_FILE=/home/example/.hermes/.env
+    # Alternatively, use INFRA_HERMES_API_KEY_FILE for a dedicated key-only file (not both).
     INFRA_HERMES_HOME=/home/example/.hermes
     INFRA_HERMES_SOURCE=/home/example/.hermes/hermes-agent
     INFRA_HERMES_PYTHON=/home/example/.hermes/installs/ACTIVE-ENV/venv/bin/python
     INFRA_HERMES_MEMORY_WRITES=0
+    INFRA_HERMES_RUNS_ENABLED=0
 
-The key file contains ONLY the Hermes bearer secret; chmod 0600 and restrict it to the Infra gateway owner. Do not pass the token in CLI arguments or commit it. Hermes HTTP remains on loopback. This bridge refuses non-loopback base URLs. Use the active Hermes dependency venv for Python, not the bare embedded python binary. Hermes updates can change this path.
+Use exactly one credential source: API_ENV_FILE reads only the API_SERVER_KEY variable from an existing Hermes .env; API_KEY_FILE expects a file containing only the bearer key. Both must be mode 0600 and readable by the Infra gateway owner. Do not pass the token in CLI arguments or commit it. Hermes HTTP remains on loopback. This bridge refuses non-loopback base URLs. Use the active Hermes dependency venv for Python, not the bare embedded python binary. Hermes updates can change this path.
 
-Without INFRA_HERMES_ENABLED=1 and valid configuration the tools fail closed. Memory writes require a separate INFRA_HERMES_MEMORY_WRITES=1 setting. Do not enable it until safe read-only operation and authorization are verified.
+Without INFRA_HERMES_ENABLED=1 and valid configuration the tools fail closed. Memory writes require a separate INFRA_HERMES_MEMORY_WRITES=1 setting; starting/stopping model-driven Hermes runs requires INFRA_HERMES_RUNS_ENABLED=1. Both are disabled by default. Do not enable it until safe read-only operation and authorization are verified.
 
 Note: existing Infra MCP clients presently share the owner authorization level. This bridge does not implement fine-grained OAuth scopes. A future stage must enforce separate agent/memory/device permissions server-side for less-trusted clients.
 

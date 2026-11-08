@@ -57,8 +57,8 @@ def main():
 
     with tempfile.TemporaryDirectory(prefix="infra-hermes-bridge-") as temp:
         d = pathlib.Path(temp)
-        key = d / "hermes-test-key"
-        key.write_text("fake-hermes-test-key")
+        key = d / "hermes-test-env"
+        key.write_text("# Isolated fixture, not a real secret\nAPI_SERVER_KEY='fake-hermes-test-key'\nOTHER_KEY=unrelated\n")
         key.chmod(0o600)
         fake = ThreadingHTTPServer(("127.0.0.1", 0), FakeHermes)
         thread = threading.Thread(target=fake.serve_forever, daemon=True)
@@ -75,11 +75,12 @@ def main():
             "INFRA_ADMIN_TOKEN": token,
             "INFRA_HERMES_ENABLED": "1",
             "INFRA_HERMES_BASE_URL": f"http://127.0.0.1:{fake.server_port}/",
-            "INFRA_HERMES_API_KEY_FILE": str(key),
+            "INFRA_HERMES_API_ENV_FILE": str(key),
             "INFRA_HERMES_HOME": str(d / "hermes-home"),
             "INFRA_HERMES_SOURCE": str(source),
             "INFRA_HERMES_PYTHON": str(python),
             "INFRA_HERMES_MEMORY_WRITES": "1",
+            "INFRA_HERMES_RUNS_ENABLED": "0",
         })
         (d / "hermes-home").mkdir(mode=0o700)
         binary = ROOT / "target" / "debug" / "infra-gateway"
@@ -107,6 +108,10 @@ def main():
 
                     capabilities = call("hermes", {"action": "capabilities"})
                     assert capabilities["platform"] == "hermes-agent"
+                    forbidden = rpc.tool("hermes", {"action": "start", "input": "Do not invoke",
+                                                    "request_id": "fixture-disabled-1"})
+                    assert forbidden["isError"], forbidden
+                    assert forbidden["structuredContent"].get("error_code") == "unsupported"
                     sessions = call("hermes", {"action": "sessions", "limit": 1})
                     assert "data" in sessions
 
