@@ -1,5 +1,6 @@
 mod auth;
 mod copy;
+mod hermes_bridge;
 mod mcp_actions;
 mod mcp_result;
 mod oauth;
@@ -25,6 +26,7 @@ use axum::{
 };
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use ed25519_dalek::{Signature, VerifyingKey};
+use hermes_bridge::{HermesBridge, HermesInput, HermesMemoryInput};
 use hmac::{Hmac, Mac};
 use infra_protocol::{
     AgentOperation, AgentRequest, AgentResponse, AgentToGateway, AuthChallenge, ContainerAction,
@@ -83,6 +85,7 @@ struct AppState {
     pending: PendingRequests,
     events: broadcast::Sender<DashboardEvent>,
     store: Store,
+    hermes: Option<Arc<HermesBridge>>,
 }
 
 impl AppState {
@@ -99,6 +102,7 @@ impl AppState {
             pending: PendingRequests::default(),
             events,
             store,
+            hermes: HermesBridge::from_env(),
         }
     }
 
@@ -973,6 +977,34 @@ impl InfraMcp {
             300_000,
         )
         .await
+    }
+
+    #[tool(
+        name = "hermes",
+        description = "Delegate a task to the configured Hermes profile (start), inspect/cancel runs (status/stop), or list/read its API-owned sessions (sessions/messages). Start requires a stable request_id for idempotency. Capabilities checks are cheap; actual tasks may invoke models and Infra tools."
+    )]
+    async fn hermes(
+        &self,
+        Parameters(input): Parameters<HermesInput>,
+    ) -> Result<McpJson<serde_json::Value>, ToolError> {
+        let bridge = self.state.hermes.as_ref().ok_or_else(|| {
+            ToolError::new("unsupported", "Hermes bridge is disabled or misconfigured")
+        })?;
+        Ok(McpJson(bridge.run(input).await?))
+    }
+
+    #[tool(
+        name = "hermes_memory",
+        description = "Read or change the configured Hermes profile's built-in memory (MEMORY.md / USER.md). Uses Hermes MemoryStore for locked validated writes. Actions: read, add, patch, remove. Writes are disabled unless separately enabled by the operator. Read before changing an entry."
+    )]
+    async fn hermes_memory(
+        &self,
+        Parameters(input): Parameters<HermesMemoryInput>,
+    ) -> Result<McpJson<serde_json::Value>, ToolError> {
+        let bridge = self.state.hermes.as_ref().ok_or_else(|| {
+            ToolError::new("unsupported", "Hermes bridge is disabled or misconfigured")
+        })?;
+        Ok(McpJson(bridge.memory(input).await?))
     }
 
     #[tool(

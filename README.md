@@ -140,6 +140,10 @@ The foundation and first persistent-control layer are implemented. See [`docs/IM
 
 For safe local end-to-end checks, `scripts/smoke-v1.sh` verifies signed enrollment/authentication, MCP execution and identity reconnect. `scripts/smoke-install-dashboard.sh` additionally exercises the embedded dashboard, one-time enrollment, native installer source mode, persisted local config/identity, online reconnect, `infra status`, `infra doctor`, sessions and activity APIs. Both use isolated temporary state and do not deploy or modify v0.3.
 
+## Optional Hermes bridge
+
+An opt-in bridge can expose a local Hermes agent, its native memory and its session search alongside existing device tools through the same Infra MCP endpoint. See [Hermes bridge design, configuration, and acceptance gates](docs/HERMES_BRIDGE.md). This is not enabled in production by default.
+
 ## License
 
 No license has been selected yet. Do not assume third-party redistribution rights until a license is added.

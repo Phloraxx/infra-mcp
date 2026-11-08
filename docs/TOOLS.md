@@ -5,8 +5,8 @@
 The MCP-contract branch adds typed action enums and argument descriptions to the
 existing tool families. Conditional required fields are still checked by the
 gateway rather than a deeply nested schema. Unknown actions are rejected during
-deserialization. The raw gateway exposes 15 tools including cross-device `copy`;
-a host/connector may need its catalog refreshed before showing that tool.
+deserialization. The raw gateway exposes 17 tools including cross-device `copy` and optional `hermes`/`hermes_memory`;
+a host/connector may need its catalog refreshed before showing new tools. The Hermes bridge defaults to disabled; see docs/HERMES_BRIDGE.md.
 
 Tool failures now use `isError: true` and structured `error_code`, `retryable`, and
 `next_action` fields. Existing `status`, request IDs, stdout/stderr, exit code and
