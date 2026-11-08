@@ -52,5 +52,7 @@ if __name__ == "__main__":
         main()
     except Exception as exc:
         # Never print content, credentials or local filesystem paths in gateway output.
-        print(json.dumps({"success": False, "error": type(exc).__name__}), flush=True)
+        name = exc.name if isinstance(exc, ModuleNotFoundError) else None
+        detail = f"{type(exc).__name__}: {name}" if name and name.replace("_", "").replace(".", "").isalnum() else type(exc).__name__
+        print(json.dumps({"success": False, "error": detail}), flush=True)
         sys.exit(1)

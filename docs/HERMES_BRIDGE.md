@@ -72,3 +72,9 @@ This Hermes-side tool selection is defense against accidental looping, NOT a sec
 - Semantic/vector memory provider, Honcho, or PostgreSQL.
 - Automatic multi-profile memory merging (memory remains Hermes profile-scoped).
 - Changes to Hermes source, Infra native device agents, or production services.
+
+## Repeatable isolated tests
+
+Run the existing MCP contract smoke with python3 scripts/smoke-mcp-contract.py. It expects 17 tools and tests that both new families are unavailable by default.
+
+For an active, disposable integration test supply HERMES_TEST_SOURCE pointing to an installed Hermes source checkout, and HERMES_TEST_PYTHON pointing to its active virtual-environment python symlink; run python3 scripts/smoke-hermes-bridge.py. The test creates a fake authenticated Hermes API on loopback, a private temporary Infra database, a temporary Hermes memory home, and automatically cleans them all up. It never accesses live Hermes credentials, submits model runs or touches real memory. Do not canonicalize/resolve the python symlink: doing so bypasses the virtual environment site-packages.
