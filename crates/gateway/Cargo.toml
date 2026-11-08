@@ -18,6 +18,7 @@ infra-protocol = { path = "../protocol" }
 serde.workspace = true
 serde_json.workspace = true
 rmcp.workspace = true
+reqwest.workspace = true
 schemars.workspace = true
 rusqlite.workspace = true
 sha2.workspace = true

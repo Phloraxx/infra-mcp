@@ -1438,6 +1438,7 @@ dependencies = [
  "getrandom 0.3.4",
  "hmac 0.12.1",
  "infra-protocol",
+ "reqwest",
  "rmcp",
  "rusqlite",
  "schemars",
