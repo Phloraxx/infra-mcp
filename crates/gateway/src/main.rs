@@ -312,6 +312,14 @@ enum DispatchError {
     QueueBusy,
 }
 
+#[derive(Debug, Default, Deserialize, JsonSchema)]
+struct McpDevicesInput {
+    /// Optional. Set true for the small routing view (name, ID, online, platform, capabilities);
+    /// omit or false to retain the complete legacy device metadata response.
+    #[serde(default)]
+    compact: bool,
+}
+
 #[derive(Debug, Deserialize, JsonSchema)]
 struct McpExecInput {
     /// Stable device ID or unique name from devices. Check online state and capabilities first.
@@ -341,42 +349,78 @@ struct McpExecOutput {
     error: Option<String>,
 }
 
+// Internally tagged action schemas let MCP clients see which parameters are
+// actually required instead of a bag of optional fields.
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(tag = "action", rename_all = "snake_case")]
+enum McpFileActionInput {
+    Read {
+        path: String,
+        #[serde(default)]
+        offset: Option<u64>,
+        #[serde(default)]
+        length: Option<usize>,
+    },
+    Write {
+        path: String,
+        content: String,
+        #[serde(default)]
+        create_parents: Option<bool>,
+    },
+    Append {
+        path: String,
+        content: String,
+        #[serde(default)]
+        create_parents: Option<bool>,
+    },
+    ExactEdit {
+        path: String,
+        old: String,
+        new: String,
+        #[serde(default)]
+        expected_replacements: Option<usize>,
+    },
+    Hash {
+        path: String,
+    },
+    List {
+        path: String,
+        #[serde(default)]
+        offset: Option<u64>,
+        #[serde(default)]
+        length: Option<usize>,
+    },
+    Stat {
+        path: String,
+    },
+    Mkdir {
+        path: String,
+    },
+    Copy {
+        path: String,
+        destination: String,
+        #[serde(default)]
+        recursive: Option<bool>,
+    },
+    Move {
+        path: String,
+        destination: String,
+    },
+    Trash {
+        path: String,
+    },
+    DeletePermanent {
+        path: String,
+        #[serde(default)]
+        recursive: Option<bool>,
+    },
+}
 #[derive(Debug, Deserialize, JsonSchema)]
 struct McpFilesInput {
     /// Stable device ID or unique name from devices. Check online state and capabilities first.
     device: String,
-    /// Choose an allowed action. Only that action is executed; provide its required fields.
-    action: FileActionName,
-    #[serde(default)]
-    /// Target path. Desktop paths follow the remote OS; Android paths must stay inside its authorized workspace.
-    path: Option<String>,
-    #[serde(default)]
-    /// Required destination path for copy/move on the same device; use the copy tool for another device.
-    destination: Option<String>,
-    #[serde(default)]
-    /// Required UTF-8 content for write/append. These actions can mutate files.
-    content: Option<String>,
-    #[serde(default)]
-    /// For read: byte offset. For list: entry offset in native filename order (0..100000), requiring files.list_page capability. Continue with next_offset while has_more; restart at zero if the directory changes.
-    offset: Option<u64>,
-    #[serde(default)]
-    /// For read: maximum bytes. For list: maximum entries (1..1000, default 1000), requiring files.list_page when supplied. A response byte cap can shorten the page; use returned next_offset, not offset + length.
-    length: Option<usize>,
-    #[serde(default)]
-    /// Allow recursive behavior for the selected directory action. Permanent deletion is consequential.
-    recursive: Option<bool>,
-    #[serde(default)]
-    /// Create missing parent directories for the selected write/upload action; default false.
-    create_parents: Option<bool>,
-    #[serde(default)]
-    /// Required exact source text for exact_edit; matching is literal.
-    old: Option<String>,
-    #[serde(default)]
-    /// Required replacement text for exact_edit.
-    new: Option<String>,
-    #[serde(default)]
-    /// Expected exact_edit match count. Use this to reject unexpected file changes.
-    expected_replacements: Option<usize>,
+    #[serde(flatten)]
+    action: McpFileActionInput,
 }
 #[derive(Debug, Deserialize, JsonSchema)]
 struct McpSearchInput {
@@ -424,62 +468,93 @@ struct McpProcessesInput {
     force: Option<bool>,
 }
 #[derive(Debug, Deserialize, JsonSchema)]
+#[serde(tag = "action", rename_all = "snake_case")]
+enum McpJobActionInput {
+    Start {
+        /// Noninteractive command (Windows cmd.exe; Unix /bin/sh). Use terminal for interactive work.
+        command: String,
+        #[serde(default)]
+        cwd: Option<String>,
+        #[serde(default)]
+        timeout_ms: Option<u64>,
+    },
+    List {
+        /// Optional. Short list with job ID/status/exit_code and timestamps, excluding the command.
+        #[serde(default)]
+        compact: Option<bool>,
+    },
+    Read {
+        /// UUID returned by start; reuse it across reconnects.
+        job_id: String,
+        #[serde(default)]
+        offset: Option<u64>,
+        #[serde(default)]
+        length: Option<usize>,
+    },
+    Wait {
+        /// UUID returned by start; do not start another job to check progress.
+        job_id: String,
+        #[serde(default)]
+        offset: Option<u64>,
+        #[serde(default)]
+        length: Option<usize>,
+        /// Bounded long-poll milliseconds, default 10000, max 20000.
+        #[serde(default)]
+        wait_timeout_ms: Option<u64>,
+    },
+    Cancel {
+        job_id: String,
+    },
+}
+#[derive(Debug, Deserialize, JsonSchema)]
 struct McpJobsInput {
     /// Stable device ID or unique name from devices. Check online state and capabilities first.
     device: String,
-    /// Choose an allowed action. Only that action is executed; provide its required fields.
-    action: JobActionName,
-    #[serde(default)]
-    /// Command to execute. Desktop Windows uses cmd.exe, Unix uses /bin/sh; Android is restricted. Use terminal for interactive state.
-    command: Option<String>,
-    #[serde(default)]
-    /// Working directory for this operation only. Omit to use the agent default; it does not change later calls.
-    cwd: Option<String>,
-    #[serde(default)]
-    /// Optional job execution deadline in milliseconds, clamped to 100..604800000. Omit for no job deadline.
-    timeout_ms: Option<u64>,
-    #[serde(default)]
-    /// Required returned job UUID for read/cancel. Reuse the ID across reconnects; do not start duplicate work.
-    job_id: Option<String>,
-    #[serde(default)]
-    /// Byte offset for range/output/chunk reads; preserve the returned next offset rather than counting characters.
-    offset: Option<u64>,
-    #[serde(default)]
-    /// Maximum bytes for read/output/chunk actions, subject to agent caps. Does not limit directory list.
-    length: Option<usize>,
+    #[serde(flatten)]
+    action: McpJobActionInput,
+}
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(tag = "action", rename_all = "snake_case")]
+enum McpTerminalActionInput {
+    Open {
+        /// Interactive command to start in a persistent PTY.
+        command: String,
+        #[serde(default)]
+        cwd: Option<String>,
+        #[serde(default)]
+        rows: Option<u16>,
+        #[serde(default)]
+        cols: Option<u16>,
+    },
+    List,
+    Read {
+        /// PTY session UUID returned by open.
+        session_id: String,
+        #[serde(default)]
+        offset: Option<u64>,
+        #[serde(default)]
+        length: Option<usize>,
+    },
+    Write {
+        session_id: String,
+        data: String,
+    },
+    Resize {
+        session_id: String,
+        rows: u16,
+        cols: u16,
+    },
+    Close {
+        session_id: String,
+    },
 }
 #[derive(Debug, Deserialize, JsonSchema)]
 struct McpTerminalInput {
     /// Stable device ID or unique name from devices. Check online state and capabilities first.
     device: String,
-    /// Choose an allowed action. Only that action is executed; provide its required fields.
-    action: TerminalActionName,
-    #[serde(default)]
-    /// Command to execute. Desktop Windows uses cmd.exe, Unix uses /bin/sh; Android is restricted. Use terminal for interactive state.
-    command: Option<String>,
-    #[serde(default)]
-    /// Working directory for this operation only. Omit to use the agent default; it does not change later calls.
-    cwd: Option<String>,
-    #[serde(default)]
-    /// Required returned PTY UUID for read/write/resize/close. Reattach with the same ID.
-    session_id: Option<String>,
-    #[serde(default)]
-    /// Required terminal write data, including newline when needed. Never replay an uncertain write.
-    data: Option<String>,
-    #[serde(default)]
-    /// Terminal row count; required with cols for resize.
-    rows: Option<u16>,
-    #[serde(default)]
-    /// Terminal column count; required with rows for resize.
-    cols: Option<u16>,
-    #[serde(default)]
-    /// Byte offset for range/output/chunk reads; preserve the returned next offset rather than counting characters.
-    offset: Option<u64>,
-    #[serde(default)]
-    /// Maximum bytes for read/output/chunk actions, subject to agent caps. Does not limit directory list.
-    length: Option<usize>,
+    #[serde(flatten)]
+    action: McpTerminalActionInput,
 }
-
 #[derive(Debug, Deserialize, JsonSchema)]
 struct McpCopyInput {
     /// Source device ID or unique name from devices; transfer capability is required.
@@ -669,12 +744,26 @@ impl InfraMcp {
 impl InfraMcp {
     #[tool(
         name = "devices",
-        description = "Discover enrolled devices, online state, capabilities and active persistent work. Select a returned unique device ID for later tools. Offline capabilities and disconnect reasons are cached history; Android capability names do not imply desktop-equivalent access."
+        description = "Discover connected devices. Use compact=true for minimal name/ID/online/platform/capabilities routing metadata, otherwise get all fields. Use the returned unique device ID if names are ambiguous; Android capabilities are restricted."
     )]
-    async fn devices(&self) -> Result<McpJson<serde_json::Value>, ToolError> {
+    async fn devices(
+        &self,
+        Parameters(input): Parameters<McpDevicesInput>,
+    ) -> Result<McpJson<serde_json::Value>, ToolError> {
         let devices = device_views(&self.state)
             .await
             .map_err(|error| ToolError::new("device_registry_error", error.to_string()))?;
+        if input.compact {
+            return Ok(McpJson(serde_json::json!({
+                "devices": devices.iter().map(|device| serde_json::json!({
+                    "device_id": device.device_id,
+                    "device_name": device.device_name,
+                    "platform": device.platform,
+                    "online": device.online,
+                    "capabilities": device.capabilities,
+                })).collect::<Vec<_>>()
+            })));
+        }
         Ok(McpJson(serde_json::json!({ "devices": devices })))
     }
 
@@ -713,77 +802,89 @@ impl InfraMcp {
         &self,
         Parameters(input): Parameters<McpFilesInput>,
     ) -> Result<McpJson<serde_json::Value>, ToolError> {
-        let action = match input.action.as_str() {
-            "read" => FileAction::Read {
-                path: required(input.path, "path")?,
-                offset: input.offset,
-                length: input.length,
+        let action = match input.action {
+            McpFileActionInput::Read {
+                path,
+                offset,
+                length,
+            } => FileAction::Read {
+                path,
+                offset,
+                length,
             },
-            "write" => FileAction::Write {
-                path: required(input.path, "path")?,
-                content: required(input.content, "content")?,
-                create_parents: input.create_parents.unwrap_or(false),
+            McpFileActionInput::Write {
+                path,
+                content,
+                create_parents,
+            } => FileAction::Write {
+                path,
+                content,
+                create_parents: create_parents.unwrap_or(false),
             },
-            "append" => FileAction::Append {
-                path: required(input.path, "path")?,
-                content: required(input.content, "content")?,
-                create_parents: input.create_parents.unwrap_or(false),
+            McpFileActionInput::Append {
+                path,
+                content,
+                create_parents,
+            } => FileAction::Append {
+                path,
+                content,
+                create_parents: create_parents.unwrap_or(false),
             },
-            "exact_edit" => FileAction::ExactEdit {
-                path: required(input.path, "path")?,
-                old: required(input.old, "old")?,
-                new: required(input.new, "new")?,
-                expected_replacements: input.expected_replacements,
+            McpFileActionInput::ExactEdit {
+                path,
+                old,
+                new,
+                expected_replacements,
+            } => FileAction::ExactEdit {
+                path,
+                old,
+                new,
+                expected_replacements,
             },
-            "hash" => FileAction::Hash {
-                path: required(input.path, "path")?,
-            },
-            "list" => {
-                if input
-                    .length
-                    .is_some_and(|length| length == 0 || length > MAX_DIRECTORY_PAGE_SIZE)
-                {
+            McpFileActionInput::Hash { path } => FileAction::Hash { path },
+            McpFileActionInput::List {
+                path,
+                offset,
+                length,
+            } => {
+                if length.is_some_and(|n| n == 0 || n > MAX_DIRECTORY_PAGE_SIZE) {
                     return Err(ToolError::invalid(format!(
                         "files.list length must be between 1 and {MAX_DIRECTORY_PAGE_SIZE} entries"
                     )));
                 }
-                if input
-                    .offset
-                    .is_some_and(|offset| offset > MAX_DIRECTORY_ENTRIES as u64)
-                {
+                if offset.is_some_and(|n| n > MAX_DIRECTORY_ENTRIES as u64) {
                     return Err(ToolError::invalid(format!(
                         "files.list offset must not exceed {MAX_DIRECTORY_ENTRIES} entries"
                     )));
                 }
                 FileAction::List {
-                    path: required(input.path, "path")?,
-                    offset: input.offset,
-                    length: input.length,
+                    path,
+                    offset,
+                    length,
                 }
             }
-            "stat" => FileAction::Stat {
-                path: required(input.path, "path")?,
+            McpFileActionInput::Stat { path } => FileAction::Stat { path },
+            McpFileActionInput::Mkdir { path } => FileAction::Mkdir { path },
+            McpFileActionInput::Copy {
+                path,
+                destination,
+                recursive,
+            } => FileAction::Copy {
+                source: path,
+                destination,
+                recursive: recursive.unwrap_or(false),
             },
-            "mkdir" => FileAction::Mkdir {
-                path: required(input.path, "path")?,
+            McpFileActionInput::Move { path, destination } => FileAction::Move {
+                source: path,
+                destination,
             },
-            "copy" => FileAction::Copy {
-                source: required(input.path, "path")?,
-                destination: required(input.destination, "destination")?,
-                recursive: input.recursive.unwrap_or(false),
-            },
-            "move" => FileAction::Move {
-                source: required(input.path, "path")?,
-                destination: required(input.destination, "destination")?,
-            },
-            "trash" => FileAction::Trash {
-                path: required(input.path, "path")?,
-            },
-            "delete_permanent" => FileAction::DeletePermanent {
-                path: required(input.path, "path")?,
-                recursive: input.recursive.unwrap_or(false),
-            },
-            _ => return Err("unknown files action".into()),
+            McpFileActionInput::Trash { path } => FileAction::Trash { path },
+            McpFileActionInput::DeletePermanent { path, recursive } => {
+                FileAction::DeletePermanent {
+                    path,
+                    recursive: recursive.unwrap_or(false),
+                }
+            }
         };
         tool_operation(
             &self.state,
@@ -853,36 +954,97 @@ impl InfraMcp {
 
     #[tool(
         name = "jobs",
-        description = "Start or inspect durable noninteractive command jobs. start requires command; read/cancel require job_id. Preserve returned IDs and byte offsets across reconnects. Windows commands use cmd.exe; Unix uses /bin/sh. Job execution status is inside the returned job metadata."
+        description = "Manage durable background work. start: command; list: optional compact=true; read/wait/cancel: job_id; read/wait: offset and length. wait blocks for new output or completion (default 10s, max 20s). Reuse IDs and next_offset; do not replay uncertain work."
     )]
     async fn jobs(
         &self,
         Parameters(input): Parameters<McpJobsInput>,
     ) -> Result<McpJson<serde_json::Value>, ToolError> {
-        let action = match input.action.as_str() {
-            "start" => JobAction::Start {
-                command: required(input.command, "command")?,
-                cwd: input.cwd,
-                timeout_ms: input.timeout_ms,
+        let compact_list = matches!(
+            &input.action,
+            McpJobActionInput::List {
+                compact: Some(true)
+            }
+        );
+        if matches!(&input.action, McpJobActionInput::Wait { .. }) {
+            // Older enrolled agents may understand "jobs" but not the newer
+            // wait variant. Avoid sending a wire enum they cannot deserialize.
+            let device_id = resolve_device(&self.state, &input.device)
+                .await
+                .map_err(dispatch_error)?;
+            if let Some(connection) = self.state.devices.read().await.get(&device_id)
+                && !connection
+                    .hello
+                    .capabilities
+                    .iter()
+                    .any(|c| c == "jobs.wait_v1")
+            {
+                return Err(ToolError::new(
+                    "unsupported",
+                    "jobs.wait requires an agent advertising jobs.wait_v1; use jobs.read until it is upgraded",
+                ));
+            }
+        }
+        let action = match input.action {
+            McpJobActionInput::Start {
+                command,
+                cwd,
+                timeout_ms,
+            } => JobAction::Start {
+                command,
+                cwd,
+                timeout_ms,
             },
-            "list" => JobAction::List,
-            "read" => JobAction::Read {
-                job_id: parse_uuid(input.job_id, "job_id")?,
-                offset: input.offset,
-                length: input.length,
+            McpJobActionInput::List { .. } => JobAction::List,
+            McpJobActionInput::Read {
+                job_id,
+                offset,
+                length,
+            } => JobAction::Read {
+                job_id: parse_uuid(Some(job_id), "job_id")?,
+                offset,
+                length,
             },
-            "cancel" => JobAction::Cancel {
-                job_id: parse_uuid(input.job_id, "job_id")?,
+            McpJobActionInput::Wait {
+                job_id,
+                offset,
+                length,
+                wait_timeout_ms,
+            } => JobAction::Wait {
+                job_id: parse_uuid(Some(job_id), "job_id")?,
+                offset,
+                length,
+                wait_timeout_ms,
             },
-            _ => return Err("unknown jobs action".into()),
+            McpJobActionInput::Cancel { job_id } => JobAction::Cancel {
+                job_id: parse_uuid(Some(job_id), "job_id")?,
+            },
         };
-        tool_operation(
+        let mut response = tool_operation(
             &self.state,
             input.device,
             AgentOperation::Jobs(JobRequest { action }),
             65_000,
         )
-        .await
+        .await?;
+        if compact_list
+            && let Some(jobs) = response
+                .0
+                .pointer_mut("/body/jobs")
+                .and_then(|v| v.as_array_mut())
+        {
+            for job in jobs {
+                *job = serde_json::json!({
+                    "id":job["id"],
+                    "status":job["status"],
+                    "exit_code":job["exit_code"],
+                    "started_at_unix_ms":job["started_at_unix_ms"],
+                    "finished_at_unix_ms":job["finished_at_unix_ms"],
+                    "output_truncated":job["output_truncated"]
+                });
+            }
+        }
+        Ok(response)
     }
 
     #[tool(
@@ -893,32 +1055,44 @@ impl InfraMcp {
         &self,
         Parameters(input): Parameters<McpTerminalInput>,
     ) -> Result<McpJson<serde_json::Value>, ToolError> {
-        let action = match input.action.as_str() {
-            "open" => TerminalAction::Open {
-                command: required(input.command, "command")?,
-                cwd: input.cwd,
-                rows: input.rows,
-                cols: input.cols,
+        let action = match input.action {
+            McpTerminalActionInput::Open {
+                command,
+                cwd,
+                rows,
+                cols,
+            } => TerminalAction::Open {
+                command,
+                cwd,
+                rows,
+                cols,
             },
-            "list" => TerminalAction::List,
-            "read" => TerminalAction::Read {
-                session_id: parse_uuid(input.session_id, "session_id")?,
-                offset: input.offset,
-                length: input.length,
+            McpTerminalActionInput::List => TerminalAction::List,
+            McpTerminalActionInput::Read {
+                session_id,
+                offset,
+                length,
+            } => TerminalAction::Read {
+                session_id: parse_uuid(Some(session_id), "session_id")?,
+                offset,
+                length,
             },
-            "write" => TerminalAction::Write {
-                session_id: parse_uuid(input.session_id, "session_id")?,
-                data: required(input.data, "data")?,
+            McpTerminalActionInput::Write { session_id, data } => TerminalAction::Write {
+                session_id: parse_uuid(Some(session_id), "session_id")?,
+                data,
             },
-            "resize" => TerminalAction::Resize {
-                session_id: parse_uuid(input.session_id, "session_id")?,
-                rows: required(input.rows, "rows")?,
-                cols: required(input.cols, "cols")?,
+            McpTerminalActionInput::Resize {
+                session_id,
+                rows,
+                cols,
+            } => TerminalAction::Resize {
+                session_id: parse_uuid(Some(session_id), "session_id")?,
+                rows,
+                cols,
             },
-            "close" => TerminalAction::Close {
-                session_id: parse_uuid(input.session_id, "session_id")?,
+            McpTerminalActionInput::Close { session_id } => TerminalAction::Close {
+                session_id: parse_uuid(Some(session_id), "session_id")?,
             },
-            _ => return Err("unknown terminal action".into()),
         };
         tool_operation(
             &self.state,
@@ -1954,7 +2128,10 @@ async fn dashboard_operation(
             })
             | AgentOperation::Terminal(_)
             | AgentOperation::Jobs(JobRequest {
-                action: JobAction::List | JobAction::Read { .. } | JobAction::Cancel { .. }
+                action: JobAction::List
+                    | JobAction::Read { .. }
+                    | JobAction::Wait { .. }
+                    | JobAction::Cancel { .. }
             })
             | AgentOperation::Files(FileRequest {
                 action: FileAction::List { .. }

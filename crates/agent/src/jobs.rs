@@ -22,6 +22,8 @@ use uuid::Uuid;
 
 const MAX_JOB_OUTPUT: usize = 16 * 1024 * 1024;
 const WORKER_STARTUP_GRACE_MS: u64 = 10_000;
+const DEFAULT_WAIT_MS: u64 = 10_000;
+const MAX_WAIT_MS: u64 = 20_000;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct JobMeta {
@@ -72,6 +74,17 @@ impl Jobs {
                 offset,
                 length,
             } => self.read(job_id, offset.unwrap_or(0), bounded_length(length)),
+            JobAction::Wait {
+                job_id,
+                offset,
+                length,
+                wait_timeout_ms,
+            } => self.wait(
+                job_id,
+                offset.unwrap_or(0),
+                bounded_length(length),
+                wait_timeout_ms,
+            ),
             JobAction::Cancel { job_id } => self.cancel(job_id),
         }
     }
@@ -175,6 +188,43 @@ impl Jobs {
             "output": String::from_utf8_lossy(&bytes),
             "has_more": next < size,
         }))
+    }
+
+    // A bounded long poll happens in spawn_blocking, leaving the async
+    // connection/heartbeat loop responsive. Return the same shape as read.
+    fn wait(
+        &self,
+        id: Uuid,
+        offset: u64,
+        length: usize,
+        timeout_ms: Option<u64>,
+    ) -> Result<serde_json::Value, String> {
+        let deadline =
+            Duration::from_millis(timeout_ms.unwrap_or(DEFAULT_WAIT_MS).min(MAX_WAIT_MS));
+        let started = Instant::now();
+        loop {
+            let mut value = self.read(id, offset, length)?;
+            let next_offset = value["next_offset"].as_u64().unwrap_or(offset);
+            let status = value["job"]["status"].as_str().unwrap_or("unknown");
+            let finished = !matches!(status, "starting" | "running" | "canceling");
+            let reason = if next_offset > offset {
+                Some("output")
+            } else if finished {
+                Some("finished")
+            } else if started.elapsed() >= deadline {
+                Some("timeout")
+            } else {
+                None
+            };
+            if let Some(reason) = reason {
+                value["wait_reason"] = serde_json::json!(reason);
+                value["waited_ms"] = serde_json::json!(started.elapsed().as_millis() as u64);
+                return Ok(value);
+            }
+            std::thread::sleep(
+                (deadline.saturating_sub(started.elapsed())).min(Duration::from_millis(100)),
+            );
+        }
     }
 
     fn cancel(&self, id: Uuid) -> Result<serde_json::Value, String> {
@@ -410,6 +460,52 @@ mod tests {
         let value = jobs.read(id, 3, 4).unwrap();
         assert_eq!(value["output"], "3456");
         assert_eq!(value["next_offset"], 7);
+    }
+
+    #[test]
+    fn wait_returns_output_and_completion_without_replaying_commands() {
+        let dir = tempdir().unwrap();
+        let jobs = Jobs::new(dir.path(), "boot".into()).unwrap();
+        let id = Uuid::new_v4();
+        let job_dir = jobs.root.join(id.to_string());
+        fs::create_dir_all(&job_dir).unwrap();
+        let meta = JobMeta {
+            id,
+            command: "printf progress".into(),
+            cwd: None,
+            timeout_ms: None,
+            boot_id: "boot".into(),
+            status: "running".into(),
+            started_at_unix_ms: now_ms(),
+            finished_at_unix_ms: None,
+            runner_pid: None,
+            command_pid: None,
+            exit_code: None,
+            output_truncated: false,
+        };
+        write_meta(&job_dir, &meta).unwrap();
+        let writer = std::thread::spawn({
+            let job_dir = job_dir.clone();
+            move || {
+                std::thread::sleep(Duration::from_millis(70));
+                fs::write(job_dir.join("output.log"), "progress").unwrap();
+            }
+        });
+        let next = jobs.wait(id, 0, 4096, Some(2_000)).unwrap();
+        writer.join().unwrap();
+        assert_eq!(next["wait_reason"], "output");
+        assert_eq!(next["output"], "progress");
+        assert_eq!(next["next_offset"], 8);
+
+        let timeout = jobs.wait(id, 8, 4096, Some(50)).unwrap();
+        assert_eq!(timeout["wait_reason"], "timeout");
+        let mut complete = read_meta(&job_dir).unwrap();
+        complete.status = "completed".into();
+        complete.exit_code = Some(0);
+        write_meta(&job_dir, &complete).unwrap();
+        let done = jobs.wait(id, 8, 4096, Some(2_000)).unwrap();
+        assert_eq!(done["wait_reason"], "finished");
+        assert_eq!(done["job"]["exit_code"], 0);
     }
 
     #[cfg(unix)]

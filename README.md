@@ -140,6 +140,13 @@ The foundation and first persistent-control layer are implemented. See [`docs/IM
 
 For safe local end-to-end checks, `scripts/smoke-v1.sh` verifies signed enrollment/authentication, MCP execution and identity reconnect. `scripts/smoke-install-dashboard.sh` additionally exercises the embedded dashboard, one-time enrollment, native installer source mode, persisted local config/identity, online reconnect, `infra status`, `infra doctor`, sessions and activity APIs. Both use isolated temporary state and do not deploy or modify v0.3.
 
+## Agent-facing tool contracts
+
+Infra is the device execution layer for clients such as ChatGPT, Hermes and Pi.
+See [agent integration](docs/AGENT_CLIENT_GUIDE.md) for per-action MCP schemas,
+bounded background-job waiting, compact discovery and safe retry behavior.
+These changes are source-branch work, not an automatic production deployment.
+
 ## Optional Hermes bridge
 
 An opt-in bridge can expose a local Hermes agent, its native memory and its session search alongside existing device tools through the same Infra MCP endpoint. See [Hermes bridge design, configuration, and acceptance gates](docs/HERMES_BRIDGE.md). This is not enabled in production by default.

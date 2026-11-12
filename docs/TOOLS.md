@@ -1,5 +1,13 @@
 # MCP tool model
 
+## Agent-facing contract update — November 2026
+
+Read [the agent integration guide](AGENT_CLIENT_GUIDE.md). Source-branch changes:
+action-specific oneOf schemas for files/jobs/terminal; jobs.wait for bounded
+progress notifications (requires jobs.wait_v1 agent capability); compact=true
+device and job-list views. Legacy full response defaults remain. Gateway and
+native-agent rollout require separate acceptance.
+
 ## Current stabilization contract — 2 November 2026
 
 The MCP-contract branch adds typed action enums and argument descriptions to the

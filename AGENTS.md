@@ -2,6 +2,10 @@
 
 This file is the starting context for coding agents working in this repository.
 
+## Agent-friendly MCP contract — November 2026
+
+Read [the agent integration guide](docs/AGENT_CLIENT_GUIDE.md) before editing MCP schemas, job lifecycle, or compact responses. The source branch adds per-action schema alternatives for files/jobs/terminal, capability-gated job waiting and opt-in compact listings. The legacy response defaults remain. Keep long-poll work off the async heartbeat loop, never blindly restart uncertain jobs, and never claim source changes are deployed.
+
 ## Reliability stabilization — 2026-11-02
 
 Read [STABILIZATION_STATUS.md](docs/STABILIZATION_STATUS.md) for the current local

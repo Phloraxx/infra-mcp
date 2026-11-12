@@ -336,6 +336,7 @@ async fn run_connection(
             "search".into(),
             "processes".into(),
             "jobs".into(),
+            "jobs.wait_v1".into(),
             "terminal".into(),
             "transfer".into(),
             "system".into(),

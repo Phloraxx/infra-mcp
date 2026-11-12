@@ -445,6 +445,15 @@ pub enum JobAction {
         #[serde(default)]
         length: Option<usize>,
     },
+    Wait {
+        job_id: Uuid,
+        #[serde(default)]
+        offset: Option<u64>,
+        #[serde(default)]
+        length: Option<usize>,
+        #[serde(default)]
+        wait_timeout_ms: Option<u64>,
+    },
     Cancel {
         job_id: Uuid,
     },
