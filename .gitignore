@@ -10,3 +10,5 @@ coverage/
 .idea/
 target/
 /data/
+.local-*.sh
+__pycache__/
