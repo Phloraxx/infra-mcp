@@ -65,11 +65,40 @@ def main():
 
                 for name in ('files','processes','jobs','terminal','transfer','desktop','system','network','services','containers','git'):
                     schema = tools[name]['inputSchema']
-                    action = resolved(schema, schema['properties']['action'])
-                    assert action['enum'] and all(isinstance(x,str) for x in action['enum']), (name, action)
                     assert schema['properties']['device']['description'], name
+                    if name in ('files','jobs','terminal'):
+                        # Each action advertises its own required fields (oneOf).
+                        variants = {v['properties']['action']['const']: v for v in schema['oneOf']}
+                        assert variants, (name, schema)
+                        if name == 'files':
+                            assert {'action','path','content'} <= set(variants['write']['required'])
+                            assert {'action','path','old','new'} <= set(variants['exact_edit']['required'])
+                        if name == 'jobs':
+                            assert {'action','command'} <= set(variants['start']['required'])
+                            assert {'action','job_id'} <= set(variants['wait']['required'])
+                            assert 'wait_timeout_ms' in variants['wait']['properties']
+                        if name == 'terminal':
+                            assert {'action','session_id','data'} <= set(variants['write']['required'])
+                            assert {'action','session_id','rows','cols'} <= set(variants['resize']['required'])
+                    else:
+                        action = resolved(schema, schema['properties']['action'])
+                        assert action['enum'] and all(isinstance(x,str) for x in action['enum']), (name, action)
                 assert 'cmd.exe' in tools['exec']['description']
-                assert tools['terminal']['inputSchema']['properties']['session_id']['description']
+                assert 'compact' in tools['devices']['inputSchema']['properties']
+                assert devices['structuredContent']['devices'] == []
+                compact = rpc('tools/call', {'name':'devices','arguments':{'compact':True}})['result']
+                assert compact['isError'] is False
+                assert compact['structuredContent']['devices'] == []
+
+                # Missing variant-specific fields must fail deserialization,
+                # not dispatch an incomplete operation to a device.
+                for name, arguments in [
+                    ('files', {'device':'fixture-missing','action':'write','path':'file'}),
+                    ('jobs', {'device':'fixture-missing','action':'wait'}),
+                    ('terminal', {'device':'fixture-missing','action':'write','session_id':'unused'}),
+                ]:
+                    result = rpc('tools/call', {'name':name,'arguments':arguments})
+                    assert 'error' in result or result.get('result',{}).get('isError') is True, (name,result)
 
                 def error(name, arguments, code):
                     result = rpc('tools/call', {'name':name,'arguments':arguments})['result']
@@ -88,7 +117,7 @@ def main():
                 error('files', {'device':'fixture-missing','action':'list','path':'.','offset':100001}, 'invalid_argument')
                 invalid = rpc('tools/call', {'name':'system','arguments':{'device':'fixture-missing','action':'invented'}})
                 assert 'error' in invalid or invalid.get('result',{}).get('isError') is True, invalid
-                print('MCP contract smoke passed: 17 tools, action schemas, shell guidance, and actionable HTTP error results.')
+                print('MCP contract smoke passed: 17 tools, oneOf action requirements, compact device views and actionable errors.')
             finally:
                 process.terminate()
                 try:
