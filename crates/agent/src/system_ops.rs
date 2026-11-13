@@ -59,16 +59,16 @@ fn json(value: impl Serialize) -> Result<serde_json::Value, String> {
 }
 
 fn summary() -> Result<SystemSummary, String> {
-    let mut system = System::new_all();
+    let mut system = System::new_all().map_err(|error| error.to_string())?;
     system.refresh_all();
-    let load = System::load_average();
+    let load = System::load_average().unwrap_or_default();
     Ok(SystemSummary {
-        hostname: System::host_name(),
-        os_name: System::name(),
-        os_version: System::os_version(),
-        kernel_version: Some(System::kernel_long_version()),
+        hostname: System::host_name().ok(),
+        os_name: System::name().ok(),
+        os_version: System::os_version().ok(),
+        kernel_version: System::kernel_long_version().ok(),
         architecture: std::env::consts::ARCH,
-        uptime_seconds: System::uptime(),
+        uptime_seconds: System::uptime().unwrap_or(0),
         cpu_count: system.cpus().len(),
         cpu_brand: system.cpus().first().map(|cpu| cpu.brand().to_string()),
         total_memory: system.total_memory(),
@@ -82,9 +82,8 @@ fn summary() -> Result<SystemSummary, String> {
 }
 
 fn disks() -> Result<Vec<DiskView>, String> {
-    let disks = Disks::new_with_refreshed_list();
+    let disks = Disks::new_with_refreshed_list().map_err(|error| error.to_string())?;
     Ok(disks
-        .list()
         .iter()
         .map(|disk| DiskView {
             name: disk.name().to_string_lossy().into_owned(),
@@ -98,11 +97,11 @@ fn disks() -> Result<Vec<DiskView>, String> {
 }
 
 fn networks() -> Result<Vec<NetworkView>, String> {
-    let networks = Networks::new_with_refreshed_list();
+    let networks = Networks::new_with_refreshed_list().map_err(|error| error.to_string())?;
     Ok(networks
         .iter()
         .map(|(name, data)| NetworkView {
-            name: name.clone(),
+            name: name.to_string_lossy().into_owned(),
             received: data.received(),
             transmitted: data.transmitted(),
             total_received: data.total_received(),
