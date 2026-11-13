@@ -1381,7 +1381,7 @@ dependencies = [
  "base64 0.23.1",
  "ed25519-dalek",
  "futures-util",
- "getrandom 0.3.4",
+ "getrandom 0.4.3",
  "globset",
  "ignore",
  "infra-local-state",
@@ -1435,7 +1435,7 @@ dependencies = [
  "base64 0.23.1",
  "ed25519-dalek",
  "futures-util",
- "getrandom 0.3.4",
+ "getrandom 0.4.3",
  "hmac 0.12.1",
  "infra-protocol",
  "reqwest",
@@ -2925,7 +2925,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "32497e9a4c7b38532efcdebeef879707aa9f794296a4f0244f6f69e9bc8574bd"
 dependencies = [
  "fastrand",
- "getrandom 0.3.4",
+ "getrandom 0.4.3",
  "once_cell",
  "rustix",
  "windows-sys 0.52.0",
