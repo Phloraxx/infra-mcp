@@ -1,0 +1,15 @@
+use crate::*;
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub(crate) struct McpServiceInput {
+    /// Stable device ID or unique name from devices. Check online state and capabilities first.
+    pub(crate) device: String,
+    /// Choose an allowed action. Only that action is executed; provide its required fields.
+    pub(crate) action: ServiceActionName,
+    #[serde(default)]
+    /// Required service name for status/start/stop/restart. Linux services are user scope.
+    pub(crate) name: Option<String>,
+    #[serde(default)]
+    /// Search/filter text. Content search uses regex unless literal is true.
+    pub(crate) query: Option<String>,
+}
