@@ -331,7 +331,9 @@ pub(crate) fn cleanup_persistent_workers(state_dir: &Path) -> usize {
     );
 
     let Ok(system) = System::new_all() else {
-        eprintln!("warning: could not snapshot the process table; persistent-worker cleanup skipped");
+        eprintln!(
+            "warning: could not snapshot the process table; persistent-worker cleanup skipped"
+        );
         return 0;
     };
     let mut stopped = 0;
@@ -412,6 +414,10 @@ pub(crate) fn is_infra_agent_process(process: &sysinfo::Process) -> bool {
 }
 pub(crate) fn process_alive(pid: u32) -> bool {
     System::new_all()
-        .map(|system| system.process(Pid::from_u32(pid)).is_some_and(is_infra_agent_process))
+        .map(|system| {
+            system
+                .process(Pid::from_u32(pid))
+                .is_some_and(is_infra_agent_process)
+        })
         .unwrap_or(false)
 }
