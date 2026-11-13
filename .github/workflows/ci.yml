@@ -1,9 +1,24 @@
-name: CI
+name: CI (legacy TypeScript v0.3)
 
+# Legacy Node.js surface kept as the production fallback (apps/mcp-server,
+# apps/host-agent). Rust v1 CI lives in rust.yml. This workflow only runs when
+# the legacy surface or its config changes.
 on:
   push:
     branches: [main]
+    paths:
+      - apps/mcp-server/**
+      - apps/host-agent/**
+      - package.json
+      - tsconfig.base.json
+      - .github/workflows/ci.yml
   pull_request:
+    paths:
+      - apps/mcp-server/**
+      - apps/host-agent/**
+      - package.json
+      - tsconfig.base.json
+      - .github/workflows/ci.yml
 
 permissions:
   contents: read
