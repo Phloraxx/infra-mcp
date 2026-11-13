@@ -59,7 +59,7 @@ pub fn hash(path: &Path) -> Result<String> {
         }
         digest.update(&bytes[..n]);
     }
-    Ok(format!("{:x}", digest.finalize()))
+    Ok(hex::encode(digest.finalize()))
 }
 fn optional_hash(path: &Path) -> Result<Option<String>> {
     if path.try_exists()? {

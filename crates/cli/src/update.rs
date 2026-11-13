@@ -247,7 +247,7 @@ pub(crate) async fn download_verified_release_asset(
         .error_for_status()?
         .bytes()
         .await?;
-    let actual = format!("{:x}", Sha256::digest(&bytes));
+    let actual = hex::encode(Sha256::digest(&bytes));
     if actual != *expected {
         return Err(anyhow!(
             "SHA-256 mismatch for {name}: expected {expected}, got {actual}"
