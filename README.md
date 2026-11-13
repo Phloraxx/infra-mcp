@@ -1,6 +1,6 @@
 # Infra MCP
 
-Infra MCP is a personal multi-device control plane that lets ChatGPT operate authorized macOS, Windows, and Linux computers through MCP.
+Infra MCP is a personal multi-device control plane that lets AI clients such as ChatGPT, Hermes and Pi operate authorized macOS, Windows, and Linux computers through MCP.
 
 The product goal is not to be a thin SSH wrapper or a clone of Desktop Commander. The goal is a smaller, faster, more reliable, AI-native remote-control system with persistent terminals, structured system operations, resumable file transfer, multi-device routing, strong auditing, and eventually semantic desktop automation.
 
@@ -21,7 +21,7 @@ The **Motorola Edge 60 Stylus** is enrolled as a first-class Android device over
 ## Product principles
 
 1. **Native and lightweight.** The agent should be one native binary with no Node/npm runtime dependency.
-2. **Multi-device first.** One ChatGPT connection should control many authorized devices consistently.
+2. **Multi-device first.** One client connection should control many authorized devices consistently.
 3. **Persistent interaction.** PTYs, jobs, transfers, and sessions must survive individual MCP requests and temporary network interruptions where possible.
 4. **Structured tools plus an escape hatch.** Prefer typed operations for common tasks, while retaining arbitrary user-level shell execution for flexibility.
 5. **Privilege separation.** The normal agent runs as the signed-in user. Elevated operations go through a separate, optional privileged helper.
@@ -32,7 +32,7 @@ The **Motorola Edge 60 Stylus** is enrolled as a first-class Android device over
 ## Target architecture
 
 ```text
-                         ChatGPT
+                         AI client
                             |
                      MCP Streamable HTTP
                             |
@@ -61,23 +61,27 @@ The **Motorola Edge 60 Stylus** is enrolled as a first-class Android device over
 
 The gateway is the MCP-facing control plane. Device agents make outbound authenticated connections to the gateway, so individual computers do not need public inbound ports.
 
-## Planned tool surface
+## Tool surface
 
-The MCP interface should remain compact. The target families are:
+The MCP interface remains compact. The implemented families are:
 
 - `devices`
 - `exec`
+- `jobs`
 - `terminal`
 - `files`
 - `search`
 - `processes`
-- `system`
-- `services`
-- `network`
-- `containers`
-- `git`
+- `copy`
 - `desktop`
 - `transfer`
+- `system`
+- `network`
+- `services`
+- `containers`
+- `git`
+- `hermes`
+- `hermes_memory`
 
 Do not create dozens of tiny MCP tools when one coherent typed family is easier for the model to choose correctly.
 
@@ -85,7 +89,7 @@ Do not create dozens of tiny MCP tools when one coherent typed family is easier 
 
 - **Rust** for the gateway and device agent.
 - **Tokio** async runtime.
-- **MCP Streamable HTTP** for ChatGPT ↔ gateway.
+- **MCP Streamable HTTP** between MCP clients and the gateway.
 - **SQLite** for device metadata, sessions, jobs, audit events, and policy state.
 - **WebSocket over TLS** for the first production agent transport, behind a transport abstraction.
 - **QUIC/WebTransport** as an optional later transport after the protocol and resumability semantics are stable.
