@@ -75,7 +75,7 @@ jobs:
             $hash = (Get-FileHash -Algorithm SHA256 $destination).Hash.ToLowerInvariant()
             Set-Content -NoNewline -Encoding ascii "$destination.sha256" "$hash  $name"
           }
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: infra-${{ matrix.asset }}
           path: dist/*
