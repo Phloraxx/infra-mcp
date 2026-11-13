@@ -9,6 +9,7 @@ mod pending;
 mod readiness;
 mod store;
 mod tools;
+mod version;
 
 use tools::*;
 
@@ -139,6 +140,7 @@ struct Health<'a> {
     status: &'a str,
     service: &'a str,
     protocol: u16,
+    version: &'static str,
     gateway_epoch: Uuid,
 }
 
@@ -355,7 +357,7 @@ async fn main() -> anyhow::Result<()> {
     }
     let app = build_app(state.clone());
     let listener = tokio::net::TcpListener::bind(bind).await?;
-    info!(%bind, gateway_epoch=%state.gateway_epoch, "Infra v1 gateway listening");
+    info!(%bind, version = %version::VERSION, commit = %version::COMMIT, gateway_epoch=%state.gateway_epoch, "Infra v1 gateway listening");
     axum::serve(listener, app).await?;
     Ok(())
 }
@@ -1116,6 +1118,7 @@ async fn health(State(state): State<AppState>) -> Json<Health<'static>> {
         status: "ok",
         service: "infra-gateway",
         protocol: PROTOCOL_VERSION,
+        version: version::VERSION_FULL,
         gateway_epoch: state.gateway_epoch,
     })
 }
