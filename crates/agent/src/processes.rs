@@ -21,8 +21,8 @@ pub fn handle(request: ProcessRequest) -> OperationResult {
     }
 }
 
-fn refreshed_system() -> System {
-    let mut system = System::new();
+fn refreshed_system() -> Result<System, String> {
+    let mut system = System::new().map_err(|error| error.to_string())?;
     system.refresh_processes_specifics(
         ProcessesToUpdate::All,
         true,
@@ -31,11 +31,14 @@ fn refreshed_system() -> System {
             .with_cpu()
             .with_cmd(UpdateKind::Always),
     );
-    system
+    Ok(system)
 }
 
 fn list(query: Option<String>) -> OperationResult {
-    let system = refreshed_system();
+    let system = match refreshed_system() {
+        Ok(system) => system,
+        Err(error) => return OperationResult::Failed { error },
+    };
     let query = query.map(|value| value.to_lowercase());
     let mut processes = system
         .processes()
@@ -79,7 +82,7 @@ pub fn terminate_process_tree(pid: u32, force: bool) -> Result<(), String> {
     if pid == std::process::id() {
         return Err("refusing to terminate the Infra agent process itself".into());
     }
-    let system = refreshed_system();
+    let system = refreshed_system()?;
     let target = Pid::from_u32(pid);
     if system.process(target).is_none() {
         return Err("process not found".into());

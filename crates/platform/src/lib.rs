@@ -35,6 +35,7 @@ fn hostname() -> String {
         return name.trim().to_string();
     }
     sysinfo::System::host_name()
+        .ok()
         .filter(|name| !name.trim().is_empty())
         .or_else(|| {
             std::env::var("HOSTNAME")
@@ -59,7 +60,7 @@ fn boot_id() -> anyhow::Result<String> {
     }
     #[cfg(not(target_os = "linux"))]
     {
-        let boot_time = sysinfo::System::boot_time();
+        let boot_time = sysinfo::System::boot_time().unwrap_or(0);
         if boot_time > 0 {
             Ok(format!("boot-time-{boot_time}"))
         } else {
