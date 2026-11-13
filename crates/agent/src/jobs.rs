@@ -412,7 +412,9 @@ fn bounded_length(length: Option<usize>) -> usize {
 }
 fn process_alive(pid: u32) -> bool {
     let pid = Pid::from_u32(pid);
-    let mut system = System::new();
+    let Ok(mut system) = System::new() else {
+        return false;
+    };
     system.refresh_processes_specifics(
         ProcessesToUpdate::Some(&[pid]),
         true,
