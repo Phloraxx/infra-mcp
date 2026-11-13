@@ -12,7 +12,7 @@ fn main() {
             if name.starts_with("infra-") && !name.ends_with(".json") && !name.ends_with(".sig") {
                 assets.insert(
                     name,
-                    format!("{:x}", Sha256::digest(std::fs::read(entry.path()).unwrap())),
+                    hex::encode(Sha256::digest(std::fs::read(entry.path()).unwrap())),
                 );
             }
         }

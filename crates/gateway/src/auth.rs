@@ -1,5 +1,5 @@
 use anyhow::{Context, bail};
-use argon2::{Argon2, PasswordHash, PasswordHasher, PasswordVerifier, password_hash::SaltString};
+use argon2::{Argon2, PasswordHasher, PasswordVerifier, password_hash::phc::PasswordHash};
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use serde::{Deserialize, Serialize};
 use std::{
@@ -127,10 +127,8 @@ fn hash_password(password: &str) -> anyhow::Result<String> {
     }
     let mut salt = [0u8; 16];
     getrandom::fill(&mut salt).map_err(|_| anyhow::anyhow!("random source unavailable"))?;
-    let salt =
-        SaltString::encode_b64(&salt).map_err(|_| anyhow::anyhow!("salt encoding failed"))?;
     Ok(Argon2::default()
-        .hash_password(password.as_bytes(), &salt)
+        .hash_password_with_salt(password.as_bytes(), &salt)
         .map_err(|_| anyhow::anyhow!("password hashing failed"))?
         .to_string())
 }

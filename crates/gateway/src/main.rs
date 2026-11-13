@@ -41,7 +41,7 @@ use axum::{
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use ed25519_dalek::{Signature, VerifyingKey};
 use hermes_bridge::{HermesBridge, HermesInput, HermesMemoryInput};
-use hmac::{Hmac, Mac};
+use hmac::{Hmac, KeyInit, Mac};
 use infra_protocol::{
     AgentOperation, AgentRequest, AgentResponse, AgentToGateway, AuthChallenge, ContainerAction,
     ContainerRequest, DEFAULT_CONTROL_FRAME_LIMIT, DesktopAction, DesktopRequest, DeviceAuthStart,
