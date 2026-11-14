@@ -362,3 +362,31 @@ An independently executing guarded cutover restarted the existing gateway servic
 Live SHA-256: `6913b7c0a683c39262b6d7cebe3baf3e22c87f5551610d746faebf31f3676372`. Rollback resources and guardian audit trail: `~/.local/share/infra-v1-remote-burnin/gateway/staging-20261024-fieldwork/`.
 
 Remaining work: independently authenticated first-install bootstrap, long-running production soak, physical Windows reboot and upgrade rollback, optional no-VPN device access; deploying the website does not update enrolled agents automatically.
+
+## 2026-11-14 — W1 capability-gated bulk binary frames
+
+Payload-bearing operations can now carry their bytes in a binary WebSocket frame
+instead of base64 inside JSON. `transfer.binary_v1` and `terminal.binary_v1` are
+advertised in `DeviceHello.capabilities`; `HelloAck.binary_frames` (serde default
+false) tells the agent the gateway will use them on this connection. The frame is
+a 32-byte header (magic `I`, version 1, kind, flags, raw UUID, big-endian offset
+and length) plus the payload, and it always follows a JSON announcement on the
+same socket, so request/response correlation, the pending registry and the audit
+trail are unchanged. A binary frame on a connection that did not negotiate bulk
+frames, a malformed frame, or a frame that disagrees with its announcement closes
+the socket as a protocol error. `PROTOCOL_VERSION` stays 1 and every existing JSON
+shape is unchanged, so an old agent keeps the base64 path and a new agent talking
+to an old gateway never sees a binary frame.
+
+The MCP surface is unchanged: `transfer` still takes and returns base64 and the
+gateway re-encodes once at the edge. The cross-device `copy` relay moves raw
+chunks from the source frame straight into the destination frame and reports
+which path each side used in `transport`. Measured on loopback with debug
+binaries, a 100 MiB copy went from 3.0 to 7.9 MiB/s p50 (2.6x) with no control
+latency regression; see [BENCHMARK.md](BENCHMARK.md).
+
+Coverage: protocol codec roundtrip and rejection tests, gateway tests for
+negotiation, un-negotiated rejection, both chunk directions, terminal input and a
+full copy on both paths, and a W3 harness scenario that cuts a real cross-device
+copy mid-chunk and resumes it with an identical digest. Nothing was deployed; no
+live gateway, agent or burn-in directory was touched.

@@ -113,6 +113,44 @@ Capture:
 - bytes transmitted while idle
 - gateway memory with 1, 3, and more connected devices
 
+## Copy throughput — W1 bulk frames (14 November 2026)
+
+Method: `cargo test -p infra-e2e --test bench_copy -- --ignored --nocapture`
+spawns a real gateway and two real agents over loopback, copies 1/16/100 MiB
+five times per size with 256 KiB chunks, and reports p50/p95. The same file ran
+unchanged against `2dd58d1` (base64 only) and against the W1 tree (bulk frames),
+so both columns are the same host, the same debug build profile, the same chunk
+size and the same harness. Two runs per side; the spread between runs is shown
+where it matters.
+
+| Size | base64 p50 / p95 (MiB/s) | bulk frames p50 / p95 (MiB/s) | speedup (p50) |
+| --- | ---: | ---: | ---: |
+| 1 MiB | 2.5 / 2.7–2.8 | 5.5–6.1 / 6.1–6.2 | 2.2–2.4x |
+| 16 MiB | 2.9 / 3.0–3.1 | 7.9–8.1 / 8.0–8.2 | 2.7–2.8x |
+| 100 MiB | 3.0 / 3.0–3.1 | 7.9 / 8.0 | 2.6x |
+
+100 MiB p50 wall time fell from 33.2–33.4 s to 12.6 s. The acceptance target was
+at least 1.5x at equal chunk size; the measured 2.6x clears it.
+
+Control latency, measured as a `transfer status` round trip to the source device
+at idle and again while a 16 MiB copy runs on the same link:
+
+| Run | idle p50 / p95 (ms) | during copy p50 / p95 (ms) | ratio p50 / p95 |
+| --- | ---: | ---: | ---: |
+| base64, run 1 | 54.4 / 57.3 | 54.6 / 67.5 | 1.00x / 1.18x |
+| base64, run 2 | 54.8 / 57.5 | 56.2 / 66.0 | 1.03x / 1.15x |
+| bulk frames, run 1 | 22.3 / 58.1 | 38.9 / 58.2 | 1.75x / 1.00x |
+| bulk frames, run 2 | 54.2 / 56.4 | 31.5 / 56.6 | 0.58x / 1.00x |
+
+The p50 ratio is noise-dominated on this shared host (the idle p50 itself moved
+between 22 and 55 ms across runs); p95 was 1.00x in both bulk-frame runs. Every
+measurement stays inside the 2x bound, so there is no control-latency
+regression.
+
+Caveats: debug binaries, loopback, one host, one device pair. These numbers
+compare the two wire paths, not production throughput. A release build and a
+real network are still unmeasured, and the 256 KiB chunk size was not tuned.
+
 ## Model-efficiency benchmark
 
 Raw performance is not enough. Run equivalent natural-language tasks through ChatGPT and count tool calls.
