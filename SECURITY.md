@@ -6,6 +6,30 @@ The v1 design intentionally supports arbitrary **user-level** shell commands and
 
 See [`docs/SECURITY_MODEL.md`](docs/SECURITY_MODEL.md) for the full design.
 
+## Reporting a vulnerability
+
+Use GitHub's **Report a vulnerability** flow for this repository. Private vulnerability reporting is enabled, so details go straight to the maintainer without a public issue.
+
+If that flow is unavailable, open a minimal issue asking for a private contact path. Do **not** put exploit details in the public issue.
+
+Never include in a report:
+
+- device private keys, enrollment codes, gateway admin credentials or OAuth tokens;
+- live hostnames, device names, IP addresses or unredacted audit logs;
+- terminal output or file contents captured from a real machine.
+
+Redacted logs and synthetic values are preferred.
+
+Reports are especially useful for:
+
+- bypassing device authentication, challenge-response binding or replay protection;
+- enrollment code reuse, prediction or approval bypass;
+- privilege escape from the user-level agent into the privileged helper or the host;
+- unauthenticated or cross-device access to a session, terminal, job or file transfer;
+- audit records that leak output, secrets or file contents;
+- update artifacts accepted without a valid publisher signature;
+- a destructive operation reachable through a read-only or reversible path.
+
 ## Current status
 
 Infra v1 is implemented in this repository in Rust, and signed native release candidates have been published (see [docs/RELEASE_SIGNING.md](docs/RELEASE_SIGNING.md) and [docs/RELEASE_PUBLISHER_KEY.md](docs/RELEASE_PUBLISHER_KEY.md)). The live v0.3 deployment remains the production fallback until the cutover acceptance criteria pass; repository code and RC binaries are not production-deployed merely because they exist.
@@ -41,8 +65,10 @@ First-install bootstrap provenance and the public OAuth/TLS edge are still open 
 - container deletion, volume deletion, image pruning, or host mounts
 - VM shutdown/reboot and disk operations
 
-## Vulnerability handling
+## Supported versions
 
-Do not post secrets or live infrastructure details in a public issue. If a credential may have been exposed, rotate/revoke it first and investigate second.
+Security fixes target the current release candidate line and `main`. Older release candidates are not patched; upgrade instead.
 
-A private security-reporting mechanism should be enabled before this project is promoted for third-party use.
+## If a credential may be exposed
+
+Rotate or revoke it first, then investigate. A leaked device identity should be revoked at the gateway rather than rotated in place, and the device re-enrolled.

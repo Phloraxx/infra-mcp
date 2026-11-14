@@ -1,0 +1,61 @@
+name: Feature request
+description: Propose a capability, tool, or workflow change.
+labels: ["enhancement"]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: The problem
+      description: What you are trying to do today, and where it breaks down. Describe the situation rather than the solution.
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed behaviour
+      description: What the gateway, agent, dashboard or CLI should do instead.
+    validations:
+      required: true
+
+  - type: dropdown
+    id: surface
+    attributes:
+      label: Surface
+      multiple: true
+      options:
+        - Gateway
+        - Device agent
+        - Dashboard
+        - CLI (`infra`)
+        - Android app
+        - MCP tool contract
+        - Protocol / wire behaviour
+        - Installer or updater
+    validations:
+      required: true
+
+  - type: textarea
+    id: security
+    attributes:
+      label: Security implications
+      description: Does this widen what an MCP client can do on a device, add a new destructive operation, or change an audit boundary? Say so explicitly — it changes how the proposal is reviewed.
+    validations:
+      required: true
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+    validations:
+      required: false
+
+  - type: checkboxes
+    id: confirm
+    attributes:
+      label: Before submitting
+      options:
+        - label: I read `docs/SECURITY_MODEL.md` and `docs/PROTOCOL.md`.
+          required: true
+        - label: I searched existing issues and discussions.
+          required: true

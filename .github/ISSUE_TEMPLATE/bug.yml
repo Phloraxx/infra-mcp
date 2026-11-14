@@ -1,0 +1,93 @@
+name: Bug report
+description: Something behaves incorrectly, fails to connect, or produces a wrong result.
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        This is remote-control software. Redact device names, hostnames, IP addresses, enrollment codes, tokens and terminal output before posting.
+
+        For a security issue, use [Report a vulnerability](../security/advisories/new) instead of this form.
+
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened
+      description: The observed behaviour, including the exact error text if there is one.
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: What you expected
+    validations:
+      required: true
+
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area
+      multiple: true
+      options:
+        - Gateway
+        - Device agent
+        - Dashboard
+        - CLI (`infra`)
+        - Android app
+        - Installer or updater
+        - Protocol / wire behaviour
+        - Documentation
+    validations:
+      required: true
+
+  - type: input
+    id: version
+    attributes:
+      label: Version
+      description: Output of `infra --version`, or the release tag.
+      placeholder: v0.1.1-rc.4
+    validations:
+      required: true
+
+  - type: dropdown
+    id: platform
+    attributes:
+      label: Platform
+      multiple: true
+      options:
+        - macOS (Apple silicon)
+        - macOS (Intel)
+        - Windows (x64)
+        - Linux (x64)
+        - Linux (arm64)
+        - Android
+    validations:
+      required: true
+
+  - type: input
+    id: install
+    attributes:
+      label: How it was installed
+      description: One-command installer, reviewed installer, built from source, or upgraded in place.
+    validations:
+      required: false
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Relevant logs
+      description: Redacted. `infra doctor --json` output is usually the most useful starting point.
+      render: shell
+    validations:
+      required: false
+
+  - type: checkboxes
+    id: confirm
+    attributes:
+      label: Before submitting
+      options:
+        - label: I removed credentials, device names, IP addresses and unredacted terminal output.
+          required: true
+        - label: I searched existing issues for the same behaviour.
+          required: true
