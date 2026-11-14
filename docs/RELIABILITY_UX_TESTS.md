@@ -110,3 +110,18 @@ Initial targets, subject to benchmark revision:
 - bounded local transcript/job retention with configurable limits
 
 Desktop Commander remains the comparison baseline, but Infra must also be tested against these explicit behavioral requirements.
+## Automated fault-injection harness
+
+`tests/e2e` (package `infra-e2e`) runs the real gateway and agent binaries over
+loopback with a fault-injecting TCP proxy between them. It covers the failure
+matrix rows that can be reproduced without a live fleet: a lost exec response
+(`outcome_unknown`, no replay), a download cut mid-chunk (resume from offset,
+identical digest), a terminal cut (no lost or duplicated bytes), a stalled
+heartbeat (retired and recorded as `heartbeat_timeout`), a double connection
+(newest generation wins, the old socket close is not a disconnect) and a gateway
+restart mid-job (the job survives and the agent reconciles). Cross-device copy
+resume stays an explicitly ignored placeholder until the durable copy queue
+exists.
+
+Run it with `cargo test -p infra-e2e -- --test-threads=1`. It is Unix-only, needs
+no external network or installed binaries, and is wired as its own CI job.

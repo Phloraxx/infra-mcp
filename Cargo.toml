@@ -6,6 +6,7 @@ members = [
   "crates/platform",
   "crates/local-state",
   "crates/cli",
+  "tests/e2e",
 ]
 resolver = "2"
 

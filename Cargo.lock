@@ -1417,6 +1417,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "infra-e2e"
+version = "0.1.1-rc.4"
+dependencies = [
+ "anyhow",
+ "base64 0.23.1",
+ "hex",
+ "infra-protocol",
+ "reqwest",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "tokio",
+ "uuid",
+]
+
+[[package]]
 name = "infra-gateway"
 version = "0.1.1-rc.4"
 dependencies = [
