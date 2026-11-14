@@ -311,21 +311,21 @@ async fn a_superseded_signed_connection_cannot_confirm_readiness() {
     );
     server.abort();
 }
-async fn connect_legacy(
+async fn connect_legacy_with_capabilities(
     addr: SocketAddr,
     device_id: &str,
-) -> (
-    tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>,
-    u64,
-) {
+    capabilities: &[&str],
+) -> (TestSocket, HelloAck) {
     let (mut socket, _) = connect_async(format!("ws://{addr}/agent")).await.unwrap();
-    let hello = AgentToGateway::LegacyHello(LegacyDeviceHello {
-        hello: test_hello(device_id, Uuid::new_v4()),
+    let mut hello = test_hello(device_id, Uuid::new_v4());
+    hello.capabilities = capabilities.iter().map(|cap| (*cap).to_owned()).collect();
+    let message = AgentToGateway::LegacyHello(LegacyDeviceHello {
+        hello,
         token: TEST_TOKEN.into(),
     });
     socket
         .send(ClientMessage::Text(
-            serde_json::to_string(&hello).unwrap().into(),
+            serde_json::to_string(&message).unwrap().into(),
         ))
         .await
         .unwrap();
@@ -335,6 +335,11 @@ async fn connect_legacy(
     let GatewayToAgent::HelloAck(ack) = serde_json::from_str(text.as_str()).unwrap() else {
         panic!()
     };
+    (socket, ack)
+}
+
+async fn connect_legacy(addr: SocketAddr, device_id: &str) -> (TestSocket, u64) {
+    let (socket, ack) = connect_legacy_with_capabilities(addr, device_id, &["exec"]).await;
     (socket, ack.connection_generation)
 }
 async fn wait_registered(state: &AppState, device_id: &str) {
@@ -377,6 +382,166 @@ fn browser_session_survives_gateway_state_restart() {
         axum::http::HeaderValue::from_static("infra_session=v1.1.invalid.invalid"),
     );
     assert!(browser_session_expiry(&restarted, &tampered).is_none());
+}
+
+fn reconcile_fixture(status: &str) -> ReconcileSnapshot {
+    ReconcileSnapshot {
+        items: vec![infra_protocol::ReconcileItem {
+            id: Uuid::from_u128(7),
+            kind: infra_protocol::ReconcileKind::Job,
+            status: status.into(),
+            boot_id: "boot-test".into(),
+            started_at_unix_ms: 11,
+        }],
+    }
+}
+
+async fn send_reconcile(socket: &mut TestSocket, snapshot: &ReconcileSnapshot) {
+    let message = AgentToGateway::Reconcile(snapshot.clone());
+    socket
+        .send(ClientMessage::Text(
+            serde_json::to_string(&message).unwrap().into(),
+        ))
+        .await
+        .unwrap();
+}
+
+async fn send_reconcile_unchanged(socket: &mut TestSocket, hash: &str) {
+    let message = AgentToGateway::ReconcileUnchanged {
+        hash: hash.to_owned(),
+    };
+    socket
+        .send(ClientMessage::Text(
+            serde_json::to_string(&message).unwrap().into(),
+        ))
+        .await
+        .unwrap();
+}
+
+/// Wait briefly for the next `sessions_changed`; `None` means none arrived.
+async fn next_sessions_changed(events: &mut broadcast::Receiver<DashboardEvent>) -> Option<()> {
+    loop {
+        match tokio::time::timeout(Duration::from_millis(300), events.recv()).await {
+            Ok(Ok(event)) if event.kind == "sessions_changed" => return Some(()),
+            Ok(Ok(_)) => continue,
+            _ => return None,
+        }
+    }
+}
+
+#[tokio::test]
+async fn reconcile_hash_suppresses_unchanged_sessions_changed_events() {
+    let (_dir, state, addr, server) = spawn_test_gateway().await;
+    let (mut socket, ack) = connect_legacy_with_capabilities(
+        addr,
+        "hash-device",
+        &["exec", infra_protocol::RECONCILE_HASH_CAPABILITY],
+    )
+    .await;
+    assert!(
+        ack.reconcile_hash,
+        "a capable agent must be told the gateway understands the compact frame"
+    );
+    wait_registered(&state, "hash-device").await;
+    let mut events = state.events.subscribe();
+
+    let snapshot = reconcile_fixture("running");
+    send_reconcile(&mut socket, &snapshot).await;
+    assert!(
+        next_sessions_changed(&mut events).await.is_some(),
+        "the first snapshot is a change"
+    );
+
+    // Identical content, full frame: no dashboard churn.
+    send_reconcile(&mut socket, &snapshot).await;
+    assert!(
+        next_sessions_changed(&mut events).await.is_none(),
+        "an identical snapshot must not emit sessions_changed"
+    );
+
+    // Compact unchanged frame with the stored hash: no dashboard churn.
+    send_reconcile_unchanged(&mut socket, &snapshot.content_hash()).await;
+    assert!(
+        next_sessions_changed(&mut events).await.is_none(),
+        "an unchanged reconcile must not emit sessions_changed"
+    );
+
+    // Real content change: exactly one event.
+    let changed = reconcile_fixture("completed");
+    send_reconcile(&mut socket, &changed).await;
+    assert!(
+        next_sessions_changed(&mut events).await.is_some(),
+        "a changed snapshot must emit sessions_changed"
+    );
+    let record = state.store.get_device("hash-device").unwrap().unwrap();
+    assert_eq!(record.reconcile.unwrap().items[0].status, "completed");
+
+    // A hash the gateway does not recognise refreshes the dashboard from the
+    // stored snapshot instead of silently diverging.
+    send_reconcile_unchanged(&mut socket, "not-the-stored-hash").await;
+    assert!(
+        next_sessions_changed(&mut events).await.is_some(),
+        "a mismatched unchanged frame must refresh the dashboard"
+    );
+    server.abort();
+}
+
+#[tokio::test]
+async fn old_agents_keep_emitting_on_every_reconcile() {
+    let (_dir, state, addr, server) = spawn_test_gateway().await;
+    let (mut socket, ack) = connect_legacy_with_capabilities(addr, "old-device", &["exec"]).await;
+    assert!(
+        !ack.reconcile_hash,
+        "an old agent must not be told about a frame it cannot send"
+    );
+    wait_registered(&state, "old-device").await;
+    let mut events = state.events.subscribe();
+    let snapshot = reconcile_fixture("running");
+    for _ in 0..2 {
+        send_reconcile(&mut socket, &snapshot).await;
+        assert!(
+            next_sessions_changed(&mut events).await.is_some(),
+            "an agent without the capability keeps the old always-emit behaviour"
+        );
+    }
+    server.abort();
+}
+
+#[tokio::test]
+async fn a_reconnect_resets_the_reconcile_hash() {
+    let (_dir, state, addr, server) = spawn_test_gateway().await;
+    let capabilities = ["exec", infra_protocol::RECONCILE_HASH_CAPABILITY];
+    let (mut socket, _) =
+        connect_legacy_with_capabilities(addr, "reset-device", &capabilities).await;
+    wait_registered(&state, "reset-device").await;
+    let mut events = state.events.subscribe();
+    let snapshot = reconcile_fixture("running");
+    send_reconcile(&mut socket, &snapshot).await;
+    assert!(next_sessions_changed(&mut events).await.is_some());
+    send_reconcile(&mut socket, &snapshot).await;
+    assert!(next_sessions_changed(&mut events).await.is_none());
+
+    drop(socket);
+    tokio::time::timeout(Duration::from_secs(2), async {
+        while state.devices.read().await.contains_key("reset-device") {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+
+    // The same content on a new connection is a change again: the dashboard may
+    // have missed events while the device was away.
+    let (mut socket, _) =
+        connect_legacy_with_capabilities(addr, "reset-device", &capabilities).await;
+    wait_registered(&state, "reset-device").await;
+    let mut events = state.events.subscribe();
+    send_reconcile(&mut socket, &snapshot).await;
+    assert!(
+        next_sessions_changed(&mut events).await.is_some(),
+        "the first reconcile after a reconnect must emit"
+    );
+    server.abort();
 }
 
 #[tokio::test]
@@ -495,6 +660,7 @@ async fn queued_test_device(
             tx,
             retire,
             reconcile: ReconcileSnapshot::default(),
+            reconcile_hash: None,
         },
     );
     (rx, retire_rx)

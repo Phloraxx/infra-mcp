@@ -330,6 +330,7 @@ async fn run_connection(
         let capabilities = vec![
             "status".into(),
             infra_protocol::CONNECTION_READINESS_CAPABILITY.into(),
+            infra_protocol::RECONCILE_HASH_CAPABILITY.into(),
             "exec".into(),
             "files".into(),
             infra_protocol::FILE_LIST_PAGINATION_CAPABILITY.into(),
@@ -437,6 +438,10 @@ async fn run_connection(
         agent_instance_id,
     );
     let mut readiness = readiness::Exchange::default();
+    // The gateway only understands the compact frame when it acknowledged the
+    // capability; an old gateway keeps receiving full snapshots.
+    let compact_reconcile = ack.reconcile_hash;
+    let last_reconcile_hash = Arc::new(std::sync::Mutex::new(None::<String>));
 
     let (out_tx, mut out_rx) = mpsc::channel::<AgentToGateway>(64);
     let (heartbeat_tx, mut heartbeat_rx) = mpsc::channel::<AgentToGateway>(8);
@@ -456,7 +461,11 @@ async fn run_connection(
     });
 
     out_tx
-        .send(AgentToGateway::Reconcile(reconcile_snapshot(&context)))
+        .send(reconcile_message(
+            &context,
+            &last_reconcile_hash,
+            compact_reconcile,
+        ))
         .await?;
 
     let permits = Arc::new(Semaphore::new(MAX_CONCURRENT_REQUESTS));
@@ -480,8 +489,11 @@ async fn run_connection(
                                 .map_err(|_| {
                                     anyhow!("readiness response queue full; reconnecting")
                                 })?;
-                            let _ = out_tx
-                                .try_send(AgentToGateway::Reconcile(reconcile_snapshot(&context)));
+                            let _ = out_tx.try_send(reconcile_message(
+                                &context,
+                                &last_reconcile_hash,
+                                compact_reconcile,
+                            ));
                         }
                     }
                     Ok(GatewayToAgent::ConnectionReady(reply)) => {
@@ -510,13 +522,18 @@ async fn run_connection(
                         if let Ok(permit) = permits.clone().try_acquire_owned() {
                             let out = out_tx.clone();
                             let context = context.clone();
+                            let last_hash = last_reconcile_hash.clone();
                             tokio::spawn(async move {
                                 let response = dispatch(request, context.clone()).await;
                                 drop(permit);
                                 let _ = out.send(AgentToGateway::Response(response)).await;
                                 // Reconcile newly finished workers after each operation.
                                 let _ = out
-                                    .send(AgentToGateway::Reconcile(reconcile_snapshot(&context)))
+                                    .send(reconcile_message(
+                                        &context,
+                                        &last_hash,
+                                        compact_reconcile,
+                                    ))
                                     .await;
                             });
                         } else {
@@ -533,8 +550,11 @@ async fn run_connection(
                             anyhow::anyhow!("heartbeat response queue full; reconnecting")
                         })?;
                         // Reconcile is opportunistic: no work snapshot is worth losing liveness.
-                        let _ = out_tx
-                            .try_send(AgentToGateway::Reconcile(reconcile_snapshot(&context)));
+                        let _ = out_tx.try_send(reconcile_message(
+                            &context,
+                            &last_reconcile_hash,
+                            compact_reconcile,
+                        ));
                     }
                     Ok(GatewayToAgent::HelloAck(_)) | Ok(GatewayToAgent::AuthChallenge(_)) => {
                         warn!("unexpected handshake frame ignored")
@@ -550,6 +570,25 @@ async fn run_connection(
     drop(out_tx);
     writer.abort();
     Ok(())
+}
+
+/// Send the full snapshot when its content changed, or the compact unchanged
+/// frame when the gateway acknowledged `reconcile.hash_v1` and nothing changed.
+/// The hash is remembered per connection, so the first reconcile after a
+/// reconnect is always a full snapshot the gateway can rebuild its view from.
+fn reconcile_message(
+    context: &AgentContext,
+    last_hash: &std::sync::Mutex<Option<String>>,
+    compact: bool,
+) -> AgentToGateway {
+    let snapshot = reconcile_snapshot(context);
+    let hash = snapshot.content_hash();
+    let mut last = last_hash.lock().expect("reconcile hash poisoned");
+    if compact && last.as_deref() == Some(hash.as_str()) {
+        return AgentToGateway::ReconcileUnchanged { hash };
+    }
+    *last = Some(hash);
+    AgentToGateway::Reconcile(snapshot)
 }
 
 fn reconcile_snapshot(context: &AgentContext) -> ReconcileSnapshot {

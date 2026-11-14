@@ -1,6 +1,7 @@
 //! Versioned wire types shared by the Infra gateway and device agent.
 
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 use uuid::Uuid;
 
@@ -13,6 +14,10 @@ pub const MAX_DIRECTORY_PAGE_SIZE: usize = 1000;
 pub const MAX_DIRECTORY_ENTRIES: usize = 100_000;
 pub const MAX_DIRECTORY_PAGE_BYTES: usize = 512 * 1024;
 pub const CONNECTION_READINESS_CAPABILITY: &str = "connection.readiness_v1";
+/// Advertised by an agent that can send a compact unchanged reconcile instead of
+/// a full snapshot. Additive: the gateway keeps the old behaviour for agents that
+/// do not advertise it.
+pub const RECONCILE_HASH_CAPABILITY: &str = "reconcile.hash_v1";
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ConnectionProbe {
@@ -75,6 +80,11 @@ pub struct HelloAck {
     pub gateway_epoch: Uuid,
     pub control_frame_limit: usize,
     pub reconcile_requested: bool,
+    /// True when the gateway understands [`AgentToGateway::ReconcileUnchanged`].
+    /// Old gateways omit the field, so a new agent keeps sending full snapshots
+    /// to them instead of a frame they would reject.
+    #[serde(default)]
+    pub reconcile_hash: bool,
 }
 
 /// Bytes signed by a device after receiving a fresh gateway challenge.
@@ -588,6 +598,42 @@ pub struct ReconcileSnapshot {
     pub items: Vec<ReconcileItem>,
 }
 
+impl ReconcileSnapshot {
+    /// Stable content hash over the fields the dashboard renders: id, kind,
+    /// status, boot_id and started_at. Item order is not content, so the items
+    /// are sorted by (kind, id) before hashing; two snapshots that describe the
+    /// same sessions always produce the same hash.
+    pub fn content_hash(&self) -> String {
+        fn field(hasher: &mut Sha256, value: &[u8]) {
+            hasher.update((value.len() as u32).to_be_bytes());
+            hasher.update(value);
+        }
+        let mut items: Vec<&ReconcileItem> = self.items.iter().collect();
+        items.sort_by(|left, right| {
+            (kind_label(&left.kind), left.id).cmp(&(kind_label(&right.kind), right.id))
+        });
+        let mut hasher = Sha256::new();
+        hasher.update(b"infra-v1-reconcile\0");
+        hasher.update((items.len() as u32).to_be_bytes());
+        for item in items {
+            field(&mut hasher, item.id.as_bytes());
+            field(&mut hasher, kind_label(&item.kind).as_bytes());
+            field(&mut hasher, item.status.as_bytes());
+            field(&mut hasher, item.boot_id.as_bytes());
+            hasher.update(item.started_at_unix_ms.to_be_bytes());
+        }
+        hex::encode(hasher.finalize())
+    }
+}
+
+fn kind_label(kind: &ReconcileKind) -> &'static str {
+    match kind {
+        ReconcileKind::Job => "job",
+        ReconcileKind::Terminal => "terminal",
+        ReconcileKind::Transfer => "transfer",
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "type", content = "body", rename_all = "snake_case")]
 pub enum AgentToGateway {
@@ -596,6 +642,11 @@ pub enum AgentToGateway {
     LegacyHello(LegacyDeviceHello),
     Response(AgentResponse),
     Reconcile(ReconcileSnapshot),
+    /// Compact "nothing changed" reconcile. Only sent after the gateway
+    /// acknowledged [`RECONCILE_HASH_CAPABILITY`] in its hello ack.
+    ReconcileUnchanged {
+        hash: String,
+    },
     ConnectionProbeReply(ConnectionProbeReply),
     Pong,
 }
@@ -1001,6 +1052,7 @@ mod tests {
             gateway_epoch: epoch,
             control_frame_limit: DEFAULT_CONTROL_FRAME_LIMIT,
             reconcile_requested: false,
+            reconcile_hash: true,
         });
         for message in [challenge.clone(), ack.clone()] {
             let value = serde_json::to_value(&message).unwrap();
@@ -1040,6 +1092,107 @@ mod tests {
         );
     }
 
+    fn reconcile_item(id: Uuid, kind: ReconcileKind, status: &str) -> ReconcileItem {
+        ReconcileItem {
+            id,
+            kind,
+            status: status.into(),
+            boot_id: "boot".into(),
+            started_at_unix_ms: 5,
+        }
+    }
+
+    #[test]
+    fn reconcile_content_hash_is_order_independent_and_content_sensitive() {
+        let job = reconcile_item(Uuid::from_u128(1), ReconcileKind::Job, "running");
+        let terminal = reconcile_item(Uuid::from_u128(2), ReconcileKind::Terminal, "running");
+        let forward = ReconcileSnapshot {
+            items: vec![job.clone(), terminal.clone()],
+        };
+        let reversed = ReconcileSnapshot {
+            items: vec![terminal.clone(), job.clone()],
+        };
+        assert_eq!(
+            forward.content_hash(),
+            reversed.content_hash(),
+            "item order is not content"
+        );
+        assert_eq!(forward.content_hash().len(), 64);
+
+        let mut changed_status = forward.clone();
+        changed_status.items[0].status = "completed".into();
+        assert_ne!(forward.content_hash(), changed_status.content_hash());
+
+        let mut changed_started = forward.clone();
+        changed_started.items[0].started_at_unix_ms = 6;
+        assert_ne!(forward.content_hash(), changed_started.content_hash());
+
+        let mut changed_boot = forward.clone();
+        changed_boot.items[0].boot_id = "other-boot".into();
+        assert_ne!(forward.content_hash(), changed_boot.content_hash());
+
+        let mut changed_kind = forward.clone();
+        changed_kind.items[0].kind = ReconcileKind::Transfer;
+        assert_ne!(forward.content_hash(), changed_kind.content_hash());
+
+        let mut changed_id = forward.clone();
+        changed_id.items[0].id = Uuid::from_u128(3);
+        assert_ne!(forward.content_hash(), changed_id.content_hash());
+
+        assert_eq!(
+            ReconcileSnapshot::default().content_hash(),
+            ReconcileSnapshot::default().content_hash()
+        );
+        assert_ne!(
+            ReconcileSnapshot::default().content_hash(),
+            forward.content_hash()
+        );
+    }
+
+    #[test]
+    fn reconcile_unchanged_frame_roundtrips_as_a_compact_message() {
+        let message = AgentToGateway::ReconcileUnchanged {
+            hash: "abc123".into(),
+        };
+        let wire = serde_json::to_value(&message).unwrap();
+        assert_eq!(wire["type"], "reconcile_unchanged");
+        assert_eq!(wire["body"]["hash"], "abc123");
+        assert!(
+            wire["body"].get("items").is_none(),
+            "the unchanged frame must not carry a snapshot: {wire}"
+        );
+        assert_eq!(
+            serde_json::from_value::<AgentToGateway>(wire).unwrap(),
+            message
+        );
+    }
+
+    #[test]
+    fn hello_ack_reconcile_hash_defaults_to_false_for_old_gateways() {
+        let legacy = serde_json::json!({
+            "protocol": PROTOCOL_VERSION,
+            "connection_generation": 3,
+            "gateway_epoch": Uuid::nil().to_string(),
+            "control_frame_limit": DEFAULT_CONTROL_FRAME_LIMIT,
+            "reconcile_requested": true
+        });
+        let ack: HelloAck = serde_json::from_value(legacy).unwrap();
+        assert!(
+            !ack.reconcile_hash,
+            "an old gateway must not be assumed to understand the compact frame"
+        );
+        let current = serde_json::to_value(HelloAck {
+            protocol: PROTOCOL_VERSION,
+            connection_generation: 3,
+            gateway_epoch: Uuid::nil(),
+            control_frame_limit: DEFAULT_CONTROL_FRAME_LIMIT,
+            reconcile_requested: true,
+            reconcile_hash: true,
+        })
+        .unwrap();
+        assert_eq!(current["reconcile_hash"], true);
+    }
+
     #[test]
     fn exec_output_roundtrips() {
         let output = ExecOutput {
@@ -1063,6 +1216,7 @@ mod tests {
         const _: () = assert!(DEFAULT_READ_LIMIT <= MAX_READ_LIMIT);
         assert_eq!(FILE_LIST_PAGINATION_CAPABILITY, "files.list_page");
         assert_eq!(CONNECTION_READINESS_CAPABILITY, "connection.readiness_v1");
+        assert_eq!(RECONCILE_HASH_CAPABILITY, "reconcile.hash_v1");
         assert_eq!(MAX_DIRECTORY_PAGE_SIZE, 1000);
         assert_eq!(MAX_DIRECTORY_ENTRIES, 100_000);
         assert_eq!(MAX_DIRECTORY_PAGE_BYTES, 512 * 1024);

@@ -487,6 +487,16 @@ impl Store {
         Ok(())
     }
 
+    /// Liveness-only touch for a reconcile that carried no new content.
+    pub fn touch_device_seen(&self, device_id: &str) -> Result<(), StoreError> {
+        let conn = self.connection()?;
+        conn.execute(
+            "UPDATE devices SET last_seen_ms=?1 WHERE device_id=?2",
+            params![now_ms() as i64, device_id],
+        )?;
+        Ok(())
+    }
+
     pub fn revoke(&self, device_id: &str) -> Result<bool, StoreError> {
         let conn = self.connection()?;
         let changed = conn.execute(

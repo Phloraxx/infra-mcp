@@ -26,6 +26,10 @@ pub(crate) struct DeviceConnection {
     pub(crate) tx: mpsc::Sender<GatewayToAgent>,
     pub(crate) retire: mpsc::Sender<()>,
     pub(crate) reconcile: ReconcileSnapshot,
+    /// Content hash of `reconcile`, used to suppress redundant
+    /// `sessions_changed` events. Reset with the connection, so the first
+    /// reconcile after a reconnect always counts as a change.
+    pub(crate) reconcile_hash: Option<String>,
 }
 
 pub(crate) async fn agent_upgrade(
@@ -51,6 +55,13 @@ pub(crate) async fn handle_agent(mut socket: WebSocket, state: AppState) {
             .capabilities
             .iter()
             .any(|cap| cap == infra_protocol::CONNECTION_READINESS_CAPABILITY);
+    // Only an agent that advertises the capability gets the hash-gated
+    // behaviour; an old agent keeps emitting on every reconcile exactly as
+    // before.
+    let supports_reconcile_hash = hello
+        .capabilities
+        .iter()
+        .any(|cap| cap == infra_protocol::RECONCILE_HASH_CAPABILITY);
     let generation = state.next_generation.fetch_add(1, Ordering::Relaxed);
     let (out_tx, mut out_rx) = mpsc::channel::<GatewayToAgent>(64);
     let (retire_tx, mut retire_rx) = mpsc::channel::<()>(1);
@@ -60,6 +71,7 @@ pub(crate) async fn handle_agent(mut socket: WebSocket, state: AppState) {
         gateway_epoch: state.gateway_epoch,
         control_frame_limit: DEFAULT_CONTROL_FRAME_LIMIT,
         reconcile_requested: true,
+        reconcile_hash: supports_reconcile_hash,
     });
     if send_json(&mut socket, &ack).await.is_err() {
         return;
@@ -81,6 +93,7 @@ pub(crate) async fn handle_agent(mut socket: WebSocket, state: AppState) {
                     tx: out_tx.clone(),
                     retire: retire_tx,
                     reconcile: ReconcileSnapshot::default(),
+                    reconcile_hash: None,
                 },
             )
             .is_some()
@@ -158,13 +171,55 @@ pub(crate) async fn handle_agent(mut socket: WebSocket, state: AppState) {
                     match serde_json::from_str::<AgentToGateway>(text.as_str()){
                         Ok(AgentToGateway::Response(response))=>state.pending.complete(&hello.device_id, generation, response),
                         Ok(AgentToGateway::Reconcile(snapshot)) => {
-                            if let Some(device) = state.devices.write().await.get_mut(&hello.device_id)
-                                && device.generation == generation
-                            {
-                                device.reconcile = snapshot.clone();
+                            let hash = snapshot.content_hash();
+                            let changed = {
+                                let mut devices = state.devices.write().await;
+                                match devices.get_mut(&hello.device_id) {
+                                    Some(device) if device.generation == generation => {
+                                        let changed = !supports_reconcile_hash
+                                            || device.reconcile_hash.as_deref()
+                                                != Some(hash.as_str());
+                                        device.reconcile = snapshot.clone();
+                                        device.reconcile_hash = Some(hash);
+                                        changed
+                                    }
+                                    // A superseded connection must not drive the dashboard.
+                                    _ => false,
+                                }
+                            };
+                            if changed {
+                                let _ = state.store.record_reconcile(&hello.device_id, &snapshot);
+                                state.emit("sessions_changed", Some(hello.device_id.clone()));
+                            } else {
+                                let _ = state.store.touch_device_seen(&hello.device_id);
                             }
-                            let _ = state.store.record_reconcile(&hello.device_id, &snapshot);
-                            state.emit("sessions_changed", Some(hello.device_id.clone()));
+                        }
+                        Ok(AgentToGateway::ReconcileUnchanged { hash }) => {
+                            let stored = {
+                                let devices = state.devices.read().await;
+                                match devices.get(&hello.device_id) {
+                                    Some(device) if device.generation == generation => {
+                                        Some(device.reconcile_hash.as_deref() == Some(hash.as_str()))
+                                    }
+                                    _ => None,
+                                }
+                            };
+                            match stored {
+                                Some(true) => {
+                                    let _ = state.store.touch_device_seen(&hello.device_id);
+                                }
+                                Some(false) => {
+                                    // The agent says nothing changed but our view
+                                    // disagrees. The stored snapshot is the last
+                                    // full one, so refresh the dashboard from it
+                                    // and keep the stored hash: the next full
+                                    // snapshot repairs the divergence.
+                                    warn!(device_id=%hello.device_id,generation,"unchanged reconcile does not match the stored snapshot hash");
+                                    state.emit("sessions_changed", Some(hello.device_id.clone()));
+                                    let _ = state.store.touch_device_seen(&hello.device_id);
+                                }
+                                None => {}
+                            }
                         },
                         Ok(AgentToGateway::ConnectionProbeReply(reply)) => {
                             if supports_readiness && readiness.accept(&reply) {
