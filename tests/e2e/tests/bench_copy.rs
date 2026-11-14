@@ -182,8 +182,11 @@ async fn copy_throughput_and_control_latency() {
                 Some(size as u64),
                 "copy did not move the whole file: {result}"
             );
-            if let Some(value) = result["transport"]["source"].as_str() {
-                transport = format!("{value}/{}", result["transport"]["destination"]);
+            if let (Some(source), Some(destination)) = (
+                result["transport"]["source"].as_str(),
+                result["transport"]["destination"].as_str(),
+            ) {
+                transport = format!("{source}/{destination}");
             }
             throughput.push(size as f64 / (1 << 20) as f64 / elapsed.as_secs_f64());
             elapsed_ms.push(elapsed.as_secs_f64() * 1000.0);
