@@ -36,6 +36,10 @@ async fn step(state: &AppState, device: &str, action: TransferAction) -> Result<
     )
     .await
     .map_err(dispatch_error)?;
+    body_of(response)
+}
+
+fn body_of(response: AgentResponse) -> Result<Value, String> {
     match response.result {
         OperationResult::Ok { body } => Ok(body),
         OperationResult::Failed { error } => Err(error),
@@ -102,6 +106,12 @@ pub(super) async fn run(state: &AppState, input: McpCopyInput) -> Result<Value, 
     if from == to && input.source_path == input.destination_path {
         return Err("source and destination cannot be the same file on the same device".into());
     }
+    // Each side chooses independently: a binary-capable source can feed a
+    // JSON-only destination and the other way round.
+    let source_binary =
+        supports_capability(state, &from, infra_protocol::TRANSFER_BINARY_CAPABILITY).await;
+    let destination_binary =
+        supports_capability(state, &to, infra_protocol::TRANSFER_BINARY_CAPABILITY).await;
     let budget = input
         .max_bytes
         .unwrap_or(DEFAULT_BUDGET)
@@ -189,37 +199,89 @@ pub(super) async fn run(state: &AppState, input: McpCopyInput) -> Result<Value, 
         {
             let count =
                 (size - offset).min((budget - (offset - start_offset)).min(CHUNK as u64)) as usize;
-            let chunk = step(
-                state,
-                &from,
-                TransferAction::DownloadChunk {
-                    transfer_id: source_id.expect("set above"),
+            let source_transfer = source_id.expect("set above");
+            let (chunk, payload) = if source_binary {
+                let (response, frame) = download_chunk_binary(
+                    state,
+                    &from,
+                    source_transfer,
                     offset,
-                    length: Some(count),
-                },
-            )
-            .await?;
+                    Some(count),
+                    RPC_TIMEOUT_MS,
+                )
+                .await?;
+                (body_of(response)?, frame)
+            } else {
+                (
+                    step(
+                        state,
+                        &from,
+                        TransferAction::DownloadChunk {
+                            transfer_id: source_transfer,
+                            offset,
+                            length: Some(count),
+                        },
+                    )
+                    .await?,
+                    None,
+                )
+            };
             if num_field(&chunk, "offset")? != offset {
                 return Err("download offset mismatch; refusing to write".into());
-            }
-            let encoded = text_field(&chunk, "data_base64")?.to_owned();
-            if encoded.is_empty() {
-                return Err("unexpected empty chunk before end of source".into());
             }
             let next = num_field(&chunk, "next_offset")?;
             if next <= offset || next > size || next - offset > count as u64 {
                 return Err("download chunk size/offset invalid".into());
             }
-            let written = step(
-                state,
-                &to,
-                TransferAction::UploadChunk {
-                    transfer_id: destination_id.expect("set above"),
-                    offset,
-                    data_base64: encoded,
-                },
-            )
-            .await?;
+            // The binary path hands the bytes straight to the destination; the
+            // JSON path decodes the base64 the agent produced.
+            let bytes = match payload {
+                Some(frame) => {
+                    if frame.payload.len() as u64 != next - offset {
+                        return Err(
+                            "bulk chunk length does not match the reported offset range".into()
+                        );
+                    }
+                    frame.payload
+                }
+                None => {
+                    let encoded = text_field(&chunk, "data_base64")?.to_owned();
+                    if encoded.is_empty() {
+                        return Err("unexpected empty chunk before end of source".into());
+                    }
+                    STANDARD
+                        .decode(encoded)
+                        .map_err(|_| "download chunk is not valid base64".to_string())?
+                }
+            };
+            if bytes.is_empty() {
+                return Err("unexpected empty chunk before end of source".into());
+            }
+            let destination_transfer = destination_id.expect("set above");
+            let written = if destination_binary {
+                body_of(
+                    upload_chunk_binary(
+                        state,
+                        &to,
+                        destination_transfer,
+                        offset,
+                        &bytes,
+                        RPC_TIMEOUT_MS,
+                    )
+                    .await?,
+                )?
+            } else {
+                step(
+                    state,
+                    &to,
+                    TransferAction::UploadChunk {
+                        transfer_id: destination_transfer,
+                        offset,
+                        data_base64: STANDARD.encode(&bytes),
+                    },
+                )
+                .await?
+            };
             if num_field(&written, "next_offset")? != next {
                 return Err(
                     "destination upload offset mismatch; inspect status before continuing".into(),
@@ -258,7 +320,7 @@ pub(super) async fn run(state: &AppState, input: McpCopyInput) -> Result<Value, 
         Ok(()) => ("in_progress", None),
         Err(error) => ("failed", Some(error)),
     };
-    let value = progress(
+    let mut value = progress(
         status,
         &from,
         &to,
@@ -270,6 +332,12 @@ pub(super) async fn run(state: &AppState, input: McpCopyInput) -> Result<Value, 
         &hash,
         error,
     );
+    // Which wire path each side used, so a benchmark or an operator can tell a
+    // binary relay from the base64 fallback without reading logs.
+    value["transport"] = json!({
+        "source": if source_binary { "binary" } else { "json" },
+        "destination": if destination_binary { "binary" } else { "json" },
+    });
     let _ = state
         .store
         .record_activity(Some(&to), "device.copy", status, None);
