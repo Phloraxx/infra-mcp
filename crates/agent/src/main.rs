@@ -610,10 +610,15 @@ async fn run_connection(
                                     .map_err(|_| anyhow!("agent response channel full; reconnecting"))?;
                                 continue;
                             }
-                            if pending_bulk.insert(pending.id, pending).is_some() {
-                                return Err(anyhow!(
-                                    "duplicate bulk announcement for one transfer or session"
-                                ));
+                            // A repeated announcement for the same transfer means the
+                            // previous payload never arrived (the gateway reported an
+                            // unknown outcome). The newest announcement wins; the old
+                            // request id will never be answered.
+                            if let Some(stale) = pending_bulk.insert(pending.id, pending) {
+                                warn!(
+                                    transfer_id=%stale.id,
+                                    "replacing an abandoned bulk announcement"
+                                );
                             }
                             continue;
                         }
