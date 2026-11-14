@@ -254,8 +254,15 @@ impl Drop for Agent {
     }
 }
 
+/// Fixtures are serialized inside the test binary: each one spawns a real
+/// gateway and agent, and the heartbeat scenario depends on wall-clock timing.
+/// This keeps the harness deterministic whether it runs with `--test-threads=1`
+/// or cargo's default parallelism.
+static FIXTURE_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
 /// One hermetic gateway + proxy + agent fixture.
 pub struct Fixture {
+    _serial: tokio::sync::MutexGuard<'static, ()>,
     pub dir: TempDir,
     pub gateway: Gateway,
     pub proxy: FaultProxy,
@@ -268,6 +275,7 @@ pub struct Fixture {
 
 impl Fixture {
     pub async fn start() -> Self {
+        let serial = FIXTURE_LOCK.lock().await;
         let dir = tempfile::tempdir().expect("create fixture directory");
         let gateway = Gateway::start(dir.path(), HEARTBEAT_TIMEOUT_SECS).expect("start gateway");
         gateway.wait_healthy().await.expect("gateway health");
@@ -292,6 +300,7 @@ impl Fixture {
         let store = StoreProbe::new(gateway.db_path.clone());
         let device_id = wait_for_online(&mcp).await;
         Self {
+            _serial: serial,
             dir,
             gateway,
             proxy,

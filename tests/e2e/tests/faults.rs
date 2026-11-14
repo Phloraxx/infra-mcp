@@ -86,7 +86,12 @@ async fn read_until_stable(
 async fn exec_cut_before_response_is_outcome_unknown_and_never_replayed() {
     let fixture = Fixture::start().await;
     let marker = fixture.dir.path().join("exec-marker.txt");
-    let command = format!("sleep 1; printf x >> {}", marker.display());
+    let started = fixture.dir.path().join("exec-started.txt");
+    let command = format!(
+        "printf s >> {}; sleep 1; printf x >> {}",
+        started.display(),
+        marker.display()
+    );
     let connection = fixture.proxy.current_connection();
     let mcp = fixture.mcp.clone();
     let device = fixture.device_id.clone();
@@ -94,7 +99,15 @@ async fn exec_cut_before_response_is_outcome_unknown_and_never_replayed() {
         mcp.call("exec", json!({"device": device, "command": command}))
             .await
     });
-    tokio::time::sleep(Duration::from_millis(400)).await;
+    // Cut only once the command is provably running, so the response is in
+    // flight rather than the request still being queued.
+    for _ in 0..100 {
+        if started.exists() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert!(started.exists(), "the exec command never started");
     fixture.proxy.cut(connection);
     let result = call.await.expect("exec task").expect("exec call");
     assert_eq!(
@@ -196,7 +209,7 @@ async fn download_resumes_from_offset_after_a_mid_chunk_cut() {
     fixture.proxy.set_faults(
         connection,
         Faults {
-            delay_downstream_ms: 400,
+            delay_downstream_ms: 800,
             ..Faults::default()
         },
     );
@@ -216,7 +229,7 @@ async fn download_resumes_from_offset_after_a_mid_chunk_cut() {
         )
         .await
     });
-    tokio::time::sleep(Duration::from_millis(150)).await;
+    tokio::time::sleep(Duration::from_millis(300)).await;
     fixture.proxy.cut(connection);
     let lost = call.await.expect("chunk task").expect("chunk call");
     assert_eq!(
