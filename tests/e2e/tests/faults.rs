@@ -4,10 +4,13 @@
 //! asserts observable state (store rows, audit events, response values), not
 //! just the absence of a panic.
 //!
-//! The harness is Unix-only: it drives POSIX shell commands and PTYs through the
-//! real agent. Windows acceptance is a separate gate.
+//! The harness is Linux-only on purpose: it drives POSIX shell commands and PTYs
+//! through the real agent, and the durable job/PTY workers are launched directly
+//! on Linux. macOS submits those workers through launchd and Windows uses
+//! ConPTY, so their acceptance stays a separate real-device gate rather than an
+//! unverified CI matrix entry.
 
-#![cfg(unix)]
+#![cfg(target_os = "linux")]
 
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use infra_e2e::{Faults, Fixture};

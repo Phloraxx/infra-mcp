@@ -123,5 +123,6 @@ restart mid-job (the job survives and the agent reconciles). Cross-device copy
 resume stays an explicitly ignored placeholder until the durable copy queue
 exists.
 
-Run it with `cargo test -p infra-e2e -- --test-threads=1`. It is Unix-only, needs
-no external network or installed binaries, and is wired as its own CI job.
+Run it with `cargo test -p infra-e2e -- --test-threads=1`. It is Linux-only
+(macOS launchd and Windows ConPTY worker launch stay real-device gates), needs no
+external network or installed binaries, and is wired as its own CI job.
