@@ -131,6 +131,8 @@ pub(crate) async fn handle_agent(mut socket: WebSocket, state: AppState) {
         }
     }
     state.emit("device_online", Some(hello.device_id.clone()));
+    // A durable copy job paused on this endpoint can resume now.
+    state.copy_queue.wake();
     info!(device_id=%hello.device_id,generation,platform=%hello.platform,arch=%hello.arch,"agent online");
     let mut heartbeat = tokio::time::interval(AGENT_HEARTBEAT_INTERVAL);
     heartbeat.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
@@ -313,6 +315,8 @@ pub(crate) async fn handle_agent(mut socket: WebSocket, state: AppState) {
                 .store
                 .record_activity(Some(&hello.device_id), "device.disconnect", "ok", None);
         state.emit("device_offline", Some(hello.device_id.clone()));
+        // Let the copy queue pause any job that was using this endpoint.
+        state.copy_queue.wake();
         info!(device_id=%hello.device_id,generation,"agent offline")
     } else {
         info!(device_id=%hello.device_id,generation,"stale agent connection retired")

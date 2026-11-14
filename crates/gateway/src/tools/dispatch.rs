@@ -222,6 +222,7 @@ pub(crate) fn dispatch_error(error: DispatchError) -> String {
         DispatchError::QueueBusy => {
             "agent_busy: request deadline expired before dispatch; operation was not sent and may be retried".into()
         }
+        DispatchError::Protocol(message) => format!("device_protocol_error: {message}"),
     }
 }
 pub(crate) async fn dispatch_to_device(

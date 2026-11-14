@@ -83,6 +83,100 @@ pub struct AuditRecord {
     pub request_id: Option<String>,
 }
 
+/// Lifecycle of a durable cross-device copy job.
+///
+/// `queued` and `paused` both mean "not currently being driven"; the difference
+/// is intent. A queued job has never started, a paused job stopped because an
+/// endpoint went away or a chunk outcome was uncertain. Both are resumable, and
+/// the driver re-reads the destination's confirmed offset before every slice, so
+/// a restart never trusts this row over the destination.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum CopyJobState {
+    Queued,
+    Running,
+    Paused,
+    Failed,
+    Completed,
+    Canceled,
+}
+
+impl CopyJobState {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Queued => "queued",
+            Self::Running => "running",
+            Self::Paused => "paused",
+            Self::Failed => "failed",
+            Self::Completed => "completed",
+            Self::Canceled => "canceled",
+        }
+    }
+
+    pub fn parse(value: &str) -> Option<Self> {
+        match value {
+            "queued" => Some(Self::Queued),
+            "running" => Some(Self::Running),
+            "paused" => Some(Self::Paused),
+            "failed" => Some(Self::Failed),
+            "completed" => Some(Self::Completed),
+            "canceled" => Some(Self::Canceled),
+            _ => None,
+        }
+    }
+
+    /// Terminal rows are never driven again and are the only rows retention may
+    /// delete.
+    pub fn is_terminal(self) -> bool {
+        matches!(self, Self::Failed | Self::Completed | Self::Canceled)
+    }
+
+    /// States the supervisor rebuilds its task list from after a restart.
+    pub fn is_resumable(self) -> bool {
+        matches!(self, Self::Queued | Self::Running | Self::Paused)
+    }
+}
+
+/// One durable copy job. `bytes_done` is the last offset the destination
+/// confirmed; `chunk_offset` is the offset the driver will request next. They
+/// differ only while a chunk is in flight, which is exactly the window a crash
+/// can land in, so the driver treats the destination's own status as the truth
+/// and this row as the record of what was already confirmed.
+#[derive(Debug, Clone, Serialize)]
+pub struct CopyJob {
+    pub id: String,
+    pub created_at_ms: u64,
+    pub updated_at_ms: u64,
+    pub source_device: String,
+    pub dest_device: String,
+    pub source_path: String,
+    pub dest_path: String,
+    pub state: CopyJobState,
+    pub bytes_done: u64,
+    pub total_bytes: u64,
+    pub chunk_offset: u64,
+    /// Whole-file digest the source reported when the download began.
+    pub sha256: String,
+    /// Digest of the bytes this job relayed since `sha256_progress_offset`.
+    /// A job that never resumed starts at 0, so a completed job can prove the
+    /// relayed bytes match the source digest without trusting the destination.
+    pub sha256_progress: String,
+    pub sha256_progress_offset: u64,
+    pub source_transfer_id: Option<String>,
+    pub dest_transfer_id: Option<String>,
+    pub last_error: Option<String>,
+}
+
+/// The fields a caller supplies when queueing a copy. Everything else starts at
+/// its zero value and is filled in by the driver.
+#[derive(Debug, Clone, Copy)]
+pub struct NewCopyJob<'a> {
+    pub source_device: &'a str,
+    pub dest_device: &'a str,
+    pub source_path: &'a str,
+    pub dest_path: &'a str,
+}
+
 #[derive(Clone)]
 pub struct Store {
     path: PathBuf,
@@ -91,16 +185,23 @@ pub struct Store {
 /// Per-table retention windows for the cleanup pass.
 ///
 /// The sweep is deliberately table-agnostic: each table gets its own window and
-/// its own counter in [`RetentionSweep`], so the durable copy queue can join the
-/// same pass later (completed rows after 7 days, failed after 30) without
-/// touching the audit policy or adding a second timer.
+/// its own counter in [`RetentionSweep`], so the durable copy queue joins the
+/// same pass without touching the audit policy or adding a second timer. Only
+/// the audit window is operator-configurable; the copy windows are fixed so a
+/// typo in one environment variable cannot silently shorten them.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RetentionPolicy {
     pub audit_retention_days: u64,
+    pub copy_completed_retention_days: u64,
+    pub copy_failed_retention_days: u64,
 }
 
 impl RetentionPolicy {
     pub const DEFAULT_AUDIT_RETENTION_DAYS: u64 = 180;
+    /// A finished copy is history once the owner has seen the digest.
+    pub const DEFAULT_COPY_COMPLETED_RETENTION_DAYS: u64 = 7;
+    /// A failed or canceled copy keeps its error long enough to be diagnosed.
+    pub const DEFAULT_COPY_FAILED_RETENTION_DAYS: u64 = 30;
 
     /// Reads `INFRA_AUDIT_RETENTION_DAYS`. Unset, unparsable and zero values all
     /// fall back to the default: a typo must not silently delete the audit trail.
@@ -112,6 +213,7 @@ impl RetentionPolicy {
             .unwrap_or(Self::DEFAULT_AUDIT_RETENTION_DAYS);
         Self {
             audit_retention_days,
+            ..Self::default()
         }
     }
 }
@@ -120,6 +222,8 @@ impl Default for RetentionPolicy {
     fn default() -> Self {
         Self {
             audit_retention_days: Self::DEFAULT_AUDIT_RETENTION_DAYS,
+            copy_completed_retention_days: Self::DEFAULT_COPY_COMPLETED_RETENTION_DAYS,
+            copy_failed_retention_days: Self::DEFAULT_COPY_FAILED_RETENTION_DAYS,
         }
     }
 }
@@ -127,6 +231,7 @@ impl Default for RetentionPolicy {
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct RetentionSweep {
     pub audit_events_deleted: usize,
+    pub copy_jobs_deleted: usize,
 }
 
 impl Store {
@@ -236,6 +341,36 @@ impl Store {
             conn.execute_batch(
                 "ALTER TABLE devices ADD COLUMN display_name TEXT;
                  PRAGMA user_version=5;",
+            )?;
+        }
+        if version < 6 {
+            // No foreign key to devices on purpose: a job outlives a revoked or
+            // re-enrolled device, and the queue must not block device lifecycle.
+            conn.execute_batch(
+                r#"
+                CREATE TABLE IF NOT EXISTS copy_jobs (
+                    id TEXT PRIMARY KEY,
+                    created_at_ms INTEGER NOT NULL,
+                    updated_at_ms INTEGER NOT NULL,
+                    source_device TEXT NOT NULL,
+                    dest_device TEXT NOT NULL,
+                    source_path TEXT NOT NULL,
+                    dest_path TEXT NOT NULL,
+                    state TEXT NOT NULL,
+                    bytes_done INTEGER NOT NULL DEFAULT 0,
+                    total_bytes INTEGER NOT NULL DEFAULT 0,
+                    chunk_offset INTEGER NOT NULL DEFAULT 0,
+                    sha256 TEXT NOT NULL DEFAULT '',
+                    sha256_progress TEXT NOT NULL DEFAULT '',
+                    sha256_progress_offset INTEGER NOT NULL DEFAULT 0,
+                    source_transfer_id TEXT,
+                    dest_transfer_id TEXT,
+                    last_error TEXT
+                );
+                CREATE INDEX IF NOT EXISTS copy_jobs_state_idx
+                    ON copy_jobs(state, created_at_ms);
+                PRAGMA user_version=6;
+                "#,
             )?;
         }
         Ok(())
@@ -552,16 +687,232 @@ impl Store {
     pub fn sweep_retention(&self, policy: RetentionPolicy) -> Result<RetentionSweep, StoreError> {
         const DAY_MS: u64 = 24 * 60 * 60 * 1000;
         let conn = self.connection()?;
-        let audit_cutoff =
-            now_ms().saturating_sub(policy.audit_retention_days.saturating_mul(DAY_MS));
+        let now = now_ms();
+        let audit_cutoff = now.saturating_sub(policy.audit_retention_days.saturating_mul(DAY_MS));
         let audit_events_deleted = conn.execute(
             "DELETE FROM audit_events WHERE at_ms < ?1",
             params![audit_cutoff as i64],
         )?;
+        // Copy rows age from their last transition, not from creation: a job
+        // created ten days ago that finished yesterday keeps its full window.
+        let completed_cutoff =
+            now.saturating_sub(policy.copy_completed_retention_days.saturating_mul(DAY_MS));
+        let failed_cutoff =
+            now.saturating_sub(policy.copy_failed_retention_days.saturating_mul(DAY_MS));
+        let copy_jobs_deleted = conn.execute(
+            "DELETE FROM copy_jobs WHERE state='completed' AND updated_at_ms < ?1",
+            params![completed_cutoff as i64],
+        )? + conn.execute(
+            "DELETE FROM copy_jobs WHERE state IN ('failed','canceled') AND updated_at_ms < ?1",
+            params![failed_cutoff as i64],
+        )?;
         Ok(RetentionSweep {
             audit_events_deleted,
+            copy_jobs_deleted,
         })
     }
+
+    pub fn create_copy_job(&self, job: NewCopyJob<'_>) -> Result<CopyJob, StoreError> {
+        let id = Uuid::new_v4().to_string();
+        let now = now_ms();
+        let conn = self.connection()?;
+        conn.execute(
+            r#"INSERT INTO copy_jobs(
+                id, created_at_ms, updated_at_ms, source_device, dest_device,
+                source_path, dest_path, state, bytes_done, total_bytes, chunk_offset,
+                sha256, sha256_progress, sha256_progress_offset
+            ) VALUES (?1, ?2, ?2, ?3, ?4, ?5, ?6, 'queued', 0, 0, 0, '', '', 0)"#,
+            params![
+                id,
+                now as i64,
+                job.source_device,
+                job.dest_device,
+                job.source_path,
+                job.dest_path
+            ],
+        )?;
+        Ok(CopyJob {
+            id,
+            created_at_ms: now,
+            updated_at_ms: now,
+            source_device: job.source_device.to_owned(),
+            dest_device: job.dest_device.to_owned(),
+            source_path: job.source_path.to_owned(),
+            dest_path: job.dest_path.to_owned(),
+            state: CopyJobState::Queued,
+            bytes_done: 0,
+            total_bytes: 0,
+            chunk_offset: 0,
+            sha256: String::new(),
+            sha256_progress: String::new(),
+            sha256_progress_offset: 0,
+            source_transfer_id: None,
+            dest_transfer_id: None,
+            last_error: None,
+        })
+    }
+
+    pub fn get_copy_job(&self, id: &str) -> Result<Option<CopyJob>, StoreError> {
+        let conn = self.connection()?;
+        conn.query_row(
+            &format!("SELECT {COPY_JOB_COLUMNS} FROM copy_jobs WHERE id=?1"),
+            params![id],
+            decode_copy_job,
+        )
+        .optional()
+        .map_err(StoreError::from)
+    }
+
+    /// Newest first, bounded so a status call cannot return an unbounded list.
+    pub fn list_copy_jobs(&self, limit: usize) -> Result<Vec<CopyJob>, StoreError> {
+        let conn = self.connection()?;
+        let limit = limit.clamp(1, 100) as i64;
+        let mut stmt = conn.prepare(&format!(
+            "SELECT {COPY_JOB_COLUMNS} FROM copy_jobs ORDER BY created_at_ms DESC, id DESC LIMIT ?1"
+        ))?;
+        let rows = stmt.query_map(params![limit], decode_copy_job)?;
+        rows.collect::<Result<Vec<_>, _>>()
+            .map_err(StoreError::from)
+    }
+
+    /// Every row the supervisor must drive after a restart. A row left in
+    /// `running` by a killed gateway has no task behind it, which is why it is
+    /// rebuilt here rather than trusted.
+    pub fn list_resumable_copy_jobs(&self) -> Result<Vec<CopyJob>, StoreError> {
+        let conn = self.connection()?;
+        let mut stmt = conn.prepare(&format!(
+            "SELECT {COPY_JOB_COLUMNS} FROM copy_jobs
+             WHERE state IN ('queued','running','paused')
+             ORDER BY created_at_ms, id"
+        ))?;
+        let rows = stmt.query_map([], decode_copy_job)?;
+        rows.collect::<Result<Vec<_>, _>>()
+            .map_err(StoreError::from)
+    }
+
+    /// Write-ahead transition into `running`. Returns false when the row is
+    /// already terminal, so a driver that lost a race with a cancel stops
+    /// instead of resurrecting the job.
+    pub fn mark_copy_job_running(&self, id: &str) -> Result<bool, StoreError> {
+        let conn = self.connection()?;
+        Ok(conn.execute(
+            "UPDATE copy_jobs SET state='running', updated_at_ms=?2
+             WHERE id=?1 AND state IN ('queued','running','paused')",
+            params![id, now_ms() as i64],
+        )? > 0)
+    }
+
+    /// Records the two transfer IDs and the source's declared size/digest before
+    /// the first chunk is relayed, so a restart resumes the same transfers.
+    pub fn record_copy_job_transfers(
+        &self,
+        id: &str,
+        source_transfer_id: &str,
+        dest_transfer_id: &str,
+        total_bytes: u64,
+        sha256: &str,
+    ) -> Result<bool, StoreError> {
+        let conn = self.connection()?;
+        Ok(conn.execute(
+            "UPDATE copy_jobs SET source_transfer_id=?2, dest_transfer_id=?3,
+                total_bytes=?4, sha256=?5, updated_at_ms=?6
+             WHERE id=?1 AND state NOT IN ('failed','completed','canceled')",
+            params![
+                id,
+                source_transfer_id,
+                dest_transfer_id,
+                total_bytes as i64,
+                sha256,
+                now_ms() as i64
+            ],
+        )? > 0)
+    }
+
+    /// Records the resume offset and the running digest. Called before a chunk
+    /// (with the offset about to be requested) and after it (with the offset the
+    /// destination confirmed), so the row never claims more than the destination
+    /// has.
+    pub fn record_copy_job_progress(
+        &self,
+        id: &str,
+        bytes_done: u64,
+        chunk_offset: u64,
+        sha256_progress: &str,
+        sha256_progress_offset: u64,
+    ) -> Result<bool, StoreError> {
+        let conn = self.connection()?;
+        Ok(conn.execute(
+            "UPDATE copy_jobs SET bytes_done=?2, chunk_offset=?3, sha256_progress=?4,
+                sha256_progress_offset=?5, updated_at_ms=?6
+             WHERE id=?1 AND state NOT IN ('failed','completed','canceled')",
+            params![
+                id,
+                bytes_done as i64,
+                chunk_offset as i64,
+                sha256_progress,
+                sha256_progress_offset as i64,
+                now_ms() as i64
+            ],
+        )? > 0)
+    }
+
+    /// Unconditional terminal transition. `last_error` is cleared on success so a
+    /// completed job does not keep a stale pause reason.
+    pub fn set_copy_job_state(
+        &self,
+        id: &str,
+        state: CopyJobState,
+        last_error: Option<&str>,
+    ) -> Result<bool, StoreError> {
+        let conn = self.connection()?;
+        Ok(conn.execute(
+            "UPDATE copy_jobs SET state=?2, last_error=?3, updated_at_ms=?4 WHERE id=?1",
+            params![id, state.as_str(), last_error, now_ms() as i64],
+        )? > 0)
+    }
+
+    /// Marks a job canceled unless it already finished. Returns the row as it
+    /// stands afterwards, so the caller can report the real state.
+    pub fn cancel_copy_job(&self, id: &str) -> Result<Option<CopyJob>, StoreError> {
+        let conn = self.connection()?;
+        conn.execute(
+            "UPDATE copy_jobs SET state='canceled', last_error='canceled by the owner',
+                updated_at_ms=?2
+             WHERE id=?1 AND state NOT IN ('failed','completed','canceled')",
+            params![id, now_ms() as i64],
+        )?;
+        drop(conn);
+        self.get_copy_job(id)
+    }
+}
+
+const COPY_JOB_COLUMNS: &str = "id, created_at_ms, updated_at_ms, source_device, dest_device,
+    source_path, dest_path, state, bytes_done, total_bytes, chunk_offset, sha256,
+    sha256_progress, sha256_progress_offset, source_transfer_id, dest_transfer_id, last_error";
+
+fn decode_copy_job(row: &rusqlite::Row<'_>) -> rusqlite::Result<CopyJob> {
+    let state: String = row.get(7)?;
+    Ok(CopyJob {
+        id: row.get(0)?,
+        created_at_ms: row.get::<_, i64>(1)?.max(0) as u64,
+        updated_at_ms: row.get::<_, i64>(2)?.max(0) as u64,
+        source_device: row.get(3)?,
+        dest_device: row.get(4)?,
+        source_path: row.get(5)?,
+        dest_path: row.get(6)?,
+        // An unknown state is a corrupt row, not a reason to panic: report it as
+        // failed so the supervisor stops driving it and an operator sees why.
+        state: CopyJobState::parse(&state).unwrap_or(CopyJobState::Failed),
+        bytes_done: row.get::<_, i64>(8)?.max(0) as u64,
+        total_bytes: row.get::<_, i64>(9)?.max(0) as u64,
+        chunk_offset: row.get::<_, i64>(10)?.max(0) as u64,
+        sha256: row.get(11)?,
+        sha256_progress: row.get(12)?,
+        sha256_progress_offset: row.get::<_, i64>(13)?.max(0) as u64,
+        source_transfer_id: row.get(14)?,
+        dest_transfer_id: row.get(15)?,
+        last_error: row.get(16)?,
+    })
 }
 
 fn decode_device(row: &rusqlite::Row<'_>) -> rusqlite::Result<DeviceRecord> {
@@ -853,6 +1204,226 @@ mod tests {
             RetentionPolicy::DEFAULT_AUDIT_RETENTION_DAYS
         );
         assert_eq!(RetentionPolicy::DEFAULT_AUDIT_RETENTION_DAYS, 180);
+        assert_eq!(
+            RetentionPolicy::default().copy_completed_retention_days,
+            RetentionPolicy::DEFAULT_COPY_COMPLETED_RETENTION_DAYS
+        );
+        assert_eq!(
+            RetentionPolicy::default().copy_failed_retention_days,
+            RetentionPolicy::DEFAULT_COPY_FAILED_RETENTION_DAYS
+        );
+        assert_eq!(RetentionPolicy::DEFAULT_COPY_COMPLETED_RETENTION_DAYS, 7);
+        assert_eq!(RetentionPolicy::DEFAULT_COPY_FAILED_RETENTION_DAYS, 30);
+    }
+
+    #[test]
+    fn copy_job_states_classify_terminal_and_resumable_rows() {
+        for (state, text) in [
+            (CopyJobState::Queued, "queued"),
+            (CopyJobState::Running, "running"),
+            (CopyJobState::Paused, "paused"),
+            (CopyJobState::Failed, "failed"),
+            (CopyJobState::Completed, "completed"),
+            (CopyJobState::Canceled, "canceled"),
+        ] {
+            assert_eq!(state.as_str(), text);
+            assert_eq!(CopyJobState::parse(text), Some(state));
+        }
+        assert_eq!(CopyJobState::parse("unknown"), None);
+        assert!(CopyJobState::Completed.is_terminal());
+        assert!(CopyJobState::Failed.is_terminal());
+        assert!(CopyJobState::Canceled.is_terminal());
+        assert!(!CopyJobState::Paused.is_terminal());
+        assert!(CopyJobState::Queued.is_resumable());
+        assert!(CopyJobState::Running.is_resumable());
+        assert!(CopyJobState::Paused.is_resumable());
+        assert!(!CopyJobState::Completed.is_resumable());
+    }
+
+    #[test]
+    fn a_copy_job_survives_reopen_and_records_its_progress() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("infra.db");
+        let store = Store::open(&path).unwrap();
+        let job = store
+            .create_copy_job(NewCopyJob {
+                source_device: "source-id",
+                dest_device: "dest-id",
+                source_path: "/source.bin",
+                dest_path: "/destination.bin",
+            })
+            .unwrap();
+        assert_eq!(job.state, CopyJobState::Queued);
+        assert_eq!(job.bytes_done, 0);
+        assert!(store.mark_copy_job_running(&job.id).unwrap());
+        assert!(
+            store
+                .record_copy_job_transfers(&job.id, "source-transfer", "dest-transfer", 4096, "abc")
+                .unwrap()
+        );
+        assert!(
+            store
+                .record_copy_job_progress(&job.id, 1024, 1024, "def", 0)
+                .unwrap()
+        );
+        drop(store);
+
+        // A restart rebuilds the task list from the table, so the row must carry
+        // everything the driver needs to resume the same two transfers.
+        let reopened = Store::open(&path).unwrap();
+        let resumable = reopened.list_resumable_copy_jobs().unwrap();
+        assert_eq!(resumable.len(), 1);
+        let job = &resumable[0];
+        assert_eq!(job.state, CopyJobState::Running);
+        assert_eq!(job.bytes_done, 1024);
+        assert_eq!(job.chunk_offset, 1024);
+        assert_eq!(job.total_bytes, 4096);
+        assert_eq!(job.sha256, "abc");
+        assert_eq!(job.sha256_progress, "def");
+        assert_eq!(job.source_transfer_id.as_deref(), Some("source-transfer"));
+        assert_eq!(job.dest_transfer_id.as_deref(), Some("dest-transfer"));
+
+        assert!(
+            reopened
+                .set_copy_job_state(&job.id, CopyJobState::Completed, None)
+                .unwrap()
+        );
+        let done = reopened.get_copy_job(&job.id).unwrap().unwrap();
+        assert_eq!(done.state, CopyJobState::Completed);
+        assert_eq!(done.last_error, None);
+        assert!(reopened.list_resumable_copy_jobs().unwrap().is_empty());
+        assert_eq!(reopened.list_copy_jobs(10).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn a_terminal_copy_job_rejects_further_progress_and_cancel() {
+        let dir = tempdir().unwrap();
+        let store = Store::open(dir.path().join("infra.db")).unwrap();
+        let job = store
+            .create_copy_job(NewCopyJob {
+                source_device: "source-id",
+                dest_device: "dest-id",
+                source_path: "/source.bin",
+                dest_path: "/destination.bin",
+            })
+            .unwrap();
+        assert!(store.mark_copy_job_running(&job.id).unwrap());
+        let canceled = store.cancel_copy_job(&job.id).unwrap().unwrap();
+        assert_eq!(canceled.state, CopyJobState::Canceled);
+        assert_eq!(
+            canceled.last_error.as_deref(),
+            Some("canceled by the owner")
+        );
+
+        // A driver that lost the race with the cancel must not resurrect the job.
+        assert!(!store.mark_copy_job_running(&job.id).unwrap());
+        assert!(
+            !store
+                .record_copy_job_progress(&job.id, 512, 512, "aa", 0)
+                .unwrap()
+        );
+        assert!(
+            !store
+                .record_copy_job_transfers(&job.id, "s", "d", 10, "bb")
+                .unwrap()
+        );
+        let after = store.get_copy_job(&job.id).unwrap().unwrap();
+        assert_eq!(after.state, CopyJobState::Canceled);
+        assert_eq!(after.bytes_done, 0);
+        // Canceling twice is idempotent and keeps the original reason.
+        assert_eq!(
+            store.cancel_copy_job(&job.id).unwrap().unwrap().state,
+            CopyJobState::Canceled
+        );
+        assert!(store.get_copy_job("missing").unwrap().is_none());
+    }
+
+    #[test]
+    fn copy_job_retention_uses_the_terminal_transition_time() {
+        let dir = tempdir().unwrap();
+        let store = Store::open(dir.path().join("infra.db")).unwrap();
+        let mut ids = Vec::new();
+        for (state, days_ago) in [
+            (CopyJobState::Completed, 8_u64),
+            (CopyJobState::Completed, 1),
+            (CopyJobState::Failed, 31),
+            (CopyJobState::Failed, 2),
+            (CopyJobState::Canceled, 31),
+            (CopyJobState::Paused, 400),
+            (CopyJobState::Queued, 400),
+            (CopyJobState::Running, 400),
+        ] {
+            let job = store
+                .create_copy_job(NewCopyJob {
+                    source_device: "source-id",
+                    dest_device: "dest-id",
+                    source_path: "/source.bin",
+                    dest_path: "/destination.bin",
+                })
+                .unwrap();
+            store
+                .set_copy_job_state(&job.id, state, Some("seeded"))
+                .unwrap();
+            // Age the row directly: the public API always writes "now".
+            let conn = store.connection().unwrap();
+            conn.execute(
+                "UPDATE copy_jobs SET updated_at_ms=?1 WHERE id=?2",
+                params![(now_ms() - days_ago * 24 * 60 * 60 * 1000) as i64, job.id],
+            )
+            .unwrap();
+            ids.push((job.id, state));
+        }
+
+        let sweep = store.sweep_retention(RetentionPolicy::default()).unwrap();
+        assert_eq!(
+            sweep.copy_jobs_deleted, 3,
+            "one completed, one failed, one canceled"
+        );
+        assert_eq!(sweep.audit_events_deleted, 0);
+        let remaining: Vec<_> = store
+            .list_copy_jobs(100)
+            .unwrap()
+            .into_iter()
+            .map(|job| job.state)
+            .collect();
+        assert_eq!(remaining.len(), 5);
+        assert!(remaining.contains(&CopyJobState::Completed));
+        assert!(remaining.contains(&CopyJobState::Failed));
+        assert!(remaining.contains(&CopyJobState::Paused));
+        assert!(remaining.contains(&CopyJobState::Queued));
+        assert!(remaining.contains(&CopyJobState::Running));
+        // A second sweep inside the window is a no-op.
+        assert_eq!(
+            store
+                .sweep_retention(RetentionPolicy::default())
+                .unwrap()
+                .copy_jobs_deleted,
+            0
+        );
+        assert_eq!(store.list_copy_jobs(100).unwrap().len(), 5);
+    }
+
+    #[test]
+    fn migration_reaches_version_six_and_is_idempotent() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("infra.db");
+        let store = Store::open(&path).unwrap();
+        let version: u32 = store
+            .connection()
+            .unwrap()
+            .pragma_query_value(None, "user_version", |row| row.get(0))
+            .unwrap();
+        assert_eq!(version, 6, "copy_jobs is migration 6");
+        drop(store);
+        // Reopening an already-migrated database must not re-run the migration.
+        let reopened = Store::open(&path).unwrap();
+        let version: u32 = reopened
+            .connection()
+            .unwrap()
+            .pragma_query_value(None, "user_version", |row| row.get(0))
+            .unwrap();
+        assert_eq!(version, 6);
+        assert!(reopened.list_copy_jobs(10).unwrap().is_empty());
     }
 
     #[test]

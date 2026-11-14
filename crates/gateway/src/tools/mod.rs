@@ -499,7 +499,8 @@ impl InfraMcp {
                         &data,
                         300_000,
                     )
-                    .await?;
+                    .await
+                    .map_err(dispatch_error)?;
                     record_operation(&self.state, &device, "transfer", &response);
                     return Ok(McpJson(response_json(response)));
                 }
@@ -540,7 +541,8 @@ impl InfraMcp {
                         length,
                         300_000,
                     )
-                    .await?;
+                    .await
+                    .map_err(dispatch_error)?;
                     record_operation(&self.state, &device, "transfer", &response);
                     let mut value = response_json(response);
                     if let Some(frame) = frame
@@ -620,6 +622,39 @@ impl InfraMcp {
         Parameters(input): Parameters<McpCopyInput>,
     ) -> Result<McpJson<serde_json::Value>, ToolError> {
         Ok(McpJson(crate::copy::run(&self.state, input).await?))
+    }
+
+    #[tool(
+        name = "copy.start",
+        description = "Queue a durable cross-device copy and return a job id. Use this instead of repeated copy calls for large files: one gateway task relays the file, survives a gateway restart, pauses while either endpoint is offline and resumes when both are back. Creates missing parent directories and replaces an existing destination. Poll with copy.status; stop with copy.cancel."
+    )]
+    async fn copy_start(
+        &self,
+        Parameters(input): Parameters<McpCopyStartInput>,
+    ) -> Result<McpJson<serde_json::Value>, ToolError> {
+        Ok(McpJson(crate::copy_queue::start(&self.state, input).await?))
+    }
+
+    #[tool(
+        name = "copy.status",
+        description = "Report a durable copy job by id (state, bytes_done, total_bytes, percent, sha256, last_error), or list the most recent jobs when job_id is omitted. States: queued, running, paused, failed, completed, canceled."
+    )]
+    async fn copy_status(
+        &self,
+        Parameters(input): Parameters<McpCopyStatusInput>,
+    ) -> Result<McpJson<serde_json::Value>, ToolError> {
+        Ok(McpJson(crate::copy_queue::status(&self.state, input)?))
+    }
+
+    #[tool(
+        name = "copy.cancel",
+        description = "Cancel a durable copy job. A running job stops before its next chunk and cancels both transfers; a finished job is returned unchanged."
+    )]
+    async fn copy_cancel(
+        &self,
+        Parameters(input): Parameters<McpCopyCancelInput>,
+    ) -> Result<McpJson<serde_json::Value>, ToolError> {
+        Ok(McpJson(crate::copy_queue::cancel(&self.state, input)?))
     }
 
     #[tool(

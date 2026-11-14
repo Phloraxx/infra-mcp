@@ -3,6 +3,7 @@ mod auth;
 mod browser_auth;
 mod bulk;
 mod copy;
+mod copy_queue;
 mod dashboard_http;
 mod hermes_bridge;
 mod mcp_actions;
@@ -20,6 +21,7 @@ mod version;
 use agent_ws::*;
 use browser_auth::*;
 use bulk::*;
+use copy_queue::CopyQueue;
 use dashboard_http::*;
 use oauth_http::*;
 use pairing_http::*;
@@ -100,6 +102,7 @@ struct AppState {
     store: Store,
     hermes: Option<Arc<HermesBridge>>,
     dashboard: DashboardAssets,
+    copy_queue: CopyQueue,
 }
 
 impl AppState {
@@ -118,6 +121,7 @@ impl AppState {
             store,
             hermes: HermesBridge::from_env(),
             dashboard: DashboardAssets::embedded(),
+            copy_queue: CopyQueue::default(),
         }
     }
 
@@ -172,6 +176,9 @@ enum DispatchError {
     Storage(String),
     ConnectionClosed,
     QueueBusy,
+    /// The device answered something the gateway cannot trust (a bulk frame that
+    /// does not match its request, for example). Never retried blindly.
+    Protocol(String),
 }
 
 #[tokio::main]
@@ -220,6 +227,7 @@ async fn main() -> anyhow::Result<()> {
         );
     }
     spawn_retention_task(state.clone());
+    copy_queue::spawn(state.clone());
     let app = build_app(state.clone());
     let listener = tokio::net::TcpListener::bind(bind).await?;
     info!(%bind, version = %version::VERSION, commit = %version::COMMIT, gateway_epoch=%state.gateway_epoch, "Infra v1 gateway listening");
@@ -229,8 +237,8 @@ async fn main() -> anyhow::Result<()> {
 
 // Audit rows grow forever on a box with a full disk. Sweep once at startup and
 // then daily: a gateway that restarts more often than the interval would
-// otherwise never trim the table. The pass is shared with any future table that
-// needs a retention window (see RetentionPolicy).
+// otherwise never trim the table. The same pass retires finished copy jobs
+// (completed after 7 days, failed/canceled after 30) through RetentionPolicy.
 fn spawn_retention_task(state: AppState) {
     let policy = RetentionPolicy::from_env();
     tokio::spawn(async move {
@@ -241,7 +249,10 @@ fn spawn_retention_task(state: AppState) {
             match state.store.sweep_retention(policy) {
                 Ok(sweep) => info!(
                     audit_events_deleted = sweep.audit_events_deleted,
+                    copy_jobs_deleted = sweep.copy_jobs_deleted,
                     retention_days = policy.audit_retention_days,
+                    copy_completed_retention_days = policy.copy_completed_retention_days,
+                    copy_failed_retention_days = policy.copy_failed_retention_days,
                     "retention sweep complete"
                 ),
                 Err(error) => warn!(%error, "retention sweep failed"),

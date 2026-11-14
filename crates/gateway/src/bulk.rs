@@ -241,7 +241,7 @@ pub(crate) async fn upload_chunk_binary(
     offset: u64,
     data: &[u8],
     timeout_ms: u64,
-) -> Result<AgentResponse, String> {
+) -> Result<AgentResponse, DispatchError> {
     let operation = AgentOperation::Transfer(TransferRequest {
         action: TransferAction::UploadChunkBinary {
             transfer_id,
@@ -260,7 +260,6 @@ pub(crate) async fn upload_chunk_binary(
     )
     .await
     .map(|(response, _)| response)
-    .map_err(dispatch_error)
 }
 
 /// Read one download chunk over a bulk frame. Only call this for a device that
@@ -272,7 +271,7 @@ pub(crate) async fn download_chunk_binary(
     offset: u64,
     length: Option<usize>,
     timeout_ms: u64,
-) -> Result<(AgentResponse, Option<OwnedBulkFrame>), String> {
+) -> Result<(AgentResponse, Option<OwnedBulkFrame>), DispatchError> {
     let operation = AgentOperation::Transfer(TransferRequest {
         action: TransferAction::DownloadChunk {
             transfer_id,
@@ -288,14 +287,15 @@ pub(crate) async fn download_chunk_binary(
         None,
         timeout_ms,
     )
-    .await
-    .map_err(dispatch_error)?;
+    .await?;
     if let Some(frame) = &frame
         && (frame.kind != BulkKind::DownloadChunk
             || frame.id != transfer_id
             || frame.offset != offset)
     {
-        return Err("device returned a bulk frame that does not match the requested chunk".into());
+        return Err(DispatchError::Protocol(
+            "device returned a bulk frame that does not match the requested chunk".into(),
+        ));
     }
     Ok((response, frame))
 }

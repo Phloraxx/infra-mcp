@@ -53,6 +53,10 @@ impl ToolError {
                 true,
                 "The operation was rejected before execution; retry after a short backoff.",
             ),
+            "copy_job_not_found" => (
+                false,
+                "Call copy.status without a job_id to list the recent copy jobs.",
+            ),
             "outcome_unknown" => (
                 false,
                 "Inspect resulting state or existing job/transfer handles before any retry. Never replay automatically.",
@@ -88,7 +92,8 @@ impl From<String> for ToolError {
             | "device_registry_error"
             | "device_connection_closed"
             | "unsupported"
-            | "agent_busy" => prefix,
+            | "agent_busy"
+            | "copy_job_not_found" => prefix,
             _ => "operation_failed",
         };
         Self::new(code, message.clone())

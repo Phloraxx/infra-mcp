@@ -47,7 +47,7 @@ def main():
                 rpc = FixtureMcp(base, token).rpc
 
                 tools = {tool['name']: tool for tool in rpc('tools/list', {})['result']['tools']}
-                assert len(tools) == 17 and {'copy', 'hermes', 'hermes_memory'} <= set(tools), set(tools)
+                assert len(tools) == 20 and {'copy', 'copy.start', 'copy.status', 'copy.cancel', 'hermes', 'hermes_memory'} <= set(tools), set(tools)
 
                 devices = rpc('tools/call', {'name':'devices','arguments':{}})['result']
                 assert devices['isError'] is False, devices
@@ -84,6 +84,13 @@ def main():
                         action = resolved(schema, schema['properties']['action'])
                         assert action['enum'] and all(isinstance(x,str) for x in action['enum']), (name, action)
                 assert 'cmd.exe' in tools['exec']['description']
+                # The durable copy queue is a separate surface from the bounded
+                # single-call copy, and each action names its own required fields.
+                assert {'source_device','destination_device','source_path','destination_path'} <= set(tools['copy.start']['inputSchema']['required'])
+                assert 'job_id' in tools['copy.status']['inputSchema']['properties']
+                assert 'job_id' not in tools['copy.status']['inputSchema'].get('required', [])
+                assert tools['copy.cancel']['inputSchema']['required'] == ['job_id']
+                assert 'copy.status' in tools['copy.start']['description']
                 assert 'compact' in tools['devices']['inputSchema']['properties']
                 assert devices['structuredContent']['devices'] == []
                 compact = rpc('tools/call', {'name':'devices','arguments':{'compact':True}})['result']
@@ -115,9 +122,12 @@ def main():
                 error('files', {'device':'fixture-missing','action':'list','path':'.','length':0}, 'invalid_argument')
                 error('files', {'device':'fixture-missing','action':'list','path':'.','length':1001}, 'invalid_argument')
                 error('files', {'device':'fixture-missing','action':'list','path':'.','offset':100001}, 'invalid_argument')
+                error('copy.start', {'source_device':'fixture-missing','destination_device':'fixture-missing','source_path':'/a','destination_path':'/b'}, 'device_not_found')
+                error('copy.status', {'job_id':'00000000-0000-4000-8000-000000000000'}, 'copy_job_not_found')
+                error('copy.cancel', {'job_id':'00000000-0000-4000-8000-000000000000'}, 'copy_job_not_found')
                 invalid = rpc('tools/call', {'name':'system','arguments':{'device':'fixture-missing','action':'invented'}})
                 assert 'error' in invalid or invalid.get('result',{}).get('isError') is True, invalid
-                print('MCP contract smoke passed: 17 tools, oneOf action requirements, compact device views and actionable errors.')
+                print('MCP contract smoke passed: 20 tools, oneOf action requirements, compact device views, the durable copy queue surface and actionable errors.')
             finally:
                 process.terminate()
                 try:

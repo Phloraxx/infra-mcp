@@ -1,13 +1,74 @@
 //! A bounded, resumable relay between two existing signed agents.
 //! No local files or additional transport: each chunk goes through authenticated RPC.
+//!
+//! The choreography lives here once and is driven by two callers: the synchronous
+//! `copy` tool (a bounded slice per MCP call) and the durable queue in
+//! [`crate::copy_queue`] (one task per job, progress persisted between chunks).
+//! Both use the same two transfer IDs, so a job started by one can be resumed by
+//! the other.
 use super::*;
 use serde_json::{Value, json};
+use sha2::Digest;
 
 const CHUNK: usize = 256 * 1024;
 const DEFAULT_BUDGET: u64 = 16 * 1024 * 1024;
 const MAX_BUDGET: u64 = 64 * 1024 * 1024;
 const MAX_SECONDS: u64 = 100;
 const RPC_TIMEOUT_MS: u64 = 20_000;
+
+/// Why a relay step stopped. The distinction is what lets the queue pause a job
+/// instead of failing it: an endpoint that went away is not a broken copy.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) enum RelayError {
+    /// A device is not connected (or its connection closed). Retry when it is back.
+    Offline(String),
+    /// The chunk may or may not have landed. Never replayed blindly: the next
+    /// attempt re-reads the destination's confirmed offset first.
+    Uncertain(String),
+    /// A real failure: bad paths, a mismatched transfer, a checksum mismatch.
+    Failed(String),
+}
+
+impl RelayError {
+    pub(super) fn message(&self) -> &str {
+        match self {
+            Self::Offline(message) | Self::Uncertain(message) | Self::Failed(message) => message,
+        }
+    }
+}
+
+impl From<String> for RelayError {
+    fn from(message: String) -> Self {
+        Self::Failed(message)
+    }
+}
+
+/// Everything one relay needs to keep going. `source_id`/`destination_id` are
+/// filled in as [`begin`] progresses, so a caller that fails halfway still knows
+/// which transfers exist and can resume or cancel them.
+#[derive(Debug, Clone, Default)]
+pub(super) struct Relay {
+    pub(super) from: String,
+    pub(super) to: String,
+    pub(super) source_id: Option<Uuid>,
+    pub(super) destination_id: Option<Uuid>,
+    pub(super) offset: u64,
+    pub(super) size: u64,
+    pub(super) sha256: String,
+    pub(super) source_binary: bool,
+    pub(super) destination_binary: bool,
+}
+
+pub(super) struct BeginRequest<'a> {
+    pub(super) from: &'a str,
+    pub(super) to: &'a str,
+    pub(super) source_path: &'a str,
+    pub(super) destination_path: &'a str,
+    pub(super) overwrite: bool,
+    pub(super) create_parents: bool,
+    pub(super) source_id: Option<Uuid>,
+    pub(super) destination_id: Option<Uuid>,
+}
 
 fn text_field<'a>(data: &'a Value, name: &str) -> Result<&'a str, String> {
     data.get(name)
@@ -27,7 +88,19 @@ fn meta(data: &Value) -> Result<&Value, String> {
     data.get("transfer")
         .ok_or_else(|| "malformed transfer response: missing transfer".into())
 }
-async fn step(state: &AppState, device: &str, action: TransferAction) -> Result<Value, String> {
+
+/// Classify a dispatch failure. A device that is not connected is a pause, not a
+/// failure; everything else means the request itself cannot succeed as written.
+fn classify_dispatch(error: DispatchError) -> RelayError {
+    match error {
+        DispatchError::Offline(_) | DispatchError::ConnectionClosed | DispatchError::QueueBusy => {
+            RelayError::Offline(dispatch_error(error))
+        }
+        other => RelayError::Failed(dispatch_error(other)),
+    }
+}
+
+async fn step(state: &AppState, device: &str, action: TransferAction) -> Result<Value, RelayError> {
     let response = dispatch_to_device(
         state,
         device.to_owned(),
@@ -35,28 +108,298 @@ async fn step(state: &AppState, device: &str, action: TransferAction) -> Result<
         RPC_TIMEOUT_MS,
     )
     .await
-    .map_err(dispatch_error)?;
+    .map_err(classify_dispatch)?;
     body_of(response)
 }
 
-fn body_of(response: AgentResponse) -> Result<Value, String> {
+fn body_of(response: AgentResponse) -> Result<Value, RelayError> {
     match response.result {
         OperationResult::Ok { body } => Ok(body),
-        OperationResult::Failed { error } => Err(error),
-        OperationResult::Canceled { error } => {
-            Err(error.unwrap_or_else(|| "transfer canceled".into()))
-        }
-        OperationResult::DeadlineExceeded => {
-            Err("transfer deadline exceeded; inspect status before retrying".into())
-        }
-        OperationResult::OutcomeUnknown { error } => Err(format!(
-            "transfer outcome unknown (do not assume chunk failed); resume with the returned transfer IDs: {error}"
+        OperationResult::Failed { error } => Err(RelayError::Failed(error)),
+        OperationResult::Canceled { error } => Err(RelayError::Failed(
+            error.unwrap_or_else(|| "transfer canceled".into()),
         )),
-        OperationResult::Unsupported { operation } => {
-            Err(format!("transfer unsupported: {operation}"))
-        }
-        OperationResult::Unauthorized => Err("transfer unauthorized".into()),
+        OperationResult::DeadlineExceeded => Err(RelayError::Uncertain(
+            "transfer deadline exceeded; inspect status before retrying".into(),
+        )),
+        OperationResult::OutcomeUnknown { error } => Err(RelayError::Uncertain(format!(
+            "transfer outcome unknown (do not assume chunk failed); resume with the returned transfer IDs: {error}"
+        ))),
+        OperationResult::Unsupported { operation } => Err(RelayError::Failed(format!(
+            "transfer unsupported: {operation}"
+        ))),
+        OperationResult::Unauthorized => Err(RelayError::Failed("transfer unauthorized".into())),
     }
+}
+
+/// Resolve (or create) both transfers and report where the destination stands.
+///
+/// The destination's own `bytes_transferred` is the resume offset: it is the only
+/// party that knows which chunks actually landed, so a restart never trusts a
+/// stored counter over it. On failure the source transfer is canceled when no
+/// upload exists yet, so a failed initialization does not leave a source-only
+/// "ready" transfer listed as active work. Both IDs are preserved once an upload
+/// exists, so retries can safely resume after uncertain chunk outcomes.
+pub(super) async fn begin(
+    state: &AppState,
+    request: BeginRequest<'_>,
+    relay: &mut Relay,
+) -> Result<(), RelayError> {
+    relay.from = request.from.to_owned();
+    relay.to = request.to.to_owned();
+    relay.source_id = request.source_id;
+    relay.destination_id = request.destination_id;
+    // Each side chooses independently: a binary-capable source can feed a
+    // JSON-only destination and the other way round.
+    relay.source_binary = supports_capability(
+        state,
+        request.from,
+        infra_protocol::TRANSFER_BINARY_CAPABILITY,
+    )
+    .await;
+    relay.destination_binary = supports_capability(
+        state,
+        request.to,
+        infra_protocol::TRANSFER_BINARY_CAPABILITY,
+    )
+    .await;
+    let outcome = begin_inner(state, request, relay).await;
+    if outcome.is_err()
+        && relay.destination_id.is_none()
+        && let Some(id) = relay.source_id
+    {
+        cancel_transfer(state, &relay.from, id).await;
+    }
+    outcome
+}
+
+async fn begin_inner(
+    state: &AppState,
+    request: BeginRequest<'_>,
+    relay: &mut Relay,
+) -> Result<(), RelayError> {
+    // Resume existing transfer metadata instead of starting a new upload.
+    let download = if let Some(id) = relay.source_id {
+        step(
+            state,
+            request.from,
+            TransferAction::Status { transfer_id: id },
+        )
+        .await?
+    } else {
+        step(
+            state,
+            request.from,
+            TransferAction::DownloadBegin {
+                path: request.source_path.to_owned(),
+            },
+        )
+        .await?
+    };
+    let source = meta(&download)?;
+    if text_field(source, "path")? != request.source_path
+        || text_field(source, "direction")? != "download"
+    {
+        return Err(RelayError::Failed(
+            "source transfer ID does not match the requested source".into(),
+        ));
+    }
+    relay.source_id = Some(transfer_id(source)?);
+    relay.size = num_field(source, "size")?;
+    relay.sha256 = text_field(source, "sha256")?.to_owned();
+
+    let upload = if let Some(id) = relay.destination_id {
+        step(
+            state,
+            request.to,
+            TransferAction::Status { transfer_id: id },
+        )
+        .await?
+    } else {
+        step(
+            state,
+            request.to,
+            TransferAction::UploadBegin {
+                path: request.destination_path.to_owned(),
+                size: relay.size,
+                sha256: Some(relay.sha256.clone()),
+                overwrite: request.overwrite,
+                create_parents: request.create_parents,
+            },
+        )
+        .await?
+    };
+    let dest = meta(&upload)?;
+    if text_field(dest, "path")? != request.destination_path
+        || text_field(dest, "direction")? != "upload"
+        || num_field(dest, "size")? != relay.size
+        || text_field(dest, "sha256")? != relay.sha256
+    {
+        return Err(RelayError::Failed(
+            "destination transfer does not match requested path/size/checksum".into(),
+        ));
+    }
+    relay.destination_id = Some(transfer_id(dest)?);
+    if text_field(dest, "status")? == "completed" {
+        relay.offset = relay.size;
+        return Ok(());
+    }
+    if text_field(dest, "status")? != "uploading" {
+        return Err(RelayError::Failed(
+            "destination transfer is not an active upload".into(),
+        ));
+    }
+    relay.offset = num_field(dest, "bytes_transferred")?;
+    if relay.offset > relay.size {
+        return Err(RelayError::Failed(
+            "destination offset exceeds declared size".into(),
+        ));
+    }
+    Ok(())
+}
+
+/// Relay exactly one chunk from `offset` and return the destination's confirmed
+/// next offset. `max_len` bounds the chunk (the synchronous path clamps it to its
+/// per-call budget); the wire chunk size is always the smaller of that and
+/// [`CHUNK`]. The bytes are folded into `hasher` so a caller can prove the
+/// relayed stream matches the source digest.
+pub(super) async fn relay_chunk(
+    state: &AppState,
+    relay: &Relay,
+    offset: u64,
+    max_len: usize,
+    hasher: &mut Sha256,
+) -> Result<u64, RelayError> {
+    let source_id = relay.source_id.expect("begin sets the source transfer");
+    let destination_id = relay
+        .destination_id
+        .expect("begin sets the destination transfer");
+    let count = (relay.size - offset).min(max_len as u64).min(CHUNK as u64) as usize;
+    let (chunk, payload) = if relay.source_binary {
+        let (response, frame) = download_chunk_binary(
+            state,
+            &relay.from,
+            source_id,
+            offset,
+            Some(count),
+            RPC_TIMEOUT_MS,
+        )
+        .await
+        .map_err(classify_dispatch)?;
+        (body_of(response)?, frame)
+    } else {
+        (
+            step(
+                state,
+                &relay.from,
+                TransferAction::DownloadChunk {
+                    transfer_id: source_id,
+                    offset,
+                    length: Some(count),
+                },
+            )
+            .await?,
+            None,
+        )
+    };
+    if num_field(&chunk, "offset")? != offset {
+        return Err(RelayError::Failed(
+            "download offset mismatch; refusing to write".into(),
+        ));
+    }
+    let next = num_field(&chunk, "next_offset")?;
+    if next <= offset || next > relay.size || next - offset > count as u64 {
+        return Err(RelayError::Failed(
+            "download chunk size/offset invalid".into(),
+        ));
+    }
+    // The binary path hands the bytes straight to the destination; the JSON path
+    // decodes the base64 the agent produced.
+    let bytes = match payload {
+        Some(frame) => {
+            if frame.payload.len() as u64 != next - offset {
+                return Err(RelayError::Failed(
+                    "bulk chunk length does not match the reported offset range".into(),
+                ));
+            }
+            frame.payload
+        }
+        None => {
+            let encoded = text_field(&chunk, "data_base64")?.to_owned();
+            if encoded.is_empty() {
+                return Err(RelayError::Failed(
+                    "unexpected empty chunk before end of source".into(),
+                ));
+            }
+            STANDARD
+                .decode(encoded)
+                .map_err(|_| RelayError::Failed("download chunk is not valid base64".into()))?
+        }
+    };
+    if bytes.is_empty() {
+        return Err(RelayError::Failed(
+            "unexpected empty chunk before end of source".into(),
+        ));
+    }
+    hasher.update(&bytes);
+    let written = if relay.destination_binary {
+        body_of(
+            upload_chunk_binary(
+                state,
+                &relay.to,
+                destination_id,
+                offset,
+                &bytes,
+                RPC_TIMEOUT_MS,
+            )
+            .await
+            .map_err(classify_dispatch)?,
+        )?
+    } else {
+        step(
+            state,
+            &relay.to,
+            TransferAction::UploadChunk {
+                transfer_id: destination_id,
+                offset,
+                data_base64: STANDARD.encode(&bytes),
+            },
+        )
+        .await?
+    };
+    if num_field(&written, "next_offset")? != next {
+        return Err(RelayError::Failed(
+            "destination upload offset mismatch; inspect status before continuing".into(),
+        ));
+    }
+    Ok(next)
+}
+
+/// Commit the upload and verify the destination's whole-file digest.
+pub(super) async fn commit(state: &AppState, relay: &Relay) -> Result<(), RelayError> {
+    let destination_id = relay
+        .destination_id
+        .expect("begin sets the destination transfer");
+    let commit = step(
+        state,
+        &relay.to,
+        TransferAction::UploadCommit {
+            transfer_id: destination_id,
+        },
+    )
+    .await?;
+    if text_field(&commit, "sha256")? != relay.sha256 {
+        return Err(RelayError::Failed(
+            "destination checksum mismatch after commit".into(),
+        ));
+    }
+    Ok(())
+}
+
+/// Best-effort cancel of one transfer. Used for cleanup, so a failure here must
+/// not mask the error that triggered it.
+pub(super) async fn cancel_transfer(state: &AppState, device: &str, id: Uuid) {
+    let _ = step(state, device, TransferAction::Cancel { transfer_id: id }).await;
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -106,237 +449,74 @@ pub(super) async fn run(state: &AppState, input: McpCopyInput) -> Result<Value, 
     if from == to && input.source_path == input.destination_path {
         return Err("source and destination cannot be the same file on the same device".into());
     }
-    // Each side chooses independently: a binary-capable source can feed a
-    // JSON-only destination and the other way round.
-    let source_binary =
-        supports_capability(state, &from, infra_protocol::TRANSFER_BINARY_CAPABILITY).await;
-    let destination_binary =
-        supports_capability(state, &to, infra_protocol::TRANSFER_BINARY_CAPABILITY).await;
     let budget = input
         .max_bytes
         .unwrap_or(DEFAULT_BUDGET)
         .clamp(CHUNK as u64, MAX_BUDGET);
     let started = Instant::now();
-    let mut source_id = input
+    let source_id = input
         .source_transfer_id
         .as_ref()
         .map(|s| Uuid::parse_str(s).map_err(|_| "invalid source_transfer_id UUID"))
         .transpose()?;
-    let mut destination_id = input
+    let destination_id = input
         .destination_transfer_id
         .as_ref()
         .map(|s| Uuid::parse_str(s).map_err(|_| "invalid destination_transfer_id UUID"))
         .transpose()?;
-    let mut offset = 0;
-    let mut size = 0;
-    let mut hash = String::new();
+    let mut relay = Relay::default();
+    let request = BeginRequest {
+        from: &from,
+        to: &to,
+        source_path: &input.source_path,
+        destination_path: &input.destination_path,
+        overwrite: input.overwrite.unwrap_or(false),
+        create_parents: input.create_parents.unwrap_or(false),
+        source_id,
+        destination_id,
+    };
 
     let operation = async {
-        // Resume existing transfer metadata instead of starting a new upload.
-        let download = if let Some(id) = source_id {
-            step(state, &from, TransferAction::Status { transfer_id: id }).await?
-        } else {
-            step(
-                state,
-                &from,
-                TransferAction::DownloadBegin {
-                    path: input.source_path.clone(),
-                },
-            )
-            .await?
-        };
-        let source = meta(&download)?;
-        if text_field(source, "path")? != input.source_path
-            || text_field(source, "direction")? != "download"
-        {
-            return Err("source transfer ID does not match the requested source".into());
-        }
-        source_id = Some(transfer_id(source)?);
-        size = num_field(source, "size")?;
-        hash = text_field(source, "sha256")?.to_owned();
-
-        let upload = if let Some(id) = destination_id {
-            step(state, &to, TransferAction::Status { transfer_id: id }).await?
-        } else {
-            step(
-                state,
-                &to,
-                TransferAction::UploadBegin {
-                    path: input.destination_path.clone(),
-                    size,
-                    sha256: Some(hash.clone()),
-                    overwrite: input.overwrite.unwrap_or(false),
-                    create_parents: input.create_parents.unwrap_or(false),
-                },
-            )
-            .await?
-        };
-        let dest = meta(&upload)?;
-        if text_field(dest, "path")? != input.destination_path
-            || text_field(dest, "direction")? != "upload"
-            || num_field(dest, "size")? != size
-            || text_field(dest, "sha256")? != hash
-        {
-            return Err("destination transfer does not match requested path/size/checksum".into());
-        }
-        destination_id = Some(transfer_id(dest)?);
-        if text_field(dest, "status")? == "completed" {
-            offset = size;
-            return Ok(());
-        }
-        if text_field(dest, "status")? != "uploading" {
-            return Err("destination transfer is not an active upload".into());
-        }
-        offset = num_field(dest, "bytes_transferred")?;
-        if offset > size {
-            return Err("destination offset exceeds declared size".into());
-        }
-
-        let start_offset = offset;
-        while offset < size
-            && offset - start_offset < budget
+        begin(state, request, &mut relay).await?;
+        let start_offset = relay.offset;
+        let mut hasher = Sha256::new();
+        while relay.offset < relay.size
+            && relay.offset - start_offset < budget
             && started.elapsed() < Duration::from_secs(MAX_SECONDS)
         {
-            let count =
-                (size - offset).min((budget - (offset - start_offset)).min(CHUNK as u64)) as usize;
-            let source_transfer = source_id.expect("set above");
-            let (chunk, payload) = if source_binary {
-                let (response, frame) = download_chunk_binary(
-                    state,
-                    &from,
-                    source_transfer,
-                    offset,
-                    Some(count),
-                    RPC_TIMEOUT_MS,
-                )
-                .await?;
-                (body_of(response)?, frame)
-            } else {
-                (
-                    step(
-                        state,
-                        &from,
-                        TransferAction::DownloadChunk {
-                            transfer_id: source_transfer,
-                            offset,
-                            length: Some(count),
-                        },
-                    )
-                    .await?,
-                    None,
-                )
-            };
-            if num_field(&chunk, "offset")? != offset {
-                return Err("download offset mismatch; refusing to write".into());
-            }
-            let next = num_field(&chunk, "next_offset")?;
-            if next <= offset || next > size || next - offset > count as u64 {
-                return Err("download chunk size/offset invalid".into());
-            }
-            // The binary path hands the bytes straight to the destination; the
-            // JSON path decodes the base64 the agent produced.
-            let bytes = match payload {
-                Some(frame) => {
-                    if frame.payload.len() as u64 != next - offset {
-                        return Err(
-                            "bulk chunk length does not match the reported offset range".into()
-                        );
-                    }
-                    frame.payload
-                }
-                None => {
-                    let encoded = text_field(&chunk, "data_base64")?.to_owned();
-                    if encoded.is_empty() {
-                        return Err("unexpected empty chunk before end of source".into());
-                    }
-                    STANDARD
-                        .decode(encoded)
-                        .map_err(|_| "download chunk is not valid base64".to_string())?
-                }
-            };
-            if bytes.is_empty() {
-                return Err("unexpected empty chunk before end of source".into());
-            }
-            let destination_transfer = destination_id.expect("set above");
-            let written = if destination_binary {
-                body_of(
-                    upload_chunk_binary(
-                        state,
-                        &to,
-                        destination_transfer,
-                        offset,
-                        &bytes,
-                        RPC_TIMEOUT_MS,
-                    )
-                    .await?,
-                )?
-            } else {
-                step(
-                    state,
-                    &to,
-                    TransferAction::UploadChunk {
-                        transfer_id: destination_transfer,
-                        offset,
-                        data_base64: STANDARD.encode(&bytes),
-                    },
-                )
-                .await?
-            };
-            if num_field(&written, "next_offset")? != next {
-                return Err(
-                    "destination upload offset mismatch; inspect status before continuing".into(),
-                );
-            }
-            offset = next;
+            let remaining = budget - (relay.offset - start_offset);
+            relay.offset =
+                relay_chunk(state, &relay, relay.offset, remaining as usize, &mut hasher).await?;
         }
-        if offset == size {
-            let commit = step(
-                state,
-                &to,
-                TransferAction::UploadCommit {
-                    transfer_id: destination_id.expect("set above"),
-                },
-            )
-            .await?;
-            if text_field(&commit, "sha256")? != hash {
-                return Err("destination checksum mismatch after commit".into());
-            }
+        if relay.offset == relay.size {
+            commit(state, &relay).await?;
         }
-        Ok(())
+        Ok::<(), RelayError>(())
     }
     .await;
 
-    // A failed destination initialization should not leave a source-only "ready"
-    // transfer permanently listed as active work. Preserve both IDs once an upload
-    // exists so retries can safely resume after uncertain chunk outcomes.
-    if operation.is_err()
-        && destination_id.is_none()
-        && let Some(id) = source_id
-    {
-        let _ = step(state, &from, TransferAction::Cancel { transfer_id: id }).await;
-    }
     let (status, error) = match operation {
-        Ok(()) if offset == size => ("completed", None),
+        Ok(()) if relay.offset == relay.size => ("completed", None),
         Ok(()) => ("in_progress", None),
-        Err(error) => ("failed", Some(error)),
+        Err(error) => ("failed", Some(error.message().to_owned())),
     };
     let mut value = progress(
         status,
         &from,
         &to,
         &input,
-        source_id,
-        destination_id,
-        offset,
-        size,
-        &hash,
+        relay.source_id,
+        relay.destination_id,
+        relay.offset,
+        relay.size,
+        &relay.sha256,
         error,
     );
     // Which wire path each side used, so a benchmark or an operator can tell a
     // binary relay from the base64 fallback without reading logs.
     value["transport"] = json!({
-        "source": if source_binary { "binary" } else { "json" },
-        "destination": if destination_binary { "binary" } else { "json" },
+        "source": if relay.source_binary { "binary" } else { "json" },
+        "destination": if relay.destination_binary { "binary" } else { "json" },
     });
     let _ = state
         .store
@@ -355,5 +535,50 @@ mod tests {
         assert!(text_field(&json!({}), "id").is_err());
         assert!(num_field(&json!({"size":"9"}), "size").is_err());
         assert!(transfer_id(&json!({"id":"not-uuid"})).is_err());
+    }
+
+    #[test]
+    fn dispatch_failures_are_classified_as_pause_or_failure() {
+        assert!(matches!(
+            classify_dispatch(DispatchError::Offline("laptop".into())),
+            RelayError::Offline(_)
+        ));
+        assert!(matches!(
+            classify_dispatch(DispatchError::ConnectionClosed),
+            RelayError::Offline(_)
+        ));
+        assert!(matches!(
+            classify_dispatch(DispatchError::QueueBusy),
+            RelayError::Offline(_)
+        ));
+        assert!(matches!(
+            classify_dispatch(DispatchError::NotFound("ghost".into())),
+            RelayError::Failed(_)
+        ));
+        assert!(matches!(
+            classify_dispatch(DispatchError::Protocol("bad frame".into())),
+            RelayError::Failed(_)
+        ));
+    }
+
+    #[test]
+    fn an_uncertain_chunk_is_not_a_failure() {
+        let uncertain = body_of(AgentResponse {
+            id: Uuid::new_v4(),
+            result: OperationResult::OutcomeUnknown {
+                error: "socket closed".into(),
+            },
+        })
+        .unwrap_err();
+        assert!(matches!(uncertain, RelayError::Uncertain(_)));
+        let failed = body_of(AgentResponse {
+            id: Uuid::new_v4(),
+            result: OperationResult::Failed {
+                error: "no such file".into(),
+            },
+        })
+        .unwrap_err();
+        assert!(matches!(failed, RelayError::Failed(_)));
+        assert_eq!(failed.message(), "no such file");
     }
 }

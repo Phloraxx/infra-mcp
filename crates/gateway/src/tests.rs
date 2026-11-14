@@ -1567,3 +1567,208 @@ async fn copy_relays_raw_chunks_on_the_binary_path_and_base64_on_the_json_path()
         server.abort();
     }
 }
+
+/// Enroll a device without connecting it, so a job can be queued against an
+/// endpoint that is known but offline.
+fn enroll_offline_device(state: &AppState, name: &str) {
+    let enrollment = state.store.create_enrollment(60_000).unwrap();
+    state
+        .store
+        .consume_enrollment(
+            &enrollment.code,
+            &format!("request-{name}"),
+            name,
+            &[11_u8; 32],
+            "linux",
+            "aarch64",
+            "test",
+        )
+        .unwrap();
+}
+
+/// W2: the queue drives a job to completion through the same relay the
+/// synchronous copy uses, and records the digest it verified.
+#[tokio::test]
+async fn a_copy_job_drives_to_completion_and_records_its_digest() {
+    let (_dir, state, addr, server) = spawn_test_gateway().await;
+    let source: Vec<u8> = (0..900_000).map(|index| (index % 251) as u8).collect();
+    let capabilities: &[&str] = &["exec", infra_protocol::TRANSFER_BINARY_CAPABILITY];
+    let (source_socket, _) =
+        connect_legacy_with_capabilities(addr, "source-device", capabilities).await;
+    let (destination_socket, _) =
+        connect_legacy_with_capabilities(addr, "destination-device", capabilities).await;
+    wait_registered(&state, "source-device").await;
+    wait_registered(&state, "destination-device").await;
+    let _source_agent = run_fake_transfer_agent(source_socket, source.clone(), true).await;
+    let destination = run_fake_transfer_agent(destination_socket, Vec::new(), true).await;
+
+    copy_queue::spawn(state.clone());
+    let started = copy_queue::start(
+        &state,
+        McpCopyStartInput {
+            source_device: "source-device".into(),
+            destination_device: "destination-device".into(),
+            source_path: "/source.bin".into(),
+            destination_path: "/destination.bin".into(),
+        },
+    )
+    .await
+    .expect("start");
+    assert_eq!(started["status"], "queued");
+    let job_id = started["job"]["job_id"]
+        .as_str()
+        .expect("job id")
+        .to_owned();
+
+    let mut job = started["job"].clone();
+    for _ in 0..400 {
+        job = copy_queue::status(
+            &state,
+            McpCopyStatusInput {
+                job_id: Some(job_id.clone()),
+                limit: None,
+            },
+        )
+        .expect("status")["job"]
+            .clone();
+        if matches!(job["state"].as_str(), Some("completed" | "failed")) {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    assert_eq!(job["state"], "completed", "job did not complete: {job}");
+    assert_eq!(job["bytes_done"].as_u64(), Some(source.len() as u64));
+    assert_eq!(job["total_bytes"].as_u64(), Some(source.len() as u64));
+    assert_eq!(job["sha256"], sha256_hex(&source));
+    // The job never resumed, so the gateway's own running digest must match the
+    // source: the relayed bytes are verified independently of the destination.
+    assert_eq!(job["sha256_progress"], sha256_hex(&source));
+    assert_eq!(job["sha256_progress_offset"].as_u64(), Some(0));
+    assert_eq!(job["last_error"], serde_json::Value::Null);
+    assert_eq!(
+        destination
+            .lock()
+            .expect("fake destination poisoned")
+            .as_slice(),
+        source.as_slice(),
+        "the queued copy must be byte-identical to the source"
+    );
+    // The terminal transition is auditable.
+    let rows = state.store.list_activity(10).unwrap();
+    assert!(
+        rows.iter()
+            .any(|row| row.action == "copy.job" && row.outcome == "completed"),
+        "a finished job must leave an audit row: {rows:?}"
+    );
+    server.abort();
+}
+
+/// W2: a job whose destination is not connected is paused, not failed, and the
+/// row keeps the reason so an operator can see why it is not moving.
+#[tokio::test]
+async fn a_copy_job_pauses_instead_of_failing_when_the_destination_is_offline() {
+    let (_dir, state, addr, server) = spawn_test_gateway().await;
+    let (source_socket, _) = connect_legacy(addr, "source-device").await;
+    wait_registered(&state, "source-device").await;
+    let _source_agent = run_fake_transfer_agent(source_socket, vec![7_u8; 1024], false).await;
+    // Enrolled but never connected: the job must pause, not fail.
+    enroll_offline_device(&state, "destination-device");
+
+    copy_queue::spawn(state.clone());
+    let started = copy_queue::start(
+        &state,
+        McpCopyStartInput {
+            source_device: "source-device".into(),
+            destination_device: "destination-device".into(),
+            source_path: "/source.bin".into(),
+            destination_path: "/destination.bin".into(),
+        },
+    )
+    .await
+    .expect("start");
+    let job_id = started["job"]["job_id"]
+        .as_str()
+        .expect("job id")
+        .to_owned();
+    let mut job = started["job"].clone();
+    for _ in 0..200 {
+        job = copy_queue::status(
+            &state,
+            McpCopyStatusInput {
+                job_id: Some(job_id.clone()),
+                limit: None,
+            },
+        )
+        .expect("status")["job"]
+            .clone();
+        if job["state"] == "paused" {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    assert_eq!(job["state"], "paused", "job did not pause: {job}");
+    let reason = job["last_error"].as_str().expect("pause reason");
+    assert!(reason.contains("offline"), "{reason}");
+    assert_eq!(job["bytes_done"].as_u64(), Some(0));
+    server.abort();
+}
+
+/// W2: cancel is terminal. A canceled job is never claimed again and its row
+/// keeps the reason.
+#[tokio::test]
+async fn a_canceled_copy_job_is_never_driven_again() {
+    let (_dir, state, addr, server) = spawn_test_gateway().await;
+    let (source_socket, _) = connect_legacy(addr, "source-device").await;
+    wait_registered(&state, "source-device").await;
+    let _source_agent = run_fake_transfer_agent(source_socket, vec![3_u8; 1024], false).await;
+    enroll_offline_device(&state, "destination-device");
+    let started = copy_queue::start(
+        &state,
+        McpCopyStartInput {
+            source_device: "source-device".into(),
+            destination_device: "destination-device".into(),
+            source_path: "/source.bin".into(),
+            destination_path: "/destination.bin".into(),
+        },
+    )
+    .await
+    .expect("start");
+    let job_id = started["job"]["job_id"]
+        .as_str()
+        .expect("job id")
+        .to_owned();
+    let canceled = copy_queue::cancel(
+        &state,
+        McpCopyCancelInput {
+            job_id: job_id.clone(),
+        },
+    )
+    .expect("cancel");
+    assert_eq!(canceled["job"]["state"], "canceled");
+    assert_eq!(canceled["cancel_signaled"], false, "no driver was running");
+    // A second cancel is idempotent and keeps the original reason.
+    let again = copy_queue::cancel(
+        &state,
+        McpCopyCancelInput {
+            job_id: job_id.clone(),
+        },
+    )
+    .expect("cancel again");
+    assert_eq!(again["job"]["state"], "canceled");
+    assert_eq!(
+        again["job"]["last_error"], "canceled by the owner",
+        "a second cancel must not overwrite the reason"
+    );
+    assert!(state.store.list_resumable_copy_jobs().unwrap().is_empty());
+    assert!(
+        copy_queue::status(
+            &state,
+            McpCopyStatusInput {
+                job_id: Some("missing".into()),
+                limit: None,
+            }
+        )
+        .is_err()
+    );
+    server.abort();
+}

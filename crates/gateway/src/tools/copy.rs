@@ -26,3 +26,31 @@ pub(crate) struct McpCopyInput {
     #[serde(default)]
     pub(crate) max_bytes: Option<u64>,
 }
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub(crate) struct McpCopyStartInput {
+    /// Source device ID or unique name from devices; transfer capability is required.
+    pub(crate) source_device: String,
+    /// Destination device ID or unique name; transfer capability is required.
+    pub(crate) destination_device: String,
+    /// Source file path on source_device.
+    pub(crate) source_path: String,
+    /// Destination file path on destination_device.
+    pub(crate) destination_path: String,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub(crate) struct McpCopyStatusInput {
+    #[serde(default)]
+    /// Job ID returned by copy.start; omit to list the most recent jobs.
+    pub(crate) job_id: Option<String>,
+    #[serde(default)]
+    /// How many recent jobs to list when job_id is omitted (default 20, max 100).
+    pub(crate) limit: Option<usize>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub(crate) struct McpCopyCancelInput {
+    /// Job ID returned by copy.start.
+    pub(crate) job_id: String,
+}
