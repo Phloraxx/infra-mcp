@@ -62,6 +62,8 @@ Tests: protocol roundtrip unit tests (header encode/decode, offsets); gateway te
 
 ### W2 — Durable cross-device copy queue
 
+**Status 2026-11-15: implemented.** `copy_jobs` is migration 6; `copy.start`/`copy.status`/`copy.cancel` drive it; the W3 harness covers a gateway restart mid-stream, an offline endpoint pause/resume and cancel. The 1 GiB acceptance run is the same harness scenario at the plan's size and is `#[ignore]`d because a debug-build relay moves roughly 5 MiB/s. See docs/IMPLEMENTATION_STATUS.md.
+
 Problem: MCP copy is a synchronous choreography capped at 16 MiB per call (64 MiB max, 100 s), so a 1 GiB file means dozens of manual calls (docs P1-D). Design: a SQLite-backed queue inside the gateway, reusing the existing two-transfer-id resume already implemented in copy.rs.
 
 - New table `copy_jobs` (next `PRAGMA user_version` migration; current version is 4, verify in store.rs before writing): id, created_at_ms, source_device, dest_device, source_path, dest_path, state (queued/running/paused/failed/completed/canceled), bytes_done, total_bytes, chunk_offset, sha256 progress fields, source_transfer_id, dest_transfer_id, last_error.

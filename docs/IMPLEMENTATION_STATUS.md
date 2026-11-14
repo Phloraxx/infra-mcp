@@ -418,3 +418,41 @@ publisher key.
   [RELEASE_PUBLISHER_KEY.md](RELEASE_PUBLISHER_KEY.md). That device step was not
   performed here: no production key was generated or handled, and nothing was
   deployed.
+
+## 2026-11-15 — W2 durable cross-device copy queue
+
+The synchronous `copy` tool relays at most 64 MiB per MCP call, so a 1 GiB file
+meant dozens of manual calls. The gateway now owns a durable queue for that work.
+
+- `copy_jobs` is migration 6 (`PRAGMA user_version` was 5). Columns: id,
+  created_at_ms, updated_at_ms, source_device, dest_device, source_path,
+  dest_path, state, bytes_done, total_bytes, chunk_offset, sha256,
+  sha256_progress, sha256_progress_offset, source_transfer_id,
+  dest_transfer_id, last_error. No foreign key to `devices`: a job outlives a
+  revoked or re-enrolled device.
+- One gateway task per running job drives the same relay the synchronous copy
+  uses, so both share the two-transfer-ID resume. The supervisor rebuilds its
+  task list from the table on every wake and every 3 s tick, which is how a
+  gateway restart resumes whatever was running.
+- Crash safety: the row is written before the action it describes, and the
+  destination's own `bytes_transferred` is the resume offset. A row that claims
+  more than the destination has fails the job instead of rewriting the file.
+  Every driver write is guarded on the row not being terminal, so a cancel that
+  races a chunk wins.
+- Either endpoint offline pauses the job with the reason recorded; both online
+  resumes it. An uncertain chunk pauses rather than replays, and the next attempt
+  re-reads the destination's confirmed offset.
+- MCP surface: `copy.start` (returns a job id), `copy.status` (one job or the
+  recent list) and `copy.cancel`. The single-call `copy` keeps its bounded fast
+  path and unchanged semantics. A queued job creates missing parents and replaces
+  an existing destination; callers that need `overwrite=false` use `copy`.
+- Retention: completed rows are deleted after 7 days and failed/canceled after
+  30 by the existing sweep, measured from the terminal transition. The audit
+  window and its `INFRA_AUDIT_RETENTION_DAYS` behaviour are unchanged.
+- Tests: state-machine and retention unit tests, an in-process driver test
+  against fake agents, and three W3 harness scenarios — gateway restart
+  mid-stream, destination offline pause/resume, and cancel. The 1 GiB acceptance
+  run is the same scenario at the plan's size and is `#[ignore]`d because a
+  debug-build relay moves roughly 5 MiB/s.
+- Nothing was deployed: no live gateway, agent or burn-in directory was touched,
+  and no service was restarted.

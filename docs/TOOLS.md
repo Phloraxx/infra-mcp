@@ -13,7 +13,7 @@ native-agent rollout require separate acceptance.
 The MCP-contract branch adds typed action enums and argument descriptions to the
 existing tool families. Conditional required fields are still checked by the
 gateway rather than a deeply nested schema. Unknown actions are rejected during
-deserialization. The raw gateway exposes 17 tools including cross-device `copy` and optional `hermes`/`hermes_memory`;
+deserialization. The raw gateway exposes 20 tools including cross-device `copy`, the durable `copy.start`/`copy.status`/`copy.cancel` queue and optional `hermes`/`hermes_memory`;
 a host/connector may need its catalog refreshed before showing new tools. The Hermes bridge defaults to disabled; see docs/HERMES_BRIDGE.md.
 
 Tool failures now use `isError: true` and structured `error_code`, `retryable`, and
@@ -322,6 +322,8 @@ Available through the Rust MCP gateway now: `devices`, `exec`, `files`, `search`
 - `jobs`: start/list/read/cancel with worker process and byte-offset spool.
 - `terminal`: open/list/read/write/resize/close using persistent PTY/ConPTY workers.
 - `transfer`: persistent upload/download begin/chunk/commit/status/list/cancel, explicit byte offsets, idempotent upload retries, 256 KiB chunks, staging files and SHA-256 verification. The MCP surface stays base64 JSON; on the agent link a device that advertises `transfer.binary_v1` carries the same chunks in raw bulk frames, and the cross-device `copy` relay moves them from source frame to destination frame without re-encoding. `copy` reports which path each side used in `transport`.
+- `copy`: the bounded fast path for small files. One call relays at most 16 MiB by default (64 MiB cap, 100 s), returns both transfer IDs on partial progress, and never replays an uncertain chunk.
+- `copy.start` / `copy.status` / `copy.cancel`: the durable queue for large files. `copy.start` returns a job id and one gateway task relays the file; the job survives a gateway restart, pauses while either endpoint is offline and resumes when both are back. `copy.status` reports state, bytes_done, total_bytes, percent, sha256 and last_error for one job or the recent list; `copy.cancel` stops a running job before its next chunk and cancels both transfers. A queued job creates missing parent directories and replaces an existing destination; use `copy` when `overwrite=false` semantics matter. Completed jobs are retained 7 days, failed/canceled 30.
 
 - `system`: summary, disks/filesystems and network-interface counters/addresses.
 - `network`: listener discovery, DNS resolution and TCP reachability. Listener PID/process metadata is returned when the platform utility exposes it.
