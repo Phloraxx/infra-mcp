@@ -310,6 +310,8 @@ The browser gate additionally covers the attention chip jumping into the drawer,
 | Infra Studio | fd91f06, then combined with installer fixes (ce6e3c3) | e59c759dce4a34608007aa3e78f5c1962bdc03ee4bad707319d4634e73303e8a | staging-infra-studio-20261024/ |
 | Infra Quiet | 808666f | aa1773b0681791911e8ef9340f8c136022468a672ac20fe4fa25c1bc66f53f01 | staging-20261024-quiet/ |
 | Icon system | 0756ddc | d171c4aad196c1c0dc8ff09a498751352be0f5c6870a5b6cd905359102eee6e5 | staging-20261024-icons/ |
+| v3 design language | bc6ad9e | 87269c160f126e4d011bf14898adefe800f05059a2ea112aa4191ba080045624 | bin/infra-gateway-3f079f0 |
+| Console edition and friendlier sign-in | 9664a40 | b9ea83d05b753de300e7155682ae71a4c3851e460fa4bc08e4a8b808b8edf814 | bin/infra-gateway-bc6ad9e |
 
 All snapshots are preserved under ~/.local/share/infra-v1-remote-burnin/gateway/. Every guarded rollout saved the previous binary and a consistent SQLite backup, verified public HTTPS assets, browser authentication, OAuth metadata, SQLite integrity (schema v5, three enrolled devices) and signed-device reconnection. The Fieldwork rollout preserved the then-uncommitted OAuth loopback callback patch without modifying the original worktree, and proved the old binary compatible with schema v5 before cutover. Native device binaries and enrolled identities were never changed by a dashboard rollout.
 
