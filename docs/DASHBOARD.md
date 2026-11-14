@@ -339,6 +339,7 @@ Feedback pass over the console layout, still in the v3 design language:
 | Console polish: stat cards, floating drawer, session pop-up | fff32be | a53f588d3660f50d1dbf0981dba1f874c36379ebe3cac3a58b9aac282bbb4da9 | bin/infra-gateway-9664a40 |
 | Console v4.2: fleet strip, drop context, arrow keys; tolerant 90s heartbeat deadline | 3318a69 | 5c1f168b6f83afb9fa6254c0795a4fe2961228aa470e62a421838e04cc704963 | bin/infra-gateway-fff32be |
 | Hotfix: placeholder leak in the drop-note template; QA fixture now covers the drop-context path | 60bf1d9 | 7c693470923e053fc38b984d947ee865702a12bc5adff4fe4654e6978c742a59 | bin/infra-gateway-3318a69 |
+| Improvement-plan rollout W0-W7 (gateway): disk-served assets (INFRA_DASHBOARD_DIR), W3 fault-injection harness (CI-wired), reconcile hash-gating, audit retention sweep, binary bulk frames (~2.8x copy throughput), signed-release verification + release-index anti-rollback, durable copy queue (schema v6), device.recovered telemetry; agent-side changes pending signed rollout | 9d1f0ab | e0e742bb7f150db0b924976eb94ae229be6dad1d24928ca820b3f43416bb6698 | bin/infra-gateway-60bf1d9 |
 
 All snapshots are preserved under ~/.local/share/infra-v1-remote-burnin/gateway/. Every guarded rollout saved the previous binary and a consistent SQLite backup, verified public HTTPS assets, browser authentication, OAuth metadata, SQLite integrity (schema v5, three enrolled devices) and signed-device reconnection. The Fieldwork rollout preserved the then-uncommitted OAuth loopback callback patch without modifying the original worktree, and proved the old binary compatible with schema v5 before cutover. Native device binaries and enrolled identities were never changed by a dashboard rollout.
 
@@ -346,7 +347,7 @@ All snapshots are preserved under ~/.local/share/infra-v1-remote-burnin/gateway/
 
 Still outstanding, independent of the dashboard rollouts above:
 
-- Publisher-authenticated first-install bootstrap trust.
+- Production publisher key provisioning: the W4 signed-bootstrap machinery (manifest verification before exec, release-index anti-rollback) is implemented and CI-proven; generating the real Ed25519 key and recording it in GitHub is the remaining owner step.
 - Physical Windows first-install/reboot/rollback validation.
 - Long-term soak of the live gateway.
 - Confirming the Mac's offline pending download once the Mac reconnects.
