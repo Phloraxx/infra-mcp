@@ -3,7 +3,21 @@ use tracing::{info, warn};
 
 pub(crate) const AGENT_HEARTBEAT_INTERVAL: Duration = Duration::from_secs(10);
 
-pub(crate) const AGENT_HEARTBEAT_TIMEOUT: Duration = Duration::from_secs(30);
+// Missed-pong deadline. Agents occasionally stall for tens of seconds (laptop
+// sleep transitions, timer coalescing, Wi-Fi/Tailscale path hiccups) and then
+// resume on their own; a tight deadline retires connections that would have
+// recovered, which surfaces as flapping offline devices. Default is
+// deliberately generous; override with INFRA_HEARTBEAT_TIMEOUT_SECS.
+pub(crate) fn agent_heartbeat_timeout() -> Duration {
+    static TIMEOUT: std::sync::OnceLock<Duration> = std::sync::OnceLock::new();
+    *TIMEOUT.get_or_init(|| {
+        std::env::var("INFRA_HEARTBEAT_TIMEOUT_SECS")
+            .ok()
+            .and_then(|raw| raw.trim().parse::<u64>().ok())
+            .filter(|secs| *secs >= 30)
+            .map_or_else(|| Duration::from_secs(90), Duration::from_secs)
+    })
+}
 
 #[derive(Clone)]
 pub(crate) struct DeviceConnection {
@@ -90,7 +104,7 @@ pub(crate) async fn handle_agent(mut socket: WebSocket, state: AppState) {
     loop {
         tokio::select! {
             _ = heartbeat.tick() => {
-                if last_inbound.elapsed() >= AGENT_HEARTBEAT_TIMEOUT {
+                if last_inbound.elapsed() >= agent_heartbeat_timeout() {
                     warn!(device_id=%hello.device_id,generation,"agent heartbeat timed out; retiring stale connection");
                     disconnect_reason = "heartbeat_timeout";
                     break;

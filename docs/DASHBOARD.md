@@ -153,6 +153,8 @@ Use progressive disclosure: advanced networking/protocol details belong in diagn
 
 The dashboard should update device state, enrollment progress, active sessions, and repair/update progress without manual refresh, using a server-sent or WebSocket event channel.
 
+The gateway no longer retires an agent at the first missed pong window: the heartbeat deadline now tolerates stalls up to 90 seconds (override with INFRA_HEARTBEAT_TIMEOUT_SECS, floor 30s), so laptop sleep transitions and brief Wi-Fi/Tailscale hiccups no longer flap a device offline that would have recovered on its own.
+
 ## Mobile behavior
 
 Mobile dashboard should support monitoring, approving enrollment, reconnect/repair/update actions, session inspection, and basic terminal attachment. File management and advanced diagnostics can remain desktop-optimized.
@@ -313,6 +315,10 @@ Feedback pass over the console layout, still in the v3 design language:
 - Activity entries carry a right-aligned relative time and clamp long identifiers, so nothing leaves its zone.
 - The settings control is an unmistakable cog that turns on hover; its popover springs from the gear.
 - Zones rise in sequence on load; motion respects prefers-reduced-motion.
+- A fleet strip under the Connected card mirrors per-device presence at a glance: one segment per machine, green while connected, amber while reconnecting.
+- The Activity zone header carries a breathing live dot and a recent-event count.
+- Arrow keys walk device and session rows; Enter opens the focused row.
+- Device rows surface recent drop context, e.g. "dropped 12m ago · heartbeat", when a machine came back within the last day.
 
 ## Deployment audit trail — infra.drbijoy.in
 

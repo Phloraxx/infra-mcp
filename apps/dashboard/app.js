@@ -143,10 +143,16 @@ function reconnectExplanation(d){
   const action=d.platform==='android'?'Open Infra Phone and check its background-service and battery settings.':'If this persists, run infra doctor --json on the device.';
   return reason+' '+action;
 }
+function shortReason(r){const map={heartbeat_timeout:'heartbeat',socket_error:'link',socket_closed:'link',send_timeout:'send',send_error:'send',heartbeat_queue_full:'queue',control_path_timeout:'path'};return map[String(r)]||String(r);}
+function dropNote(d){
+  if(!d.last_disconnect_reason||!d.last_disconnect_at_unix_ms)return '';
+  if(Date.now()-d.last_disconnect_at_unix_ms>86400000)return '';
+  return `${DOT}<span class="drop-note" title="last disconnect: ${esc(d.last_disconnect_reason)}">dropped ${relative(d.last_disconnect_at_unix_ms)}${DOT}${esc(shortReason(d.last_disconnect_reason))}</span>`;
+}
 function deviceRow(d){
   const status=deviceState(d),work=(d.active_jobs||0)+(d.active_terminals||0)+(d.active_transfers||0),caps=d.capabilities||[];
   const shown=caps.slice(0,3).map(c=>`<span class="pill">${esc(capabilityLabel(c))}</span>`).join(''),more=caps.length>3?`<span class="pill more">+${caps.length-3}</span>`:'';
-  return `<div class="device-row" data-device="${esc(d.device_id)}" role="button" tabindex="0"><div class="device-primary"><div class="device-avatar ${d.online&&!d.revoked?'online':''}">${platformIcon(d.platform)}</div><div class="device-primary-text"><span class="device-link">${esc(d.device_name)}</span><div class="device-meta">${esc(d.platform)} · ${esc(d.arch)} · ${d.online?'connected now':`seen ${relative(d.last_seen_unix_ms)}`}</div></div></div><div class="caps">${shown}${more}</div><div class="work-count">${work?`${work} active`:'—'}</div><div class="status ${status}">${status[0].toUpperCase()+status.slice(1)}</div></div>`;
+  return `<div class="device-row" data-device="${esc(d.device_id)}" role="button" tabindex="0"><div class="device-primary"><div class="device-avatar ${d.online&&!d.revoked?'online':''}">${platformIcon(d.platform)}</div><div class="device-primary-text"><span class="device-link">${esc(d.device_name)}</span><div class="device-meta">${esc(d.platform)} · ${esc(d.arch)} · ${d.online?'connected now':`seen ${relative(d.last_seen_unix_ms)}`}${dropNote(d)}</div></div></div><div class="caps">${shown}${more}</div><div class="work-count">${work?`${work} active`:'—'}</div><div class="status ${status}">${status[0].toUpperCase()+status.slice(1)}</div></div>`;
 }
 function sessionRow(s){
   const kind=String(s.kind||'session'),status=String(s.status||'unknown');
@@ -161,7 +167,8 @@ function render(){
   const online=state.devices.filter(d=>d.online&&!d.revoked).length,offline=state.devices.filter(d=>!d.online&&!d.revoked).length,revoked=state.devices.filter(d=>d.revoked).length,active=state.sessions.filter(activeSession).length;
   const metrics=[['Connected',online,'online','check',(state.devices.length-revoked)+' enrolled'],['Offline',offline,'offline','offline',offline?offline+' to check':'all healthy'],['Active sessions',active,'work','terminal','running now'],['Total devices',state.devices.length-revoked,'enrolled','devices',revoked?revoked+' revoked':'whole fleet']];
   const offlineDevices=state.devices.filter(d=>!d.revoked&&!d.online);
-  $('#summary').innerHTML=metrics.map(([k,v,c,i,s])=>`<div class="summary-card ${c}"><div class="metric-top"><span>${k}</span><span class="metric-icon">${icon(i)}</span></div><strong>${v}</strong><em class="metric-sub">${esc(s)}</em></div>`).join('')+(offlineDevices.length?`<button type="button" class="attention-chip" data-device="${esc(offlineDevices[0].device_id)}"><i></i>needs attention &rarr;</button>`:'');
+  const fleet=state.devices.filter(d=>!d.revoked).map(d=>{const st=deviceState(d);return `<i class="${st==='online'?'on':st==='reconnecting'?'warn':'off'}" title="${esc(d.device_name)}"></i>`}).join('');
+  $('#summary').innerHTML=metrics.map(([k,v,c,i,s],idx)=>`<div class="summary-card ${c}"><div class="metric-top"><span>${k}</span><span class="metric-icon">${icon(i)}</span></div><strong>${v}</strong><em class="metric-sub">${esc(s)}</em>${idx===0?`<span class="fleet-strip">${fleet}</span>`:''}</div>`).join('')+(offlineDevices.length?`<button type="button" class="attention-chip" data-device="${esc(offlineDevices[0].device_id)}"><i></i>needs attention &rarr;</button>`:'');
   const devices=state.devices.length?state.devices.map(deviceRow).join(''):emptyState('No devices enrolled yet.','devices');
   $('#all-devices').innerHTML=devices;applyDeviceSearch();
   $('#overview-devices').innerHTML=state.devices.length?state.devices.map(deviceRow).join(''):'<div class="first-device">'+icon('devices')+'<h3>Add your first computer</h3><p>Install Infra, compare the pairing codes, and approve it here.</p><button class="primary" data-add-device>Add a device</button></div>';
@@ -171,6 +178,7 @@ function render(){
   $('#activity-list').innerHTML=state.activity.length?state.activity.map(activityRow).join(''):emptyState('No operational activity recorded yet.','activity');
   $('#devices-count').textContent=online+' of '+(state.devices.length-revoked)+' online';
   $('#work-count').textContent=active+' running';
+  $('#activity-count').textContent=state.activity.length?state.activity.length+' recent · live':'live';
   renderDevice();applyZoneSearch();
 }
 // Merge bursts of SSE notifications and periodic fallbacks into a single in-flight
@@ -532,6 +540,16 @@ document.addEventListener('keydown',event=>{
   event.preventDefault();
   const row=event.target;
   if(row.dataset.session)navigateSession(row.dataset.device,row.dataset.kind,row.dataset.session);else navigateDevice(row.dataset.device);
+});
+document.addEventListener('keydown',event=>{
+  if((event.key!=='ArrowDown'&&event.key!=='ArrowUp')||event.metaKey||event.ctrlKey||event.altKey||event.isComposing)return;
+  if(!(event.target instanceof Element))return;
+  const row=event.target.closest('.device-row[data-device],.session-row[data-session]');
+  if(!row)return;
+  event.preventDefault();
+  const rows=[...row.parentElement.querySelectorAll('.device-row[data-device],.session-row[data-session]')].filter(el=>!el.classList.contains('hidden'));
+  const at=rows.indexOf(row),next=rows[at+(event.key==='ArrowDown'?1:-1)];
+  if(next)next.focus();
 });
 document.addEventListener('keydown',event=>{
   if(event.key!=='Escape')return;

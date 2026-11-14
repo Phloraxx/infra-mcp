@@ -1221,3 +1221,13 @@ main{max-width:1280px}
   #session-detail .session-workspace{max-height:calc(100dvh - 20px);border-radius:14px}
   .activity-when{display:none}
 }
+
+/* v4.2 layer — fleet pulse, drop context, live activity dot */
+.fleet-strip{display:flex;gap:4px;margin-top:10px}
+.fleet-strip i{width:14px;height:4px;border-radius:2px;background:var(--ink-4);opacity:.55}
+.fleet-strip i.on{background:var(--green);opacity:1}
+.fleet-strip i.warn{background:var(--amber);opacity:1}
+.fleet-strip i.off{background:var(--ink-4);opacity:.8}
+.fleet-strip:empty{display:none}
+.drop-note{color:rgba(217,181,117,.85)}
+#activity-count::before{content:'';display:inline-block;width:6px;height:6px;border-radius:50%;background:var(--green);margin-right:7px;vertical-align:1px;animation:attention-breathe 2.4s ease-in-out infinite}

@@ -174,6 +174,13 @@ const server=http.createServer(async(req,res)=>{
     await page.waitForFunction(()=>document.querySelector('#session-detail').classList.contains('active'));
     await page.locator('#session-close').click();
     await page.waitForFunction(()=>document.querySelector('#overview').classList.contains('active'));
+    // v4.2: fleet strip mirrors per-device presence; arrow keys walk the rows.
+    assert.equal(await page.locator('#summary .fleet-strip i').count(),2);
+    await page.locator('#overview-devices .device-row').first().focus();
+    await page.keyboard.press('ArrowDown');
+    assert.equal(await page.evaluate(()=>document.activeElement?.dataset.device),'offline');
+    await page.keyboard.press('ArrowUp');
+    assert.equal(await page.evaluate(()=>document.activeElement?.dataset.device),'online');
     if(process.env.INFRA_QA_OVERVIEW_SCREENSHOT||process.env.INFRA_QA_MOBILE_OVERVIEW_SCREENSHOT){
       // Public design previews use readable sample labels; the functional
       // tests below still exercise the original hostile-name/XSS fixture.
