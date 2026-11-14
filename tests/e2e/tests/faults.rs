@@ -403,6 +403,22 @@ async fn terminal_output_survives_a_cut_without_lost_or_duplicated_bytes() {
             .any(|entry| entry["id"].as_str() == Some(session.as_str())),
         "the PTY must survive the reconnect: {list}"
     );
+
+    // Durable PTY workers outlive the controller, so the scenario closes its own
+    // session instead of leaving an orphan process behind.
+    let closed = fixture
+        .mcp
+        .call(
+            "terminal",
+            json!({
+                "device": fixture.device_id,
+                "action": "close",
+                "session_id": session,
+            }),
+        )
+        .await
+        .expect("terminal close");
+    assert_eq!(closed["status"], "ok", "terminal close failed: {closed}");
 }
 
 /// Scenario 6: a second connection supersedes the first, and the old socket
