@@ -62,6 +62,16 @@ pub(crate) async fn handle_agent(mut socket: WebSocket, state: AppState) {
         .capabilities
         .iter()
         .any(|cap| cap == infra_protocol::RECONCILE_HASH_CAPABILITY);
+    // Bulk frames are only used with an agent that advertised them; an old agent
+    // keeps the base64/JSON path and never sees a binary frame.
+    let supports_transfer_binary = hello
+        .capabilities
+        .iter()
+        .any(|cap| cap == infra_protocol::TRANSFER_BINARY_CAPABILITY);
+    let supports_terminal_binary = hello
+        .capabilities
+        .iter()
+        .any(|cap| cap == infra_protocol::TERMINAL_BINARY_CAPABILITY);
     let generation = state.next_generation.fetch_add(1, Ordering::Relaxed);
     let (out_tx, mut out_rx) = mpsc::channel::<GatewayToAgent>(64);
     let (retire_tx, mut retire_rx) = mpsc::channel::<()>(1);
@@ -72,6 +82,7 @@ pub(crate) async fn handle_agent(mut socket: WebSocket, state: AppState) {
         control_frame_limit: DEFAULT_CONTROL_FRAME_LIMIT,
         reconcile_requested: true,
         reconcile_hash: supports_reconcile_hash,
+        binary_frames: supports_transfer_binary || supports_terminal_binary,
     });
     if send_json(&mut socket, &ack).await.is_err() {
         return;

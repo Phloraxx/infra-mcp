@@ -1,5 +1,13 @@
 //! Versioned wire types shared by the Infra gateway and device agent.
 
+mod bulk;
+
+pub use bulk::{
+    BULK_FRAME_HEADER_LEN, BULK_FRAME_MAGIC, BULK_FRAME_VERSION, BulkFrame, BulkFrameError,
+    BulkKind, MAX_BULK_PAYLOAD, OwnedBulkFrame, TERMINAL_BINARY_CAPABILITY,
+    TRANSFER_BINARY_CAPABILITY,
+};
+
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
@@ -85,6 +93,12 @@ pub struct HelloAck {
     /// to them instead of a frame they would reject.
     #[serde(default)]
     pub reconcile_hash: bool,
+    /// True when the gateway will carry payload-bearing operations on this
+    /// connection in [`BulkFrame`]s. The agent only accepts binary frames after
+    /// this acknowledgement; an old gateway omits the field and the agent keeps
+    /// the JSON path, which is also what an old agent gets from a new gateway.
+    #[serde(default)]
+    pub binary_frames: bool,
 }
 
 /// Bytes signed by a device after receiving a fresh gateway challenge.
@@ -492,6 +506,14 @@ pub enum TransferAction {
         offset: u64,
         data_base64: String,
     },
+    /// Announcement for a chunk whose bytes follow in a
+    /// [`BulkKind::UploadChunk`] frame on the same socket. Only sent to an agent
+    /// that advertised [`TRANSFER_BINARY_CAPABILITY`].
+    UploadChunkBinary {
+        transfer_id: Uuid,
+        offset: u64,
+        length: usize,
+    },
     UploadCommit {
         transfer_id: Uuid,
     },
@@ -541,6 +563,13 @@ pub enum TerminalAction {
     Write {
         session_id: Uuid,
         data: String,
+    },
+    /// Announcement for terminal input whose bytes follow in a
+    /// [`BulkKind::TerminalData`] frame on the same socket. Only sent to an agent
+    /// that advertised [`TERMINAL_BINARY_CAPABILITY`].
+    WriteBinary {
+        session_id: Uuid,
+        length: usize,
     },
     Resize {
         session_id: Uuid,
@@ -1053,6 +1082,7 @@ mod tests {
             control_frame_limit: DEFAULT_CONTROL_FRAME_LIMIT,
             reconcile_requested: false,
             reconcile_hash: true,
+            binary_frames: true,
         });
         for message in [challenge.clone(), ack.clone()] {
             let value = serde_json::to_value(&message).unwrap();
@@ -1181,6 +1211,10 @@ mod tests {
             !ack.reconcile_hash,
             "an old gateway must not be assumed to understand the compact frame"
         );
+        assert!(
+            !ack.binary_frames,
+            "an old gateway must not be assumed to understand bulk frames"
+        );
         let current = serde_json::to_value(HelloAck {
             protocol: PROTOCOL_VERSION,
             connection_generation: 3,
@@ -1188,9 +1222,57 @@ mod tests {
             control_frame_limit: DEFAULT_CONTROL_FRAME_LIMIT,
             reconcile_requested: true,
             reconcile_hash: true,
+            binary_frames: true,
         })
         .unwrap();
         assert_eq!(current["reconcile_hash"], true);
+        assert_eq!(current["binary_frames"], true);
+    }
+
+    #[test]
+    fn binary_actions_roundtrip_without_touching_the_json_path() {
+        let transfer_id = Uuid::from_u128(7);
+        let upload = TransferAction::UploadChunkBinary {
+            transfer_id,
+            offset: 262_144,
+            length: 262_144,
+        };
+        let wire = serde_json::to_value(&upload).unwrap();
+        assert_eq!(wire["action"], "upload_chunk_binary");
+        assert_eq!(wire["offset"], 262_144);
+        assert_eq!(wire["length"], 262_144);
+        assert_eq!(
+            serde_json::from_value::<TransferAction>(wire).unwrap(),
+            upload
+        );
+
+        let legacy = serde_json::json!({
+            "action": "upload_chunk",
+            "transfer_id": transfer_id.to_string(),
+            "offset": 0,
+            "data_base64": "AAEC"
+        });
+        assert_eq!(
+            serde_json::from_value::<TransferAction>(legacy).unwrap(),
+            TransferAction::UploadChunk {
+                transfer_id,
+                offset: 0,
+                data_base64: "AAEC".into()
+            },
+            "the base64 action keeps its exact wire shape"
+        );
+
+        let write = TerminalAction::WriteBinary {
+            session_id: transfer_id,
+            length: 12,
+        };
+        let wire = serde_json::to_value(&write).unwrap();
+        assert_eq!(wire["action"], "write_binary");
+        assert_eq!(wire["length"], 12);
+        assert_eq!(
+            serde_json::from_value::<TerminalAction>(wire).unwrap(),
+            write
+        );
     }
 
     #[test]
@@ -1217,6 +1299,12 @@ mod tests {
         assert_eq!(FILE_LIST_PAGINATION_CAPABILITY, "files.list_page");
         assert_eq!(CONNECTION_READINESS_CAPABILITY, "connection.readiness_v1");
         assert_eq!(RECONCILE_HASH_CAPABILITY, "reconcile.hash_v1");
+        assert_eq!(TRANSFER_BINARY_CAPABILITY, "transfer.binary_v1");
+        assert_eq!(TERMINAL_BINARY_CAPABILITY, "terminal.binary_v1");
+        assert_eq!(BULK_FRAME_MAGIC, b'I');
+        assert_eq!(BULK_FRAME_VERSION, 1);
+        assert_eq!(BULK_FRAME_HEADER_LEN, 32);
+        assert_eq!(MAX_BULK_PAYLOAD, 256 * 1024);
         assert_eq!(MAX_DIRECTORY_PAGE_SIZE, 1000);
         assert_eq!(MAX_DIRECTORY_ENTRIES, 100_000);
         assert_eq!(MAX_DIRECTORY_PAGE_BYTES, 512 * 1024);
