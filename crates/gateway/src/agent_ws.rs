@@ -70,22 +70,37 @@ pub(crate) async fn handle_agent(mut socket: WebSocket, state: AppState) {
     {
         warn!(device_id=%hello.device_id,error=%e,"failed to persist device connect");
     }
-    {
+    let was_online = {
         let mut devices = state.devices.write().await;
-        devices.insert(
-            hello.device_id.clone(),
-            DeviceConnection {
-                hello: hello.clone(),
-                generation,
-                tx: out_tx.clone(),
-                retire: retire_tx,
-                reconcile: ReconcileSnapshot::default(),
-            },
-        );
-    }
+        devices
+            .insert(
+                hello.device_id.clone(),
+                DeviceConnection {
+                    hello: hello.clone(),
+                    generation,
+                    tx: out_tx.clone(),
+                    retire: retire_tx,
+                    reconcile: ReconcileSnapshot::default(),
+                },
+            )
+            .is_some()
+    };
     let _ = state
         .store
         .record_activity(Some(&hello.device_id), "device.connect", "ok", None);
+    // A supersession is not a recovery: only a device that was absent from the
+    // live map has come back from a recorded disconnect.
+    if !was_online {
+        match state.store.record_recovery(&hello.device_id) {
+            Ok(Some(seconds)) => {
+                info!(device_id=%hello.device_id,elapsed_secs=seconds,"agent recovered after a recorded disconnect");
+            }
+            Ok(None) => {}
+            Err(e) => {
+                warn!(device_id=%hello.device_id,error=%e,"failed to record device recovery");
+            }
+        }
+    }
     state.emit("device_online", Some(hello.device_id.clone()));
     info!(device_id=%hello.device_id,generation,platform=%hello.platform,arch=%hello.arch,"agent online");
     let mut heartbeat = tokio::time::interval(AGENT_HEARTBEAT_INTERVAL);
@@ -104,8 +119,15 @@ pub(crate) async fn handle_agent(mut socket: WebSocket, state: AppState) {
     loop {
         tokio::select! {
             _ = heartbeat.tick() => {
-                if last_inbound.elapsed() >= agent_heartbeat_timeout() {
-                    warn!(device_id=%hello.device_id,generation,"agent heartbeat timed out; retiring stale connection");
+                let silent_for = last_inbound.elapsed();
+                if silent_for >= agent_heartbeat_timeout() {
+                    warn!(
+                        device_id=%hello.device_id,
+                        generation,
+                        elapsed_ms = silent_for.as_millis() as u64,
+                        deadline_ms = agent_heartbeat_timeout().as_millis() as u64,
+                        "agent heartbeat timed out; retiring stale connection"
+                    );
                     disconnect_reason = "heartbeat_timeout";
                     break;
                 }

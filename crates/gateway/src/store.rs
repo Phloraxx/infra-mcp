@@ -398,6 +398,41 @@ impl Store {
         Ok(())
     }
 
+    /// Records a `device.recovered` audit event when the device had a disconnect
+    /// recorded within the last 24 hours, and returns the elapsed seconds.
+    ///
+    /// The disconnect timestamp is deliberately left in place: the dashboard's
+    /// drop note keeps showing the last drop after the device comes back. A
+    /// gateway restart therefore re-reports the outage it interrupted, which is
+    /// the measurement the soak program wants rather than a duplicate.
+    pub fn record_recovery(&self, device_id: &str) -> Result<Option<u64>, StoreError> {
+        const RECOVERY_WINDOW_MS: u64 = 24 * 60 * 60 * 1000;
+        let conn = self.connection()?;
+        let last_disconnect = conn
+            .query_row(
+                "SELECT last_disconnect_at_ms FROM devices WHERE device_id=?1",
+                params![device_id],
+                |row| row.get::<_, Option<i64>>(0),
+            )
+            .optional()?
+            .flatten()
+            .map(|value| value.max(0) as u64);
+        let Some(last_disconnect) = last_disconnect else {
+            return Ok(None);
+        };
+        let now = now_ms();
+        let elapsed = now.saturating_sub(last_disconnect);
+        if elapsed > RECOVERY_WINDOW_MS {
+            return Ok(None);
+        }
+        let seconds = elapsed / 1000;
+        conn.execute(
+            "INSERT INTO audit_events(at_ms, device_id, action, outcome, request_id) VALUES (?1, ?2, 'device.recovered', ?3, NULL)",
+            params![now as i64, device_id, format!("{seconds}s")],
+        )?;
+        Ok(Some(seconds))
+    }
+
     pub fn record_reconcile(
         &self,
         device_id: &str,
@@ -641,6 +676,51 @@ mod tests {
             Some("heartbeat_timeout")
         );
         assert!(device.last_disconnect_at_unix_ms.is_some());
+    }
+
+    #[test]
+    fn recovery_events_carry_the_elapsed_seconds_and_expire_after_a_day() {
+        let dir = tempdir().unwrap();
+        let store = Store::open(dir.path().join("infra.db")).unwrap();
+        let enrollment = store.create_enrollment(60_000).unwrap();
+        let device = store
+            .consume_enrollment(
+                &enrollment.code,
+                "recovery-request",
+                "Recovering Laptop",
+                &[3_u8; 32],
+                "linux",
+                "aarch64",
+                "test",
+            )
+            .unwrap();
+        // A device that has never dropped has nothing to recover from.
+        assert_eq!(store.record_recovery(&device.device_id).unwrap(), None);
+        assert!(store.list_activity(10).unwrap().is_empty());
+
+        store
+            .record_disconnect(&device.device_id, "heartbeat_timeout")
+            .unwrap();
+        assert_eq!(store.record_recovery(&device.device_id).unwrap(), Some(0));
+        let activity = store.list_activity(10).unwrap();
+        assert_eq!(activity.len(), 1);
+        assert_eq!(activity[0].action, "device.recovered");
+        assert_eq!(activity[0].outcome, "0s");
+        assert_eq!(
+            activity[0].device_name.as_deref(),
+            Some("Recovering Laptop")
+        );
+
+        // A disconnect older than the 24h window is history, not a recovery.
+        let conn = store.connection().unwrap();
+        conn.execute(
+            "UPDATE devices SET last_disconnect_at_ms=?1 WHERE device_id=?2",
+            params![(now_ms() - 25 * 60 * 60 * 1000) as i64, device.device_id],
+        )
+        .unwrap();
+        drop(conn);
+        assert_eq!(store.record_recovery(&device.device_id).unwrap(), None);
+        assert_eq!(store.list_activity(10).unwrap().len(), 1);
     }
 
     #[test]

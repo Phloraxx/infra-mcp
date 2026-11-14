@@ -815,6 +815,41 @@ async fn signed_auth_and_revocation() {
     server.abort();
 }
 #[tokio::test]
+async fn a_reconnect_after_a_recorded_disconnect_writes_a_recovery_event() {
+    let (_dir, state, addr, server) = spawn_test_gateway().await;
+    let (first, _) = connect_legacy(addr, "recovering-device").await;
+    wait_registered(&state, "recovering-device").await;
+    drop(first);
+    tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            if !state.devices.read().await.contains_key("recovering-device") {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    let (second, _) = connect_legacy(addr, "recovering-device").await;
+    wait_registered(&state, "recovering-device").await;
+    let recovered = state
+        .store
+        .list_activity(20)
+        .unwrap()
+        .into_iter()
+        .find(|record| record.action == "device.recovered")
+        .expect("a reconnect after a recorded disconnect must write a recovery event");
+    assert_eq!(recovered.device_id.as_deref(), Some("recovering-device"));
+    assert!(
+        recovered.outcome.ends_with('s'),
+        "outcome must carry the elapsed seconds, got {}",
+        recovered.outcome
+    );
+    drop(second);
+    server.abort();
+}
+
+#[tokio::test]
 async fn newer_connection_supersedes_generation() {
     let (_dir, state, addr, server) = spawn_test_gateway().await;
     let (first, first_generation) = connect_legacy(addr, "same-device").await;
