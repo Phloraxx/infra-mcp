@@ -81,6 +81,10 @@ pub(crate) async fn update_command(
     let repo = take_option(&mut args, "--repo").unwrap_or_else(|| "Phloraxx/infra-mcp".into());
     let version = take_option(&mut args, "--version").unwrap_or_else(|| "latest".into());
     let base_url = take_option(&mut args, "--base-url");
+    // Full verification without activation: the same signature, version,
+    // release-index, digest and binary-pinning checks, but no installed file
+    // and no floor change. Used by release CI and by an owner preflight.
+    let verify_only = take_flag(&mut args, "--verify-only");
     let explicitly_trusted = take_option(&mut args, "--trusted-update-key")
         .or_else(|| std::env::var("INFRA_RELEASE_PUBLIC_KEY_B64").ok())
         .filter(|key| !key.trim().is_empty());
@@ -168,8 +172,17 @@ pub(crate) async fn update_command(
     let release_index = release_verify::authorize_release_index(manifest.release_index, floor)?;
 
     // Stage under canonical names in a private directory so the preflight
-    // probes exactly the pair activation would install.
-    let staging = install_dir.join(format!(".infra-stage-{}", std::process::id()));
+    // probes exactly the pair activation would install. A verification-only
+    // run stages outside the install directory and changes nothing.
+    let staging = if verify_only {
+        std::env::temp_dir().join(format!(
+            "infra-verify-{}-{}",
+            std::process::id(),
+            uuid::Uuid::new_v4()
+        ))
+    } else {
+        install_dir.join(format!(".infra-stage-{}", std::process::id()))
+    };
     fs::create_dir_all(&staging)?;
     let staged_cli = staging.join(format!("infra{extension}"));
     let staged_agent = staging.join(format!("infra-agent{extension}"));
@@ -205,6 +218,13 @@ pub(crate) async fn update_command(
         return Err(error).context(
             "selected release does not support safe paired activation; installed files unchanged",
         );
+    }
+    if verify_only {
+        let _ = fs::remove_dir_all(&staging);
+        println!(
+            "verified release {release_version} (release index {release_index}) for {asset}; no files were changed"
+        );
+        return Ok(ExitCode::SUCCESS);
     }
     // The floor records the highest release this device has verified and begun
     // installing. It is monotonic, so a failed activation can never lower it.

@@ -385,7 +385,7 @@ fn ensure_no_args(args: &[String]) -> anyhow::Result<()> {
 fn print_help() {
     println!(
         "Infra device CLI\n\n\
-Usage:\n  infra status [--verify [--timeout-ms 15000]] [--json] [--state-dir PATH]\n  infra doctor [--json] [--state-dir PATH]\n  infra activate --source-dir PATH --install-dir PATH [--state-dir PATH] [setup options]\n  infra setup [--gateway WS_URL] [--agent PATH] [--no-startup] [--state-dir PATH]\n  infra install --gateway WS_URL [--code CODE] [--name NAME] [--agent PATH] [--no-startup] [--state-dir PATH]\n  infra repair [--state-dir PATH]\n  infra reconnect [--state-dir PATH]\n  infra update [--version TAG] [--repo OWNER/REPO] [--base-url URL] [--trusted-update-key BASE64] [--state-dir PATH]\n  infra uninstall [--remove-state] [--state-dir PATH]\n"
+Usage:\n  infra status [--verify [--timeout-ms 15000]] [--json] [--state-dir PATH]\n  infra doctor [--json] [--state-dir PATH]\n  infra activate --source-dir PATH --install-dir PATH [--state-dir PATH] [setup options]\n  infra setup [--gateway WS_URL] [--agent PATH] [--no-startup] [--state-dir PATH]\n  infra install --gateway WS_URL [--code CODE] [--name NAME] [--agent PATH] [--no-startup] [--state-dir PATH]\n  infra repair [--state-dir PATH]\n  infra reconnect [--state-dir PATH]\n  infra update [--version TAG] [--repo OWNER/REPO] [--base-url URL] [--trusted-update-key BASE64] [--verify-only] [--state-dir PATH]\n  infra uninstall [--remove-state] [--state-dir PATH]\n"
     );
 }
 
