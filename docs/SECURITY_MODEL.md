@@ -189,6 +189,8 @@ The embedded dashboard now has a private-mode login/session boundary. Static ass
 
 SQLite audit events store only bounded metadata (time, device association, action family, outcome and request ID). Tool payloads, stdout/stderr, file contents, enrollment codes and private device keys are deliberately excluded.
 
+Audit rows are retained for 180 days by default and trimmed by a gateway cleanup pass that runs once at startup and then daily, walking the existing `at_ms` index. `INFRA_AUDIT_RETENTION_DAYS` overrides the window; unset, unparsable and zero values fall back to the default so a typo cannot silently delete the trail. The pass is table-agnostic — each table carries its own window and its own counter — so the durable copy queue can join it later without a second timer or a change to the audit policy.
+
 ## 15. Structured external-tool boundary
 
 The current structured service/container/Git/listener implementations invoke platform-native commands or established CLIs with direct argv arrays; user-controlled identifiers are never concatenated into a shell command. OS permissions remain authoritative. Linux service mutation is currently restricted to `systemctl --user`; Windows SCM actions may fail when the current user lacks rights; there is no hidden elevation path.

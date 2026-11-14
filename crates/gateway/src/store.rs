@@ -88,6 +88,47 @@ pub struct Store {
     path: PathBuf,
 }
 
+/// Per-table retention windows for the cleanup pass.
+///
+/// The sweep is deliberately table-agnostic: each table gets its own window and
+/// its own counter in [`RetentionSweep`], so the durable copy queue can join the
+/// same pass later (completed rows after 7 days, failed after 30) without
+/// touching the audit policy or adding a second timer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RetentionPolicy {
+    pub audit_retention_days: u64,
+}
+
+impl RetentionPolicy {
+    pub const DEFAULT_AUDIT_RETENTION_DAYS: u64 = 180;
+
+    /// Reads `INFRA_AUDIT_RETENTION_DAYS`. Unset, unparsable and zero values all
+    /// fall back to the default: a typo must not silently delete the audit trail.
+    pub fn from_env() -> Self {
+        let audit_retention_days = std::env::var("INFRA_AUDIT_RETENTION_DAYS")
+            .ok()
+            .and_then(|raw| raw.trim().parse::<u64>().ok())
+            .filter(|days| *days > 0)
+            .unwrap_or(Self::DEFAULT_AUDIT_RETENTION_DAYS);
+        Self {
+            audit_retention_days,
+        }
+    }
+}
+
+impl Default for RetentionPolicy {
+    fn default() -> Self {
+        Self {
+            audit_retention_days: Self::DEFAULT_AUDIT_RETENTION_DAYS,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct RetentionSweep {
+    pub audit_events_deleted: usize,
+}
+
 impl Store {
     pub fn open(path: impl AsRef<Path>) -> Result<Self, StoreError> {
         let path = path.as_ref().to_path_buf();
@@ -494,6 +535,23 @@ impl Store {
         rows.collect::<Result<Vec<_>, _>>()
             .map_err(StoreError::from)
     }
+
+    /// Deletes rows past their retention window. The audit delete walks the
+    /// existing `audit_events_at_idx` index, so it stays cheap on a box that has
+    /// been running for months.
+    pub fn sweep_retention(&self, policy: RetentionPolicy) -> Result<RetentionSweep, StoreError> {
+        const DAY_MS: u64 = 24 * 60 * 60 * 1000;
+        let conn = self.connection()?;
+        let audit_cutoff =
+            now_ms().saturating_sub(policy.audit_retention_days.saturating_mul(DAY_MS));
+        let audit_events_deleted = conn.execute(
+            "DELETE FROM audit_events WHERE at_ms < ?1",
+            params![audit_cutoff as i64],
+        )?;
+        Ok(RetentionSweep {
+            audit_events_deleted,
+        })
+    }
 }
 
 fn decode_device(row: &rusqlite::Row<'_>) -> rusqlite::Result<DeviceRecord> {
@@ -721,6 +779,70 @@ mod tests {
         drop(conn);
         assert_eq!(store.record_recovery(&device.device_id).unwrap(), None);
         assert_eq!(store.list_activity(10).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn retention_sweep_deletes_only_rows_older_than_the_window() {
+        let dir = tempdir().unwrap();
+        let store = Store::open(dir.path().join("infra.db")).unwrap();
+        let enrollment = store.create_enrollment(60_000).unwrap();
+        let device = store
+            .consume_enrollment(
+                &enrollment.code,
+                "retention-request",
+                "Retention Laptop",
+                &[4_u8; 32],
+                "linux",
+                "aarch64",
+                "test",
+            )
+            .unwrap();
+        store
+            .record_activity(Some(&device.device_id), "exec", "ok", None)
+            .unwrap();
+        // The public API always writes "now", so seed the stale rows directly.
+        let conn = store.connection().unwrap();
+        for days_ago in [181_u64, 400] {
+            conn.execute(
+                "INSERT INTO audit_events(at_ms, device_id, action, outcome, request_id) VALUES (?1, ?2, 'exec', 'ok', NULL)",
+                params![
+                    (now_ms() - days_ago * 24 * 60 * 60 * 1000) as i64,
+                    device.device_id
+                ],
+            )
+            .unwrap();
+        }
+        drop(conn);
+        assert_eq!(store.list_activity(10).unwrap().len(), 3);
+
+        let sweep = store.sweep_retention(RetentionPolicy::default()).unwrap();
+        assert_eq!(sweep.audit_events_deleted, 2);
+        let remaining = store.list_activity(10).unwrap();
+        assert_eq!(remaining.len(), 1);
+        assert_eq!(remaining[0].action, "exec");
+        assert_eq!(
+            remaining[0].device_name.as_deref(),
+            Some("Retention Laptop")
+        );
+
+        // A second sweep inside the window is a no-op, not a second deletion.
+        assert_eq!(
+            store
+                .sweep_retention(RetentionPolicy::default())
+                .unwrap()
+                .audit_events_deleted,
+            0
+        );
+        assert_eq!(store.list_activity(10).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn the_default_retention_window_is_180_days() {
+        assert_eq!(
+            RetentionPolicy::default().audit_retention_days,
+            RetentionPolicy::DEFAULT_AUDIT_RETENTION_DAYS
+        );
+        assert_eq!(RetentionPolicy::DEFAULT_AUDIT_RETENTION_DAYS, 180);
     }
 
     #[test]

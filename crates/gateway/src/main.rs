@@ -76,7 +76,7 @@ use std::{
     },
     time::{Duration, Instant},
 };
-use store::{DeviceRecord, Store, StoreError, now_ms};
+use store::{DeviceRecord, RetentionPolicy, Store, StoreError, now_ms};
 use tokio::sync::{RwLock, broadcast, mpsc};
 use tracing::{info, warn};
 use uuid::Uuid;
@@ -214,11 +214,35 @@ async fn main() -> anyhow::Result<()> {
             "serving dashboard assets from disk with embedded fallback"
         );
     }
+    spawn_retention_task(state.clone());
     let app = build_app(state.clone());
     let listener = tokio::net::TcpListener::bind(bind).await?;
     info!(%bind, version = %version::VERSION, commit = %version::COMMIT, gateway_epoch=%state.gateway_epoch, "Infra v1 gateway listening");
     axum::serve(listener, app).await?;
     Ok(())
+}
+
+// Audit rows grow forever on a box with a full disk. Sweep once at startup and
+// then daily: a gateway that restarts more often than the interval would
+// otherwise never trim the table. The pass is shared with any future table that
+// needs a retention window (see RetentionPolicy).
+fn spawn_retention_task(state: AppState) {
+    let policy = RetentionPolicy::from_env();
+    tokio::spawn(async move {
+        let mut ticker = tokio::time::interval(Duration::from_secs(24 * 60 * 60));
+        ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        loop {
+            ticker.tick().await;
+            match state.store.sweep_retention(policy) {
+                Ok(sweep) => info!(
+                    audit_events_deleted = sweep.audit_events_deleted,
+                    retention_days = policy.audit_retention_days,
+                    "retention sweep complete"
+                ),
+                Err(error) => warn!(%error, "retention sweep failed"),
+            }
+        }
+    });
 }
 
 fn build_app(state: AppState) -> Router {
