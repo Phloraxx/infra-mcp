@@ -75,7 +75,7 @@ jobs:
             $hash = (Get-FileHash -Algorithm SHA256 $destination).Hash.ToLowerInvariant()
             Set-Content -NoNewline -Encoding ascii "$destination.sha256" "$hash  $name"
           }
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: infra-${{ matrix.asset }}
           path: dist/*
@@ -90,10 +90,10 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@1.99.0
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v7
         with:
           python-version: '3.12'
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           pattern: infra-*
           path: release

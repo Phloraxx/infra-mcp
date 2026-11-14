@@ -29,7 +29,7 @@ pub struct ConnectionProof {
 }
 
 pub fn gateway_fingerprint(url: &str) -> String {
-    format!("{:x}", Sha256::digest(url.as_bytes()))
+    hex::encode(Sha256::digest(url.as_bytes()))
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

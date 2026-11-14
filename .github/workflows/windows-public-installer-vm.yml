@@ -2,7 +2,7 @@ name: Windows public installer VM
 
 on:
   push:
-    branches: [fix/infra-ux-reliability-20261023]
+    branches: [main]
     paths:
       - .github/workflows/windows-public-installer-vm.yml
       - scripts/install.ps1

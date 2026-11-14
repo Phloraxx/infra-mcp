@@ -1,6 +1,6 @@
 # Infra v1 deployment direction
 
-Infra v1 is not implemented yet. This document defines how development and eventual rollout should work without breaking the current remote-control setup.
+Infra v1 is implemented and running as the burn-in control plane. This document defines how development and rollout work without breaking the fallback v0.3 remote-control setup.
 
 ## 1. Do not replace v0.3 in place during development
 

@@ -22,9 +22,14 @@ pub fn status(state: &Path) -> Option<UpdateStatus> {
         .ok()
         .and_then(|bytes| serde_json::from_slice(&bytes).ok())?;
     if status.phase == "pending" {
-        let owner_alive = sysinfo::System::new_all()
-            .process(sysinfo::Pid::from_u32(status.owner_pid))
-            .is_some();
+        let owner_alive = match sysinfo::System::new_all() {
+            Ok(system) => system
+                .process(sysinfo::Pid::from_u32(status.owner_pid))
+                .is_some(),
+            // If the process table cannot be read, keep the phase pending
+            // and let the receipt timeout decide the outcome.
+            Err(_) => true,
+        };
         if !owner_alive
             || infra_local_state::now_ms().saturating_sub(status.updated_unix_ms) > 300_000
         {

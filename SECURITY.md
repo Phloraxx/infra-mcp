@@ -8,9 +8,9 @@ See [`docs/SECURITY_MODEL.md`](docs/SECURITY_MODEL.md) for the full design.
 
 ## Current status
 
-Infra v1 is not implemented yet. Existing TypeScript code is prototype/legacy material and should not be exposed as a new public production service merely because the repository documentation now describes v1.
+Infra v1 is implemented in this repository in Rust, and signed native release candidates have been published (see [docs/RELEASE_SIGNING.md](docs/RELEASE_SIGNING.md) and [docs/RELEASE_PUBLISHER_KEY.md](docs/RELEASE_PUBLISHER_KEY.md)). The live v0.3 deployment remains the production fallback until the cutover acceptance criteria pass; repository code and RC binaries are not production-deployed merely because they exist.
 
-A separate v0.3 deployment exists and remains the fallback during migration.
+First-install bootstrap provenance and the public OAuth/TLS edge are still open security work.
 
 ## Non-negotiable requirements
 

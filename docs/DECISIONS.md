@@ -112,9 +112,9 @@ Do not conflate an OS capability advertisement with runtime permission, or a dis
 
 ## D014 — Signed updates are a staged security feature (2026-10-23)
 
-**Status:** Code exists in feature branch; release trust root/first-install bootstrap incomplete.
+**Status:** Release trust root provisioned (2026-10-24); signed manifests published since v0.1.0-rc.1. First-install bootstrap authenticity and rollback hardening remain open.
 
-Feature code can verify Ed25519-signed update manifests and asset hashes, but neither private release-signing key provisioning nor signed bootstrap authenticity and downgrade protection are complete. Public distribution and unattended update are **not** ready until their own security and OS acceptance gates pass. See [RELEASE_SIGNING.md](RELEASE_SIGNING.md).
+The release-signing key is provisioned and tagged releases publish verifiable Ed25519-signed manifests, but signed bootstrap authenticity and downgrade protection are not complete. Public distribution and unattended update are **not** ready until their own security and OS acceptance gates pass. See [RELEASE_SIGNING.md](RELEASE_SIGNING.md).
 
 
 ## D015 — Rebuild first-run onboarding, preserve native execution core (2026-10-24)

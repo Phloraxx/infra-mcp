@@ -14,7 +14,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with:
           node-version: '22'
       - name: Install isolated browser test dependency
@@ -74,7 +74,7 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw "Native release metadata check failed" }
       - name: Upload macOS ARM64 acceptance binaries
         if: matrix.os == 'macos-latest'
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: infra-acceptance-macos-aarch64
           path: |
@@ -91,7 +91,7 @@ jobs:
           .\scripts\smoke-install-windows.ps1
       - name: Upload Windows x64 acceptance binaries
         if: matrix.os == 'windows-latest'
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: infra-acceptance-windows-x86_64
           path: |

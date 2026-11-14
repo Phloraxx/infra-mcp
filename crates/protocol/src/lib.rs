@@ -739,7 +739,7 @@ mod tests {
         let payload = signed_auth_message("signed-nonce", epoch, &h);
         assert_eq!(payload.len(), 118);
         assert_eq!(
-            format!("{:x}", Sha256::digest(&payload)),
+            hex::encode(Sha256::digest(&payload)),
             "ee24049221d4c59b6d8da0914704309e01b9d205bc5f18599edccbd34a02783a"
         );
     }
