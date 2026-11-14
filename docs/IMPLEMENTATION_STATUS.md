@@ -456,3 +456,24 @@ meant dozens of manual calls. The gateway now owns a durable queue for that work
   debug-build relay moves roughly 5 MiB/s.
 - Nothing was deployed: no live gateway, agent or burn-in directory was touched,
   and no service was restarted.
+
+## 2026-11-14 — W7 agent reconnect jitter
+
+The reconnect ladder keeps its shape — 1 s doubling to a 30 s cap, reset to 1 s
+after a clean close — but every sleep is now jittered by plus or minus 25
+percent, so a gateway restart no longer brings the whole fleet back in the same
+second. `ReconnectBackoff` in crates/agent/src/main.rs owns the ladder (`reset`,
+`grow`, `sleep_duration`); the jittered value is clamped at 30 s, so the cap wins
+over the upper jitter bound and no sleep exceeds it. The sample comes from the OS
+random source; if that source is unavailable the delay falls back to its
+unjittered midpoint rather than failing the reconnect.
+
+Coverage: unit tests for the ladder (1, 2, 4, 8, 16, 30, 30), the plus-or-minus
+25 percent band over 2,000 samples per rung including a spread check that fails
+if jitter is disabled, the 30 s cap over 5,000 samples, and the reset to 1 s
+after a clean close. The W3 harness is unchanged: its reconnect scenarios wait on
+generations and audit rows, not on exact sleep lengths.
+
+Nothing was deployed: no live gateway, agent or burn-in directory was touched,
+and no service was restarted. Rollout is owner-controlled through the W4 signed
+update path, one device first.

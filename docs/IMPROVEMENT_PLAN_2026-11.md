@@ -103,6 +103,8 @@ audit_events (store.rs schema) grows unbounded on a box with 74 percent disk. Ad
 
 agent/src/main.rs backoff is exponential 1s to 30s with no jitter and a hard reset to 1s on clean close; a gateway restart makes the whole fleet reconnect in a synchronized wave (observed 14 Nov). Add plus-or-minus 25 percent jitter to each sleep, keep the 30s cap and reset semantics. This is a tiny patch but requires per-platform agent rebuilds; macOS needs a toolchain that does not currently exist locally. Ship it through the W4 signed update path. The W0.4 cross-compile job keeps the target healthy in the meantime.
 
+**Status 2026-11-14: implemented, not rolled out.** `ReconnectBackoff` in crates/agent/src/main.rs jitters every sleep by plus-or-minus 25 percent, keeps the 1 s doubling ladder and the reset to 1 s on a clean close, and clamps the jittered sleep at 30 s so the cap wins over the upper bound. Unit tests cover the ladder, the band over a large sample, the cap and the reset. The agent binary is not deployed: rollout is owner-controlled through the W4 signed update path, one device first (docs/RELEASE_SIGNING.md, "First real signed update on a Linux agent").
+
 ### W8 — Soak and telemetry program
 
 Run the docs/NEXT_STEPS.md failure matrix twice: fast fault cases inside the W3 harness, and a 7-day live-fleet soak (sleep/wake, network switch, edge restart, idle periods) observed through W0.5 recovery events and the dashboard drop notes. Deliverable: numbers appended to docs/BENCHMARK.md and docs/STABILIZATION_STATUS.md — reconnect p95, drops per device by reason, outcome_unknown counts, duplicate side effects (expected zero). This closes the Mac heartbeat investigation with evidence instead of hypothesis.
