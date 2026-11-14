@@ -327,6 +327,39 @@ impl Fixture {
         Ok((agent, device_id))
     }
 
+    /// Respawn a device that was already enrolled, reusing its state dir so its
+    /// transfer metadata (and therefore a paused upload) survives the restart.
+    pub fn respawn_second_device(&self, name: &str) -> anyhow::Result<Agent> {
+        Agent::spawn(
+            &self.dir.path().join(format!("agent-{name}")),
+            &self.dir.path().join(format!("{name}-respawn.log")),
+            &self.proxy.agent_url(),
+            None,
+            name,
+        )
+    }
+
+    /// Wait until every listed device is online. A gateway restart empties the
+    /// live map, so this is how a scenario waits for the fleet to come back.
+    pub async fn wait_devices_online(&self, device_ids: &[&str]) {
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(60);
+        loop {
+            let devices = self.devices().await;
+            let all_online = device_ids.iter().all(|id| {
+                devices.iter().any(|device| {
+                    device["device_id"] == json!(id) && device["online"].as_bool() == Some(true)
+                })
+            });
+            if all_online {
+                return;
+            }
+            if tokio::time::Instant::now() >= deadline {
+                panic!("devices {device_ids:?} never came online: {devices:?}");
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    }
+
     /// Spawn a second agent process with the same identity, which produces a
     /// second live connection for one device.
     pub fn spawn_second_agent(&self) -> anyhow::Result<Agent> {

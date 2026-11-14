@@ -19,4 +19,4 @@ pub use events::{DashboardEvent, EventStream};
 pub use fixture::{Agent, Fixture, Gateway, HEARTBEAT_TIMEOUT_SECS};
 pub use mcp::McpClient;
 pub use proxy::{FaultProxy, Faults};
-pub use store::{AuditRow, DeviceRow, StoreProbe};
+pub use store::{AuditRow, CopyJobRow, DeviceRow, StoreProbe};

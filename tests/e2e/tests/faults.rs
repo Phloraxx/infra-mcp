@@ -304,15 +304,379 @@ async fn download_resumes_from_offset_after_a_mid_chunk_cut() {
     assert_eq!(status["body"]["transfer"]["sha256"], expected);
 }
 
-/// Scenario 3: cross-device copy cut mid-stream. The durable copy queue does not
-/// exist yet, so this stays an explicit placeholder rather than a silent gap.
+/// Bytes a queued copy moves in the pause/cancel scenarios. Large enough to need
+/// many chunks, small enough to keep the fault-injection job inside its budget.
+const COPY_JOB_BYTES: usize = 8 << 20;
+
+/// Bytes the restart scenario moves. This is the acceptance size: the old
+/// synchronous path needed dozens of MCP calls for a file this big, and the
+/// queue must finish it from one call across a forced disconnect and a gateway
+/// restart.
+const COPY_JOB_RESTART_BYTES: usize = 64 << 20;
+
+fn copy_pattern(bytes: usize) -> Vec<u8> {
+    (0..bytes).map(|index| (index % 251) as u8).collect()
+}
+
+async fn copy_status(fixture: &Fixture, job_id: &str) -> Value {
+    let result = fixture
+        .mcp
+        .call("copy.status", json!({"job_id": job_id}))
+        .await
+        .expect("copy.status");
+    assert_eq!(result["status"], "ok", "copy.status failed: {result}");
+    result["job"].clone()
+}
+
+/// Bounded polling: wait until the job has confirmed at least one byte.
+async fn wait_for_copy_progress(fixture: &Fixture, job_id: &str, timeout: Duration) -> u64 {
+    let deadline = tokio::time::Instant::now() + timeout;
+    loop {
+        let job = copy_status(fixture, job_id).await;
+        if let Some(done) = job["bytes_done"].as_u64()
+            && done > 0
+        {
+            return done;
+        }
+        assert!(
+            job["state"] != "failed",
+            "the copy job failed before it moved: {job}"
+        );
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the copy job never made progress: {job}"
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+}
+
+/// Bounded polling: wait until the job reaches one of `states`.
+async fn wait_for_copy_state(
+    fixture: &Fixture,
+    job_id: &str,
+    states: &[&str],
+    timeout: Duration,
+) -> Value {
+    let deadline = tokio::time::Instant::now() + timeout;
+    loop {
+        let job = copy_status(fixture, job_id).await;
+        if let Some(state) = job["state"].as_str()
+            && states.contains(&state)
+        {
+            return job;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the copy job never reached {states:?}: {job}"
+        );
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+}
+
+/// Wait until the confirmed offset stops moving, so a cancel assertion is not
+/// racing the chunk that was already in flight.
+async fn wait_for_copy_stable(fixture: &Fixture, job_id: &str) -> Value {
+    let mut last = u64::MAX;
+    let mut quiet = 0;
+    for _ in 0..200 {
+        let job = copy_status(fixture, job_id).await;
+        let done = job["bytes_done"].as_u64().unwrap_or(0);
+        if done == last {
+            quiet += 1;
+            if quiet >= 3 {
+                return job;
+            }
+        } else {
+            quiet = 0;
+            last = done;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    panic!("the copy job never stopped moving");
+}
+
+/// Scenario 3: a durable copy job is killed mid-stream by a gateway restart and
+/// resumes at the stored offset with a matching digest.
+///
+/// The job is started with one call and polled with bounded status calls; the
+/// gateway is killed while a chunk is in flight, so the destination may hold more
+/// bytes than the row recorded. The resume must take the destination's confirmed
+/// offset, not the row's, and must not rewrite the file from zero.
+async fn restart_scenario(bytes: usize) {
+    let mut fixture = Fixture::start().await;
+    let (mut destination_agent, destination_id) = fixture
+        .spawn_second_device("e2e-copy-restart")
+        .await
+        .expect("second device");
+    let source = fixture.dir.path().join("copy-job-source.bin");
+    let destination = fixture.dir.path().join("copy-job-destination.bin");
+    let data = copy_pattern(bytes);
+    fs::write(&source, &data).expect("write copy job source");
+    let expected = sha256_hex(&data);
+
+    // Slow the destination link so the restart lands while a chunk is in flight
+    // rather than after the whole file has already moved.
+    let destination_connection = fixture.proxy.current_connection();
+    fixture.proxy.set_faults(
+        destination_connection,
+        Faults {
+            delay_downstream_ms: 20,
+            ..Faults::default()
+        },
+    );
+
+    // One call starts the copy; everything after this is bounded polling.
+    let started = fixture
+        .mcp
+        .call(
+            "copy.start",
+            json!({
+                "source_device": fixture.device_id,
+                "destination_device": destination_id,
+                "source_path": source,
+                "destination_path": destination,
+            }),
+        )
+        .await
+        .expect("copy.start");
+    assert_eq!(started["status"], "queued", "copy.start failed: {started}");
+    let job_id = started["job"]["job_id"]
+        .as_str()
+        .expect("job id")
+        .to_owned();
+    assert_eq!(started["job"]["state"], "queued");
+
+    let before = wait_for_copy_progress(&fixture, &job_id, Duration::from_secs(60)).await;
+    assert!(
+        before < data.len() as u64,
+        "the copy finished before the restart could interrupt it: {before}"
+    );
+    let row = fixture.store.copy_job(&job_id).expect("copy job row");
+    assert_eq!(row.state, "running");
+    assert!(
+        row.source_transfer_id.is_some() && row.dest_transfer_id.is_some(),
+        "both transfer IDs must be durable before the first chunk: {row:?}"
+    );
+
+    // Kill the gateway mid-stream. The agent links drop with it.
+    fixture.gateway.restart().await.expect("restart gateway");
+    fixture
+        .wait_devices_online(&[&fixture.device_id, &destination_id])
+        .await;
+
+    let job = wait_for_copy_state(
+        &fixture,
+        &job_id,
+        &["completed", "failed"],
+        Duration::from_secs(240),
+    )
+    .await;
+    assert_eq!(job["state"], "completed", "the job must finish: {job}");
+    assert_eq!(job["bytes_done"].as_u64(), Some(data.len() as u64));
+    assert_eq!(job["total_bytes"].as_u64(), Some(data.len() as u64));
+    assert_eq!(job["sha256"], expected);
+    assert_eq!(job["last_error"], Value::Null);
+    // The resume point is the destination's confirmed offset, so the job never
+    // rewrote the prefix it had already moved.
+    assert!(
+        job["sha256_progress_offset"].as_u64().unwrap_or(0) >= before,
+        "the job must resume at the stored offset, not from zero: {job}"
+    );
+    assert_eq!(
+        sha256_hex(&fs::read(&destination).expect("destination file")),
+        expected,
+        "the resumed copy must be byte-identical to the source"
+    );
+    let row = fixture.store.copy_job(&job_id).expect("copy job row");
+    assert_eq!(row.state, "completed");
+    assert_eq!(row.bytes_done, data.len() as u64);
+    assert_eq!(row.sha256, expected);
+    assert_eq!(row.chunk_offset, data.len() as u64);
+    // One job, one audit row: the restart must not duplicate the side effect.
+    let rows = fixture.store.audit_rows();
+    let job_rows: Vec<_> = rows.iter().filter(|row| row.action == "copy.job").collect();
+    assert_eq!(
+        job_rows.len(),
+        1,
+        "exactly one copy.job audit row: {rows:?}"
+    );
+    assert_eq!(job_rows[0].outcome, "completed");
+    destination_agent.stop();
+}
+
 #[tokio::test]
-#[ignore = "TODO(W2): needs the durable cross-device copy queue"]
-async fn copy_cut_mid_stream_resumes_after_gateway_restart() {
-    // TODO(W2): once copy_jobs exists, start a copy, kill the gateway mid-stream,
-    // restart it, and assert the job resumes at the stored offset with a matching
-    // digest and no duplicated side effects.
-    panic!("W2 durable copy queue is not implemented");
+async fn copy_job_resumes_after_a_gateway_restart_and_matches_the_digest() {
+    restart_scenario(COPY_JOB_RESTART_BYTES).await;
+}
+
+/// The acceptance size from the plan: 1 GiB from one call, across a forced
+/// mid-stream disconnect and a gateway restart, with the digest verified.
+///
+/// Manual rather than part of the default suite because a debug-build relay moves
+/// roughly 5 MiB/s, so this run takes minutes and writes 2 GiB of temp files; the
+/// default suite runs the identical scenario at 64 MiB. Run it with
+/// `cargo test -p infra-e2e --test faults copy_job_one_gib -- --ignored --nocapture`.
+#[tokio::test]
+#[ignore = "manual acceptance: 1 GiB copy across a forced disconnect and gateway restart"]
+async fn copy_job_one_gib_acceptance() {
+    restart_scenario(1 << 30).await;
+}
+
+/// Scenario 3b: either endpoint offline pauses the job, and both online resumes
+/// it. The destination agent is killed and respawned with the same state dir, so
+/// its upload metadata and staging file are the ones the job resumes.
+#[tokio::test]
+async fn copy_job_pauses_while_the_destination_is_offline_and_resumes_when_it_returns() {
+    let fixture = Fixture::start().await;
+    let (mut destination_agent, destination_id) = fixture
+        .spawn_second_device("e2e-copy-pause")
+        .await
+        .expect("second device");
+    let source = fixture.dir.path().join("copy-pause-source.bin");
+    let destination = fixture.dir.path().join("copy-pause-destination.bin");
+    let data = copy_pattern(COPY_JOB_BYTES);
+    fs::write(&source, &data).expect("write copy pause source");
+    let expected = sha256_hex(&data);
+
+    let destination_connection = fixture.proxy.current_connection();
+    fixture.proxy.set_faults(
+        destination_connection,
+        Faults {
+            delay_downstream_ms: 20,
+            ..Faults::default()
+        },
+    );
+    let started = fixture
+        .mcp
+        .call(
+            "copy.start",
+            json!({
+                "source_device": fixture.device_id,
+                "destination_device": destination_id,
+                "source_path": source,
+                "destination_path": destination,
+            }),
+        )
+        .await
+        .expect("copy.start");
+    let job_id = started["job"]["job_id"]
+        .as_str()
+        .expect("job id")
+        .to_owned();
+    let before = wait_for_copy_progress(&fixture, &job_id, Duration::from_secs(60)).await;
+
+    // The destination goes away. The job must pause, not fail.
+    destination_agent.stop();
+    let paused = wait_for_copy_state(&fixture, &job_id, &["paused"], Duration::from_secs(60)).await;
+    let reason = paused["last_error"].as_str().expect("pause reason");
+    assert!(
+        reason.contains("offline"),
+        "the pause must name the offline endpoint: {reason}"
+    );
+    assert!(
+        paused["bytes_done"].as_u64().unwrap_or(0) >= before,
+        "a pause must not lose confirmed progress: {paused}"
+    );
+    let row = fixture.store.copy_job(&job_id).expect("copy job row");
+    assert_eq!(row.state, "paused");
+    assert!(row.dest_transfer_id.is_some());
+
+    // The same device comes back with its transfer metadata on disk.
+    let mut destination_agent = fixture
+        .respawn_second_device("e2e-copy-pause")
+        .expect("respawn destination");
+    fixture
+        .wait_devices_online(&[&fixture.device_id, &destination_id])
+        .await;
+
+    let job = wait_for_copy_state(
+        &fixture,
+        &job_id,
+        &["completed", "failed"],
+        Duration::from_secs(240),
+    )
+    .await;
+    assert_eq!(job["state"], "completed", "the job must resume: {job}");
+    assert_eq!(job["bytes_done"].as_u64(), Some(data.len() as u64));
+    assert_eq!(job["sha256"], expected);
+    assert_eq!(
+        sha256_hex(&fs::read(&destination).expect("destination file")),
+        expected,
+        "the resumed copy must be byte-identical to the source"
+    );
+    destination_agent.stop();
+}
+
+/// Scenario 3c: cancel is terminal. The relay stops, the row stays canceled and
+/// the destination is never committed.
+#[tokio::test]
+async fn copy_job_cancel_stops_the_relay_and_keeps_the_row_terminal() {
+    let fixture = Fixture::start().await;
+    let (mut destination_agent, destination_id) = fixture
+        .spawn_second_device("e2e-copy-cancel")
+        .await
+        .expect("second device");
+    let source = fixture.dir.path().join("copy-cancel-source.bin");
+    let destination = fixture.dir.path().join("copy-cancel-destination.bin");
+    let data = copy_pattern(COPY_JOB_BYTES);
+    fs::write(&source, &data).expect("write copy cancel source");
+
+    let destination_connection = fixture.proxy.current_connection();
+    fixture.proxy.set_faults(
+        destination_connection,
+        Faults {
+            delay_downstream_ms: 20,
+            ..Faults::default()
+        },
+    );
+    let started = fixture
+        .mcp
+        .call(
+            "copy.start",
+            json!({
+                "source_device": fixture.device_id,
+                "destination_device": destination_id,
+                "source_path": source,
+                "destination_path": destination,
+            }),
+        )
+        .await
+        .expect("copy.start");
+    let job_id = started["job"]["job_id"]
+        .as_str()
+        .expect("job id")
+        .to_owned();
+    wait_for_copy_progress(&fixture, &job_id, Duration::from_secs(60)).await;
+
+    let canceled = fixture
+        .mcp
+        .call("copy.cancel", json!({"job_id": job_id}))
+        .await
+        .expect("copy.cancel");
+    assert_eq!(canceled["status"], "ok", "copy.cancel failed: {canceled}");
+    assert_eq!(canceled["job"]["state"], "canceled");
+    assert_eq!(
+        canceled["cancel_signaled"], true,
+        "a running job must be signaled: {canceled}"
+    );
+
+    let settled = wait_for_copy_stable(&fixture, &job_id).await;
+    assert_eq!(settled["state"], "canceled", "{settled}");
+    assert!(
+        settled["bytes_done"].as_u64().unwrap_or(0) < data.len() as u64,
+        "a canceled job must not have completed: {settled}"
+    );
+    let row = fixture.store.copy_job(&job_id).expect("copy job row");
+    assert_eq!(row.state, "canceled");
+    assert_eq!(row.last_error.as_deref(), Some("canceled by the owner"));
+    assert!(
+        !destination.exists(),
+        "a canceled upload must never be committed to the destination path"
+    );
+    // The supervisor never picks a canceled row up again.
+    tokio::time::sleep(Duration::from_secs(4)).await;
+    assert_eq!(copy_status(&fixture, &job_id).await["state"], "canceled");
+    destination_agent.stop();
 }
 
 /// Scenario 4: a terminal survives a cut and the retained byte range has no lost
