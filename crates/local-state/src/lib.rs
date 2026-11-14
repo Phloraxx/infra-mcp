@@ -303,4 +303,118 @@ mod tests {
     fn invalid_gateway_scheme_is_rejected() {
         assert!(LocalConfig::new("https://example.invalid".into(), None).is_err());
     }
+    #[test]
+    fn gateway_fingerprint_is_stable_and_url_sensitive() {
+        let url = "wss://gateway.example/agent";
+        assert_eq!(gateway_fingerprint(url), gateway_fingerprint(url));
+        assert_eq!(gateway_fingerprint(url).len(), 64);
+        assert_ne!(
+            gateway_fingerprint(url),
+            gateway_fingerprint("wss://gateway.example/agent/")
+        );
+        assert_ne!(
+            gateway_fingerprint("ws://gw.example/agent"),
+            gateway_fingerprint("wss://gw.example/agent")
+        );
+    }
+
+    #[test]
+    fn config_validation_accepts_ws_schemes_and_rejects_blank_names() {
+        assert!(LocalConfig::new("ws://127.0.0.1:1234/agent".into(), None).is_ok());
+        assert!(LocalConfig::new("wss://example.invalid/agent".into(), None).is_ok());
+        assert!(LocalConfig::new("https://example.invalid".into(), None).is_err());
+        assert!(LocalConfig::new("file:///tmp".into(), None).is_err());
+        assert!(LocalConfig::new("wss://example.invalid".into(), Some("   ".into())).is_err());
+
+        let named =
+            LocalConfig::new("wss://example.invalid/agent".into(), Some("Laptop".into())).unwrap();
+        assert_eq!(named.version, CONFIG_VERSION);
+        assert_eq!(named.device_name.as_deref(), Some("Laptop"));
+        let wire = serde_json::to_value(&named).unwrap();
+        assert_eq!(wire["device_name"], "Laptop");
+        assert_eq!(serde_json::from_value::<LocalConfig>(wire).unwrap(), named);
+
+        let anonymous = LocalConfig::new("ws://127.0.0.1:9/agent".into(), None).unwrap();
+        let wire = serde_json::to_value(&anonymous).unwrap();
+        assert!(wire.get("device_name").is_none());
+        assert_eq!(
+            serde_json::from_value::<LocalConfig>(wire).unwrap(),
+            anonymous
+        );
+    }
+
+    #[test]
+    fn runtime_status_tracks_pid_state_and_touch() {
+        let status = RuntimeStatus::new("connecting");
+        assert_eq!(status.version, RUNTIME_VERSION);
+        assert_eq!(status.pid, std::process::id());
+        assert_eq!(status.state, "connecting");
+        let touched = status.clone().touch();
+        assert!(touched.updated_unix_ms >= status.updated_unix_ms);
+        let wire = serde_json::to_value(&status).unwrap();
+        assert!(wire.get("gateway_epoch").is_none());
+        assert!(wire.get("device_id").is_none());
+        assert!(wire.get("last_error").is_none());
+        assert_eq!(
+            serde_json::from_value::<RuntimeStatus>(wire).unwrap(),
+            status
+        );
+    }
+
+    #[test]
+    fn state_files_are_optional_and_version_gated() {
+        let dir = tempdir().unwrap();
+        assert_eq!(read_config(dir.path()).unwrap(), None);
+        assert_eq!(read_runtime(dir.path()).unwrap(), None);
+        assert_eq!(read_connection_proof(dir.path()).unwrap(), None);
+        assert_eq!(identity_path(dir.path()), dir.path().join("identity.json"));
+
+        let config = LocalConfig::new("ws://127.0.0.1:9/agent".into(), None).unwrap();
+        write_config(dir.path(), &config).unwrap();
+        assert_eq!(read_config(dir.path()).unwrap(), Some(config.clone()));
+
+        let mut stale = config;
+        stale.version += 1;
+        write_config(dir.path(), &stale).unwrap();
+        assert!(read_config(dir.path()).is_err());
+    }
+
+    #[test]
+    fn atomic_writes_leave_no_temp_files_and_keep_owner_only_modes() {
+        let dir = tempdir().unwrap();
+        let config = LocalConfig::new("ws://127.0.0.1:9/agent".into(), None).unwrap();
+        for _ in 0..3 {
+            write_config(dir.path(), &config).unwrap();
+        }
+        let mut names: Vec<String> = fs::read_dir(dir.path())
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        names.sort();
+        assert_eq!(names, vec!["config.json".to_string()]);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = fs::metadata(dir.path().join("config.json"))
+                .unwrap()
+                .permissions()
+                .mode();
+            assert_eq!(mode & 0o777, 0o600);
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn state_dir_is_created_with_owner_only_permissions() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempdir().unwrap();
+        let state = dir.path().join("state");
+        ensure_state_dir(&state).unwrap();
+        let mode = fs::metadata(&state).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o700);
+        let config = LocalConfig::new("ws://127.0.0.1:9/agent".into(), None).unwrap();
+        write_config(&state, &config).unwrap();
+        let mode = fs::metadata(&state).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o700);
+    }
 }
