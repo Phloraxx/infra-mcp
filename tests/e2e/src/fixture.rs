@@ -312,6 +312,21 @@ impl Fixture {
         }
     }
 
+    /// Enroll and start a second device with its own identity and state dir, so
+    /// a scenario can drive a real cross-device copy.
+    pub async fn spawn_second_device(&self, name: &str) -> anyhow::Result<(Agent, String)> {
+        let code = create_enrollment(&self.gateway).await?;
+        let agent = Agent::spawn(
+            &self.dir.path().join(format!("agent-{name}")),
+            &self.dir.path().join(format!("{name}.log")),
+            &self.proxy.agent_url(),
+            Some(&code),
+            name,
+        )?;
+        let device_id = wait_for_device_named(&self.mcp, name).await;
+        Ok((agent, device_id))
+    }
+
     /// Spawn a second agent process with the same identity, which produces a
     /// second live connection for one device.
     pub fn spawn_second_agent(&self) -> anyhow::Result<Agent> {
@@ -351,6 +366,36 @@ impl Fixture {
         self.device().await["connection_generation"]
             .as_u64()
             .unwrap_or(0)
+    }
+
+    pub async fn device_generation(&self, device_id: &str) -> u64 {
+        self.devices()
+            .await
+            .into_iter()
+            .find(|device| device["device_id"] == json!(device_id))
+            .and_then(|device| device["connection_generation"].as_u64())
+            .unwrap_or(0)
+    }
+
+    /// Wait until `device_id` is online on a generation newer than `after`.
+    pub async fn wait_device_generation_above(&self, device_id: &str, after: u64) -> u64 {
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+        loop {
+            let devices = self.devices().await;
+            let device = devices
+                .iter()
+                .find(|device| device["device_id"] == json!(device_id));
+            if let Some(device) = device {
+                let generation = device["connection_generation"].as_u64().unwrap_or(0);
+                if device["online"].as_bool().unwrap_or(false) && generation > after {
+                    return generation;
+                }
+            }
+            if tokio::time::Instant::now() >= deadline {
+                panic!("device {device_id} never came online above generation {after}");
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
     }
 
     pub async fn wait_online(&self) -> u64 {
@@ -411,6 +456,26 @@ async fn create_enrollment(gateway: &Gateway) -> anyhow::Result<String> {
         .as_str()
         .map(str::to_owned)
         .ok_or_else(|| anyhow!("enrollment response has no code: {body}"))
+}
+
+async fn wait_for_device_named(mcp: &McpClient, name: &str) -> String {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+    loop {
+        if let Ok(result) = mcp.call("devices", json!({})).await
+            && let Some(devices) = result["devices"].as_array()
+            && let Some(device) = devices.iter().find(|device| {
+                device["device_name"].as_str() == Some(name)
+                    && device["online"].as_bool() == Some(true)
+            })
+            && let Some(device_id) = device["device_id"].as_str()
+        {
+            return device_id.to_owned();
+        }
+        if tokio::time::Instant::now() >= deadline {
+            panic!("device {name} never became online");
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
 }
 
 async fn wait_for_online(mcp: &McpClient) -> String {

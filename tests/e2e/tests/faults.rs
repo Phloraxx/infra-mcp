@@ -160,6 +160,18 @@ async fn download_resumes_from_offset_after_a_mid_chunk_cut() {
     fs::write(&source, &data).expect("write download source");
     let expected = sha256_hex(&data);
 
+    // The real agent advertises transfer.binary_v1, so this scenario exercises
+    // the bulk-frame download path; the gateway unit test pins the selection.
+    let device = fixture.device().await;
+    assert!(
+        device["capabilities"]
+            .as_array()
+            .expect("capabilities")
+            .iter()
+            .any(|capability| capability == "transfer.binary_v1"),
+        "the agent must advertise transfer.binary_v1: {device}"
+    );
+
     let begin = fixture
         .mcp
         .call(
@@ -660,4 +672,175 @@ async fn one_reconnect_produces_exactly_one_changed_reconcile() {
         "one reconnect must produce exactly one changed reconcile: {:?}",
         fixture.events.take()
     );
+}
+
+/// Bytes already written into an in-progress upload staging file. The agent
+/// creates `.infra-upload-<id>.part` next to the destination and appends each
+/// chunk before it answers, so a non-zero size proves the copy is mid-stream.
+fn staging_bytes(dir: &std::path::Path) -> u64 {
+    fs::read_dir(dir)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter(|entry| {
+            entry
+                .file_name()
+                .to_string_lossy()
+                .starts_with(".infra-upload-")
+        })
+        .filter_map(|entry| entry.metadata().ok())
+        .map(|meta| meta.len())
+        .sum()
+}
+
+/// W1: a cross-device copy over the bulk-frame path is cut while a chunk is in
+/// flight and resumes from the last confirmed offset with an identical digest.
+#[tokio::test]
+async fn copy_between_two_devices_resumes_after_a_cut_on_the_binary_path() {
+    let fixture = Fixture::start().await;
+    let source_connection = fixture.proxy.current_connection();
+    let (mut destination_agent, destination_id) = fixture
+        .spawn_second_device("e2e-destination")
+        .await
+        .expect("second device");
+    let destination_connection = fixture.proxy.current_connection();
+    assert_ne!(
+        source_connection, destination_connection,
+        "the second device must open its own proxied connection"
+    );
+    let source = fixture.dir.path().join("copy-source.bin");
+    let destination_path = fixture.dir.path().join("copy-destination.bin");
+    let data: Vec<u8> = (0..1024 * 1024).map(|index| (index % 251) as u8).collect();
+    fs::write(&source, &data).expect("write copy source");
+    let expected = sha256_hex(&data);
+
+    // Both agents advertise the capability, so the relay must use bulk frames.
+    let devices = fixture.devices().await;
+    for device_id in [&fixture.device_id, &destination_id] {
+        let device = devices
+            .iter()
+            .find(|device| device["device_id"] == json!(device_id))
+            .expect("device listing");
+        assert!(
+            device["capabilities"]
+                .as_array()
+                .expect("capabilities")
+                .iter()
+                .any(|capability| capability == "transfer.binary_v1"),
+            "the agent must advertise transfer.binary_v1: {device}"
+        );
+    }
+
+    let destination_generation = fixture.device_generation(&destination_id).await;
+    // Slow the destination link so the cut lands while a chunk is in flight. The
+    // proxy delays each forwarded read, so a 256 KiB frame takes several
+    // hundred milliseconds instead of arriving in one burst.
+    fixture.proxy.set_faults(
+        destination_connection,
+        Faults {
+            delay_downstream_ms: 200,
+            ..Faults::default()
+        },
+    );
+    let mcp = fixture.mcp.clone();
+    let (from, to) = (fixture.device_id.clone(), destination_id.clone());
+    let (source_for_call, destination_for_call) = (source.clone(), destination_path.clone());
+    let call = tokio::spawn(async move {
+        mcp.call(
+            "copy",
+            json!({
+                "source_device": from,
+                "destination_device": to,
+                "source_path": source_for_call,
+                "destination_path": destination_for_call,
+                "max_bytes": 4 * 262_144,
+            }),
+        )
+        .await
+    });
+    let mut progressed = false;
+    for _ in 0..750 {
+        if staging_bytes(fixture.dir.path()) > 0 {
+            progressed = true;
+            break;
+        }
+        if call.is_finished() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert!(
+        progressed,
+        "the copy never started writing the destination before it finished"
+    );
+    fixture.proxy.cut(destination_connection);
+    let first = call.await.expect("copy task").expect("copy call");
+    assert_ne!(
+        first["status"], "completed",
+        "the cut must interrupt the copy: {first}"
+    );
+    let source_transfer = first["source_transfer_id"]
+        .as_str()
+        .expect("source transfer id")
+        .to_owned();
+    let destination_transfer = first["destination_transfer_id"]
+        .as_str()
+        .expect("destination transfer id")
+        .to_owned();
+    let confirmed = first["bytes_transferred"]
+        .as_u64()
+        .expect("confirmed offset");
+    assert!(
+        confirmed < data.len() as u64,
+        "the copy must be partial: {first}"
+    );
+
+    // The cut link reconnects; the resume continues from the confirmed offset.
+    fixture
+        .wait_device_generation_above(&destination_id, destination_generation)
+        .await;
+
+    let mut result = first.clone();
+    for _ in 0..40 {
+        result = fixture
+            .mcp
+            .call(
+                "copy",
+                json!({
+                    "source_device": fixture.device_id,
+                    "destination_device": destination_id,
+                    "source_path": source,
+                    "destination_path": destination_path,
+                    "source_transfer_id": source_transfer,
+                    "destination_transfer_id": destination_transfer,
+                    "max_bytes": 64 * 1024 * 1024,
+                }),
+            )
+            .await
+            .expect("resume copy");
+        if result["status"] == "completed" {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+    assert_eq!(result["status"], "completed", "resume failed: {result}");
+    assert_eq!(
+        result["transport"]["source"], "binary",
+        "the source must use bulk frames: {result}"
+    );
+    assert_eq!(
+        result["transport"]["destination"], "binary",
+        "the destination must use bulk frames: {result}"
+    );
+    assert_eq!(result["sha256"], expected);
+    assert_eq!(
+        result["bytes_transferred"].as_u64(),
+        Some(data.len() as u64)
+    );
+    assert_eq!(
+        sha256_hex(&fs::read(&destination_path).expect("destination file")),
+        expected,
+        "the resumed copy must be byte-identical to the source"
+    );
+    destination_agent.stop();
 }
