@@ -332,6 +332,7 @@ Feedback pass over the console layout, still in the v3 design language:
 | Console edition and friendlier sign-in | 9664a40 | b9ea83d05b753de300e7155682ae71a4c3851e460fa4bc08e4a8b808b8edf814 | bin/infra-gateway-bc6ad9e |
 | Console polish: stat cards, floating drawer, session pop-up | fff32be | a53f588d3660f50d1dbf0981dba1f874c36379ebe3cac3a58b9aac282bbb4da9 | bin/infra-gateway-9664a40 |
 | Console v4.2: fleet strip, drop context, arrow keys; tolerant 90s heartbeat deadline | 3318a69 | 5c1f168b6f83afb9fa6254c0795a4fe2961228aa470e62a421838e04cc704963 | bin/infra-gateway-fff32be |
+| Hotfix: placeholder leak in the drop-note template; QA fixture now covers the drop-context path | 60bf1d9 | 7c693470923e053fc38b984d947ee865702a12bc5adff4fe4654e6978c742a59 | bin/infra-gateway-3318a69 |
 
 All snapshots are preserved under ~/.local/share/infra-v1-remote-burnin/gateway/. Every guarded rollout saved the previous binary and a consistent SQLite backup, verified public HTTPS assets, browser authentication, OAuth metadata, SQLite integrity (schema v5, three enrolled devices) and signed-device reconnection. The Fieldwork rollout preserved the then-uncommitted OAuth loopback callback patch without modifying the original worktree, and proved the old binary compatible with schema v5 before cutover. Native device binaries and enrolled identities were never changed by a dashboard rollout.
 
