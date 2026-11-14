@@ -1,6 +1,7 @@
 use super::*;
 use ed25519_dalek::{Signer, SigningKey};
 use futures_util::{SinkExt, StreamExt};
+use infra_protocol::{BulkFrame, BulkKind, OwnedBulkFrame};
 use std::collections::BTreeMap;
 use tempfile::TempDir;
 use tokio_tungstenite::{connect_async, tungstenite::Message as ClientMessage};
@@ -1047,4 +1048,522 @@ async fn newer_connection_supersedes_generation() {
     drop(first);
     drop(second);
     server.abort();
+}
+
+// ---------------------------------------------------------------------------
+// W1: capability-gated bulk frames
+// ---------------------------------------------------------------------------
+
+fn sha256_hex(bytes: &[u8]) -> String {
+    use sha2::Digest as _;
+    Sha256::digest(bytes)
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
+}
+
+/// Write `bytes` at `offset` in a fake destination file, extending as needed.
+fn write_at(buffer: &std::sync::Mutex<Vec<u8>>, offset: u64, bytes: &[u8]) -> u64 {
+    let mut buffer = buffer.lock().expect("fake destination poisoned");
+    let start = offset as usize;
+    if buffer.len() < start + bytes.len() {
+        buffer.resize(start + bytes.len(), 0);
+    }
+    buffer[start..start + bytes.len()].copy_from_slice(bytes);
+    buffer.len() as u64
+}
+
+/// In-process agent that serves the transfer choreography from memory. It
+/// answers a download chunk with base64 or with a bulk frame depending on
+/// `binary`, and it accepts an upload chunk in whichever form the gateway sends.
+async fn run_fake_transfer_agent(
+    socket: TestSocket,
+    source: Vec<u8>,
+    binary: bool,
+) -> Arc<std::sync::Mutex<Vec<u8>>> {
+    let destination = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let written = destination.clone();
+    tokio::spawn(async move {
+        let (mut sink, mut stream) = socket.split();
+        let mut uploads: HashMap<Uuid, (String, u64, Option<String>)> = HashMap::new();
+        let mut downloads: HashMap<Uuid, String> = HashMap::new();
+        while let Some(Ok(frame)) = stream.next().await {
+            let request = match frame {
+                ClientMessage::Text(text) => {
+                    let GatewayToAgent::Request(request) =
+                        serde_json::from_str(text.as_str()).unwrap()
+                    else {
+                        continue;
+                    };
+                    request
+                }
+                ClientMessage::Binary(_) => {
+                    panic!("a payload frame must always follow its announcement")
+                }
+                _ => continue,
+            };
+            let (result, payload) = match request.operation {
+                AgentOperation::Transfer(TransferRequest { action }) => match action {
+                    TransferAction::DownloadBegin { path } => {
+                        let id = Uuid::new_v4();
+                        downloads.insert(id, path.clone());
+                        (
+                            OperationResult::Ok {
+                                body: serde_json::json!({
+                                    "transfer": {"id": id, "direction": "download", "path": path,
+                                        "size": source.len(), "sha256": sha256_hex(&source),
+                                        "status": "ready", "bytes_transferred": 0},
+                                    "chunk_size": 262_144
+                                }),
+                            },
+                            None,
+                        )
+                    }
+                    TransferAction::DownloadChunk {
+                        transfer_id,
+                        offset,
+                        length,
+                    } => {
+                        let count = length
+                            .unwrap_or(262_144)
+                            .min(source.len() - offset as usize);
+                        let bytes = source[offset as usize..offset as usize + count].to_vec();
+                        let next = offset + count as u64;
+                        let mut body = serde_json::json!({
+                            "transfer": {"id": transfer_id, "direction": "download",
+                                "path": downloads[&transfer_id], "size": source.len(),
+                                "sha256": sha256_hex(&source),
+                                "status": if next == source.len() as u64 { "completed" } else { "ready" },
+                                "bytes_transferred": next},
+                            "offset": offset, "next_offset": next,
+                            "has_more": next < source.len() as u64
+                        });
+                        if binary {
+                            body["data_binary"] = serde_json::json!(true);
+                            body["length"] = serde_json::json!(count);
+                            (
+                                OperationResult::Ok { body },
+                                Some(OwnedBulkFrame::new(
+                                    BulkKind::DownloadChunk,
+                                    transfer_id,
+                                    offset,
+                                    bytes,
+                                )),
+                            )
+                        } else {
+                            body["data_base64"] = serde_json::json!(STANDARD.encode(&bytes));
+                            (OperationResult::Ok { body }, None)
+                        }
+                    }
+                    TransferAction::UploadBegin {
+                        path, size, sha256, ..
+                    } => {
+                        let id = Uuid::new_v4();
+                        uploads.insert(id, (path.clone(), size, sha256.clone()));
+                        (
+                            OperationResult::Ok {
+                                body: serde_json::json!({
+                                    "transfer": {"id": id, "direction": "upload", "path": path,
+                                        "size": size, "sha256": sha256, "status": "uploading",
+                                        "bytes_transferred": 0},
+                                    "chunk_size": 262_144
+                                }),
+                            },
+                            None,
+                        )
+                    }
+                    TransferAction::UploadChunk {
+                        transfer_id,
+                        offset,
+                        data_base64,
+                    } => {
+                        let bytes = STANDARD.decode(data_base64).unwrap();
+                        let next = write_at(&written, offset, &bytes);
+                        let (path, size, sha256) = uploads[&transfer_id].clone();
+                        (
+                            OperationResult::Ok {
+                                body: serde_json::json!({
+                                    "transfer": {"id": transfer_id, "direction": "upload",
+                                        "path": path, "size": size, "sha256": sha256,
+                                        "status": "uploading", "bytes_transferred": next},
+                                    "next_offset": next, "has_more": next < size
+                                }),
+                            },
+                            None,
+                        )
+                    }
+                    TransferAction::UploadChunkBinary {
+                        transfer_id,
+                        offset,
+                        length,
+                    } => {
+                        let Some(Ok(ClientMessage::Binary(bytes))) = stream.next().await else {
+                            panic!("expected the bulk payload after its announcement")
+                        };
+                        let frame = BulkFrame::decode(&bytes).expect("decode bulk frame");
+                        assert_eq!(frame.kind, BulkKind::UploadChunk);
+                        assert_eq!(frame.id, transfer_id);
+                        assert_eq!(frame.offset, offset);
+                        assert_eq!(frame.payload.len(), length);
+                        let next = write_at(&written, offset, frame.payload);
+                        let (path, size, sha256) = uploads[&transfer_id].clone();
+                        (
+                            OperationResult::Ok {
+                                body: serde_json::json!({
+                                    "transfer": {"id": transfer_id, "direction": "upload",
+                                        "path": path, "size": size, "sha256": sha256,
+                                        "status": "uploading", "bytes_transferred": next},
+                                    "next_offset": next, "has_more": next < size
+                                }),
+                            },
+                            None,
+                        )
+                    }
+                    TransferAction::UploadCommit { transfer_id } => {
+                        let (path, size, sha256) = uploads[&transfer_id].clone();
+                        let bytes = written.lock().expect("fake destination poisoned").clone();
+                        assert_eq!(bytes.len() as u64, size, "commit before the last chunk");
+                        assert_eq!(Some(sha256_hex(&bytes)), sha256);
+                        (
+                            OperationResult::Ok {
+                                body: serde_json::json!({
+                                    "transfer": {"id": transfer_id, "direction": "upload",
+                                        "path": path, "size": size, "sha256": sha256,
+                                        "status": "completed", "bytes_transferred": size},
+                                    "sha256": sha256
+                                }),
+                            },
+                            None,
+                        )
+                    }
+                    other => panic!("unexpected transfer action {other:?}"),
+                },
+                other => panic!("unexpected operation {other:?}"),
+            };
+            let response = AgentToGateway::Response(AgentResponse {
+                id: request.id,
+                result,
+            });
+            sink.send(ClientMessage::Text(
+                serde_json::to_string(&response).unwrap().into(),
+            ))
+            .await
+            .unwrap();
+            if let Some(frame) = payload {
+                sink.send(ClientMessage::Binary(frame.encode().into()))
+                    .await
+                    .unwrap();
+            }
+        }
+    });
+    destination
+}
+
+#[tokio::test]
+async fn binary_frames_are_acknowledged_only_for_agents_that_advertise_them() {
+    let (_dir, _state, addr, server) = spawn_test_gateway().await;
+    let (_plain, plain) = connect_legacy_with_capabilities(addr, "plain-device", &["exec"]).await;
+    assert!(
+        !plain.binary_frames,
+        "an agent without the capability must keep the JSON path"
+    );
+    let (_transfer, transfer) = connect_legacy_with_capabilities(
+        addr,
+        "transfer-device",
+        &["exec", infra_protocol::TRANSFER_BINARY_CAPABILITY],
+    )
+    .await;
+    assert!(transfer.binary_frames);
+    let (_terminal, terminal) = connect_legacy_with_capabilities(
+        addr,
+        "terminal-device",
+        &["exec", infra_protocol::TERMINAL_BINARY_CAPABILITY],
+    )
+    .await;
+    assert!(terminal.binary_frames);
+    server.abort();
+}
+
+#[tokio::test]
+async fn a_binary_frame_on_an_unnegotiated_connection_closes_the_socket() {
+    let (_dir, state, addr, server) = spawn_test_gateway().await;
+    let (mut socket, ack) = connect_legacy_with_capabilities(addr, "plain-device", &["exec"]).await;
+    assert!(!ack.binary_frames);
+    wait_registered(&state, "plain-device").await;
+    socket
+        .send(ClientMessage::Binary(
+            BulkFrame::new(BulkKind::UploadChunk, Uuid::new_v4(), 0, b"payload")
+                .encode()
+                .into(),
+        ))
+        .await
+        .unwrap();
+    let closed = tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            match socket.next().await {
+                None | Some(Ok(ClientMessage::Close(_))) | Some(Err(_)) => break,
+                Some(Ok(_)) => continue,
+            }
+        }
+    })
+    .await;
+    assert!(
+        closed.is_ok(),
+        "binary on an un-negotiated connection is a protocol error"
+    );
+    let reason = tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            if let Ok(Some(record)) = state.store.get_device("plain-device")
+                && record.last_disconnect_reason.is_some()
+            {
+                break record.last_disconnect_reason;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("the disconnect must be recorded");
+    assert_eq!(reason.as_deref(), Some("unexpected_binary_frame"));
+    server.abort();
+}
+
+#[tokio::test]
+async fn a_negotiated_download_chunk_returns_a_bulk_frame() {
+    let (_dir, state, addr, server) = spawn_test_gateway().await;
+    let (socket, ack) = connect_legacy_with_capabilities(
+        addr,
+        "binary-device",
+        &["exec", infra_protocol::TRANSFER_BINARY_CAPABILITY],
+    )
+    .await;
+    assert!(ack.binary_frames);
+    wait_registered(&state, "binary-device").await;
+    let transfer_id = Uuid::new_v4();
+    let payload: Vec<u8> = (0..4096).map(|index| (index % 251) as u8).collect();
+    let expected = payload.clone();
+    let agent = tokio::spawn(async move {
+        let (mut sink, mut stream) = socket.split();
+        while let Some(Ok(ClientMessage::Text(text))) = stream.next().await {
+            let GatewayToAgent::Request(request) = serde_json::from_str(text.as_str()).unwrap()
+            else {
+                continue;
+            };
+            let AgentOperation::Transfer(TransferRequest {
+                action:
+                    TransferAction::DownloadChunk {
+                        transfer_id,
+                        offset,
+                        ..
+                    },
+            }) = request.operation
+            else {
+                panic!("expected a download chunk request")
+            };
+            let body = serde_json::json!({
+                "transfer": {"id": transfer_id, "direction": "download", "path": "/source.bin",
+                    "size": 4096, "sha256": sha256_hex(&payload), "status": "completed",
+                    "bytes_transferred": 4096},
+                "offset": offset, "next_offset": offset + 4096, "has_more": false,
+                "data_binary": true, "length": 4096
+            });
+            let response = AgentToGateway::Response(AgentResponse {
+                id: request.id,
+                result: OperationResult::Ok { body },
+            });
+            sink.send(ClientMessage::Text(
+                serde_json::to_string(&response).unwrap().into(),
+            ))
+            .await
+            .unwrap();
+            sink.send(ClientMessage::Binary(
+                BulkFrame::new(BulkKind::DownloadChunk, transfer_id, offset, &payload)
+                    .encode()
+                    .into(),
+            ))
+            .await
+            .unwrap();
+        }
+    });
+    let (response, frame) =
+        download_chunk_binary(&state, "binary-device", transfer_id, 0, Some(4096), 2000)
+            .await
+            .unwrap();
+    assert!(matches!(response.result, OperationResult::Ok { .. }));
+    let frame = frame.expect("the payload must arrive as a bulk frame");
+    assert_eq!(frame.kind, BulkKind::DownloadChunk);
+    assert_eq!(frame.id, transfer_id);
+    assert_eq!(frame.offset, 0);
+    assert_eq!(frame.payload, expected);
+    agent.abort();
+    server.abort();
+}
+
+#[tokio::test]
+async fn a_negotiated_upload_chunk_sends_the_payload_in_a_bulk_frame() {
+    let (_dir, state, addr, server) = spawn_test_gateway().await;
+    let (socket, _ack) = connect_legacy_with_capabilities(
+        addr,
+        "binary-device",
+        &["exec", infra_protocol::TRANSFER_BINARY_CAPABILITY],
+    )
+    .await;
+    wait_registered(&state, "binary-device").await;
+    let transfer_id = Uuid::new_v4();
+    let data: Vec<u8> = (0..2048).map(|index| (index % 251) as u8).collect();
+    let expected = data.clone();
+    let agent = tokio::spawn(async move {
+        let (mut sink, mut stream) = socket.split();
+        let Some(Ok(ClientMessage::Text(text))) = stream.next().await else {
+            panic!("expected the announcement")
+        };
+        let GatewayToAgent::Request(request) = serde_json::from_str(text.as_str()).unwrap() else {
+            panic!("expected a request")
+        };
+        let AgentOperation::Transfer(TransferRequest {
+            action:
+                TransferAction::UploadChunkBinary {
+                    transfer_id,
+                    offset,
+                    length,
+                },
+        }) = request.operation
+        else {
+            panic!("expected a binary upload announcement")
+        };
+        assert_eq!(length, 2048);
+        let Some(Ok(ClientMessage::Binary(bytes))) = stream.next().await else {
+            panic!("expected the payload frame")
+        };
+        let frame = BulkFrame::decode(&bytes).expect("decode");
+        assert_eq!(frame.kind, BulkKind::UploadChunk);
+        assert_eq!(frame.id, transfer_id);
+        assert_eq!(frame.offset, offset);
+        assert_eq!(frame.payload, expected);
+        let body = serde_json::json!({
+            "transfer": {"id": transfer_id, "direction": "upload", "path": "/dest.bin",
+                "size": 2048, "sha256": sha256_hex(&expected), "status": "uploading",
+                "bytes_transferred": 2048},
+            "next_offset": 2048, "has_more": false
+        });
+        let response = AgentToGateway::Response(AgentResponse {
+            id: request.id,
+            result: OperationResult::Ok { body },
+        });
+        sink.send(ClientMessage::Text(
+            serde_json::to_string(&response).unwrap().into(),
+        ))
+        .await
+        .unwrap();
+    });
+    let response = upload_chunk_binary(&state, "binary-device", transfer_id, 0, &data, 2000)
+        .await
+        .unwrap();
+    assert!(matches!(response.result, OperationResult::Ok { .. }));
+    agent.await.unwrap();
+    server.abort();
+}
+
+#[tokio::test]
+async fn a_negotiated_terminal_write_sends_the_input_in_a_bulk_frame() {
+    let (_dir, state, addr, server) = spawn_test_gateway().await;
+    let (socket, _ack) = connect_legacy_with_capabilities(
+        addr,
+        "binary-device",
+        &["exec", infra_protocol::TERMINAL_BINARY_CAPABILITY],
+    )
+    .await;
+    wait_registered(&state, "binary-device").await;
+    let session_id = Uuid::new_v4();
+    let agent = tokio::spawn(async move {
+        let (mut sink, mut stream) = socket.split();
+        let Some(Ok(ClientMessage::Text(text))) = stream.next().await else {
+            panic!("expected the announcement")
+        };
+        let GatewayToAgent::Request(request) = serde_json::from_str(text.as_str()).unwrap() else {
+            panic!("expected a request")
+        };
+        let AgentOperation::Terminal(TerminalRequest {
+            action: TerminalAction::WriteBinary { session_id, length },
+        }) = request.operation
+        else {
+            panic!("expected a binary terminal write")
+        };
+        let Some(Ok(ClientMessage::Binary(bytes))) = stream.next().await else {
+            panic!("expected the payload frame")
+        };
+        let frame = BulkFrame::decode(&bytes).expect("decode");
+        assert_eq!(frame.kind, BulkKind::TerminalData);
+        assert_eq!(frame.id, session_id);
+        assert_eq!(frame.payload, b"printf hi\n");
+        assert_eq!(frame.payload.len(), length);
+        let response = AgentToGateway::Response(AgentResponse {
+            id: request.id,
+            result: OperationResult::Ok {
+                body: serde_json::json!({"ok": true, "session_id": session_id}),
+            },
+        });
+        sink.send(ClientMessage::Text(
+            serde_json::to_string(&response).unwrap().into(),
+        ))
+        .await
+        .unwrap();
+    });
+    let response = terminal_write_binary(&state, "binary-device", session_id, b"printf hi\n", 2000)
+        .await
+        .unwrap();
+    assert!(matches!(response.result, OperationResult::Ok { .. }));
+    agent.await.unwrap();
+    server.abort();
+}
+
+#[tokio::test]
+async fn copy_relays_raw_chunks_on_the_binary_path_and_base64_on_the_json_path() {
+    for binary in [true, false] {
+        let (_dir, state, addr, server) = spawn_test_gateway().await;
+        let source: Vec<u8> = (0..600_000).map(|index| (index % 251) as u8).collect();
+        let capabilities: &[&str] = if binary {
+            &["exec", infra_protocol::TRANSFER_BINARY_CAPABILITY]
+        } else {
+            &["exec"]
+        };
+        let (source_socket, _) =
+            connect_legacy_with_capabilities(addr, "source-device", capabilities).await;
+        let (destination_socket, _) =
+            connect_legacy_with_capabilities(addr, "destination-device", capabilities).await;
+        wait_registered(&state, "source-device").await;
+        wait_registered(&state, "destination-device").await;
+        let _source_agent = run_fake_transfer_agent(source_socket, source.clone(), binary).await;
+        let destination = run_fake_transfer_agent(destination_socket, Vec::new(), binary).await;
+
+        let result = copy::run(
+            &state,
+            McpCopyInput {
+                source_device: "source-device".into(),
+                destination_device: "destination-device".into(),
+                source_path: "/source.bin".into(),
+                destination_path: "/destination.bin".into(),
+                overwrite: Some(true),
+                create_parents: Some(true),
+                source_transfer_id: None,
+                destination_transfer_id: None,
+                max_bytes: Some(64 * 1024 * 1024),
+            },
+        )
+        .await
+        .expect("copy");
+        let path = if binary { "binary" } else { "json" };
+        assert_eq!(result["status"], "completed", "copy failed: {result}");
+        assert_eq!(result["transport"]["source"], path);
+        assert_eq!(result["transport"]["destination"], path);
+        assert_eq!(result["sha256"], sha256_hex(&source));
+        assert_eq!(
+            destination
+                .lock()
+                .expect("fake destination poisoned")
+                .as_slice(),
+            source.as_slice(),
+            "the relayed bytes must be identical on the {path} path"
+        );
+        server.abort();
+    }
 }
