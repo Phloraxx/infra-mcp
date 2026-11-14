@@ -259,14 +259,14 @@ async fn main() -> anyhow::Result<()> {
     };
 
     let proof_writer = readiness::proof_writer(state_dir.clone());
-    let mut delay = Duration::from_secs(1);
+    let mut backoff = ReconnectBackoff::new();
     loop {
         update_runtime(&state_dir, "connecting", None, None, None, None);
         match run_connection(config.clone(), context.clone(), &state_dir, &proof_writer).await {
             Ok(()) => {
                 warn!("gateway connection ended; reconnecting");
                 update_runtime(&state_dir, "reconnecting", None, None, None, None);
-                delay = Duration::from_secs(1);
+                backoff.reset();
             }
             Err(err) => {
                 warn!(%err, "gateway connection failed; reconnecting");
@@ -278,11 +278,66 @@ async fn main() -> anyhow::Result<()> {
                     None,
                     None,
                 );
-                delay = (delay * 2).min(Duration::from_secs(30));
+                backoff.grow();
             }
         }
-        tokio::time::sleep(delay).await;
+        tokio::time::sleep(backoff.sleep_duration()).await;
     }
+}
+
+/// Reconnect backoff: exponential from 1 s to a 30 s cap with plus-or-minus
+/// 25 percent jitter.
+///
+/// The jitter spreads a fleet-wide reconnect wave; without it a gateway restart
+/// brings every agent back in the same second. The cap wins over the upper
+/// jitter bound, so no sleep exceeds 30 s.
+struct ReconnectBackoff {
+    current: Duration,
+}
+
+impl ReconnectBackoff {
+    const BASE: Duration = Duration::from_secs(1);
+    const MAX: Duration = Duration::from_secs(30);
+    const JITTER_PERCENT: u32 = 25;
+
+    fn new() -> Self {
+        Self {
+            current: Self::BASE,
+        }
+    }
+
+    /// A clean close resets the ladder to the base delay.
+    fn reset(&mut self) {
+        self.current = Self::BASE;
+    }
+
+    /// A failed attempt doubles the delay up to the cap.
+    fn grow(&mut self) {
+        self.current = (self.current * 2).min(Self::MAX);
+    }
+
+    /// The next sleep: the current delay plus or minus 25 percent, capped.
+    fn sleep_duration(&self) -> Duration {
+        self.jittered(random_sample())
+    }
+
+    /// Jitter for a caller-supplied sample in `[0, 1)`, so tests can be exact.
+    fn jittered(&self, sample: f64) -> Duration {
+        let spread = 2.0 * f64::from(Self::JITTER_PERCENT) / 100.0;
+        let factor = 1.0 - spread / 2.0 + spread * sample;
+        self.current.mul_f64(factor).min(Self::MAX)
+    }
+}
+
+/// A uniform sample in `[0, 1)` from the OS random source.
+fn random_sample() -> f64 {
+    let mut bytes = [0u8; 8];
+    if getrandom::fill(&mut bytes).is_err() {
+        // A missing random source must not stop reconnects; the midpoint keeps
+        // the unjittered delay instead.
+        return 0.5;
+    }
+    (u64::from_le_bytes(bytes) >> 11) as f64 / (1u64 << 53) as f64
 }
 
 fn parse_startup_args(args: &[String]) -> anyhow::Result<StartupArgs> {
@@ -1004,6 +1059,124 @@ async fn exec(command: String, cwd: Option<String>, timeout_ms: u64) -> Operatio
 mod tests {
     use super::*;
     use infra_protocol::ExecOutput;
+
+    /// Deterministic samples in `[0, 1)` so the jitter bounds are reproducible.
+    fn samples(count: usize) -> impl Iterator<Item = f64> {
+        let mut state = 0x2545_f491_4f6c_dd1du64;
+        (0..count).map(move |_| {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            (state >> 11) as f64 / (1u64 << 53) as f64
+        })
+    }
+
+    #[test]
+    fn reconnect_jitter_stays_within_25_percent_of_each_delay() {
+        let mut backoff = ReconnectBackoff::new();
+        let mut ladder = Vec::new();
+        for _ in 0..8 {
+            ladder.push(backoff.current);
+            backoff.grow();
+        }
+        assert_eq!(
+            ladder,
+            [1, 2, 4, 8, 16, 30, 30, 30]
+                .map(Duration::from_secs)
+                .to_vec(),
+            "the ladder must stay exponential from 1 s to the 30 s cap"
+        );
+        for delay in ladder {
+            let backoff = ReconnectBackoff { current: delay };
+            let low = delay.mul_f64(0.75);
+            let high = delay.mul_f64(1.25);
+            let mut observed_low = Duration::MAX;
+            let mut observed_high = Duration::ZERO;
+            for sample in samples(2_000) {
+                let jittered = backoff.jittered(sample);
+                assert!(
+                    jittered >= low && jittered <= high,
+                    "jitter {jittered:?} for {delay:?} left the plus-or-minus 25 percent band {low:?}..={high:?}"
+                );
+                observed_low = observed_low.min(jittered);
+                observed_high = observed_high.max(jittered);
+            }
+            // A constant delay would satisfy the band trivially, so the sample
+            // must also cover most of it. At the cap the effective band is the
+            // clamped one, because the cap wins over the upper jitter bound.
+            let covered = observed_high - observed_low;
+            let band = high.min(ReconnectBackoff::MAX) - low;
+            assert!(
+                covered.mul_f64(10.0) >= band.mul_f64(9.0),
+                "jitter for {delay:?} covered {covered:?} of the {band:?} band"
+            );
+        }
+        // The production path draws its sample from the OS random source.
+        let backoff = ReconnectBackoff::new();
+        for _ in 0..200 {
+            let sleep = backoff.sleep_duration();
+            assert!(
+                sleep >= Duration::from_millis(750) && sleep <= Duration::from_millis(1_250),
+                "a base-delay sleep must stay near one second, got {sleep:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn reconnect_jitter_never_exceeds_the_30_second_cap() {
+        let mut backoff = ReconnectBackoff::new();
+        for _ in 0..16 {
+            backoff.grow();
+        }
+        assert_eq!(backoff.current, Duration::from_secs(30));
+        let mut observed_low = Duration::MAX;
+        let mut observed_high = Duration::ZERO;
+        for sample in samples(5_000) {
+            let jittered = backoff.jittered(sample);
+            assert!(
+                jittered <= Duration::from_secs(30),
+                "jitter {jittered:?} exceeded the 30 s cap"
+            );
+            assert!(
+                jittered >= Duration::from_millis(22_500),
+                "jitter {jittered:?} fell below the 25 percent floor"
+            );
+            observed_low = observed_low.min(jittered);
+            observed_high = observed_high.max(jittered);
+        }
+        // The cap wins over the upper jitter bound, so the spread is one-sided
+        // at the top of the ladder but still wide enough to break a wave.
+        assert_eq!(observed_high, Duration::from_secs(30));
+        assert!(
+            observed_low <= Duration::from_millis(23_000),
+            "a capped delay must still jitter downward, got {observed_low:?}"
+        );
+        for _ in 0..200 {
+            let sleep = backoff.sleep_duration();
+            assert!(
+                sleep <= Duration::from_secs(30),
+                "a capped sleep must never exceed 30 s, got {sleep:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_clean_close_resets_the_reconnect_delay_to_one_second() {
+        let mut backoff = ReconnectBackoff::new();
+        for _ in 0..6 {
+            backoff.grow();
+        }
+        assert_eq!(backoff.current, Duration::from_secs(30));
+        backoff.reset();
+        assert_eq!(backoff.current, Duration::from_secs(1));
+        for sample in samples(1_000) {
+            let jittered = backoff.jittered(sample);
+            assert!(
+                jittered >= Duration::from_millis(750) && jittered <= Duration::from_millis(1_250),
+                "a clean close must sleep about one second, got {jittered:?}"
+            );
+        }
+    }
 
     #[tokio::test]
     async fn exec_captures_successful_output() {
