@@ -569,9 +569,14 @@ async fn copy_job_pauses_while_the_destination_is_offline_and_resumes_when_it_re
     destination_agent.stop();
     let paused = wait_for_copy_state(&fixture, &job_id, &["paused"], Duration::from_secs(60)).await;
     let reason = paused["last_error"].as_str().expect("pause reason");
+    // Which of the two valid pause causes fires is decided by a race: if the
+    // driver notices the endpoint gone between chunks the reason names the
+    // offline endpoint; if the connection closes with a chunk in flight the
+    // pause is the uncertain-chunk path. Both preserve progress and carry
+    // resume metadata; any other cause is a bug.
     assert!(
-        reason.contains("offline"),
-        "the pause must name the offline endpoint: {reason}"
+        reason.contains("offline") || reason.contains("uncertain chunk"),
+        "the pause must name a known pause cause (offline endpoint or uncertain chunk): {reason}"
     );
     assert!(
         paused["bytes_done"].as_u64().unwrap_or(0) >= before,
