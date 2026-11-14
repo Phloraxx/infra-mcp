@@ -12,7 +12,7 @@ const transferId = '00000000-0000-4000-8000-000000000003';
 const badName = '<img src=x onerror="window.xss=1">';
 const devices = [
   {device_id:'online',device_name:badName,platform:'linux',arch:'aarch64',agent_version:'test',online:true,capabilities:['exec','files','terminal','jobs','transfer','desktop'],active_terminals:1,last_seen_unix_ms:Date.now()},
-  {device_id:'offline',device_name:'Rose',platform:'windows',arch:'x86_64',agent_version:'test',online:false,connection_state:'reconnecting',last_disconnect_reason:'heartbeat_timeout',capabilities:['terminal'],last_seen_unix_ms:Date.now()-90000}
+  {device_id:'offline',device_name:'Rose',platform:'windows',arch:'x86_64',agent_version:'test',online:false,connection_state:'reconnecting',last_disconnect_reason:'heartbeat_timeout',last_disconnect_at_unix_ms:Date.now()-600000,capabilities:['terminal'],last_seen_unix_ms:Date.now()-90000}
 ];
 let sessions = [
   {id:terminalId,kind:'terminal',status:'running',device_id:'online',device_name:badName,device_online:true,started_at_unix_ms:Date.now()},
@@ -181,6 +181,7 @@ const server=http.createServer(async(req,res)=>{
     assert.equal(await page.evaluate(()=>document.activeElement?.dataset.device),'offline');
     await page.keyboard.press('ArrowUp');
     assert.equal(await page.evaluate(()=>document.activeElement?.dataset.device),'online');
+    assert.match(await page.locator('#overview-devices .drop-note').first().textContent(),/dropped/);
     if(process.env.INFRA_QA_OVERVIEW_SCREENSHOT||process.env.INFRA_QA_MOBILE_OVERVIEW_SCREENSHOT){
       // Public design previews use readable sample labels; the functional
       // tests below still exercise the original hostile-name/XSS fixture.

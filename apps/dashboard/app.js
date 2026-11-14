@@ -147,7 +147,7 @@ function shortReason(r){const map={heartbeat_timeout:'heartbeat',socket_error:'l
 function dropNote(d){
   if(!d.last_disconnect_reason||!d.last_disconnect_at_unix_ms)return '';
   if(Date.now()-d.last_disconnect_at_unix_ms>86400000)return '';
-  return `${DOT}<span class="drop-note" title="last disconnect: ${esc(d.last_disconnect_reason)}">dropped ${relative(d.last_disconnect_at_unix_ms)}${DOT}${esc(shortReason(d.last_disconnect_reason))}</span>`;
+  return ` · <span class="drop-note" title="last disconnect: ${esc(d.last_disconnect_reason)}">dropped ${relative(d.last_disconnect_at_unix_ms)} · ${esc(shortReason(d.last_disconnect_reason))}</span>`;
 }
 function deviceRow(d){
   const status=deviceState(d),work=(d.active_jobs||0)+(d.active_terminals||0)+(d.active_transfers||0),caps=d.capabilities||[];
