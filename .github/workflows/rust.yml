@@ -3,7 +3,14 @@ name: Rust
 on:
   push:
     branches: [main]
+    paths-ignore:
+      - 'README.md'
+      - 'docs/**'
   pull_request:
+    paths-ignore:
+      - 'README.md'
+      - 'docs/**'
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -28,7 +35,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, ubuntu-24.04-arm, macos-latest, windows-latest]
+        os: [ubuntu-latest, ubuntu-24.04-arm, macos-latest]
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
@@ -63,10 +70,10 @@ jobs:
         if: matrix.os == 'ubuntu-latest'
         run: python3 scripts/smoke-mcp-contract.py
       - name: Build native acceptance binaries
-        if: matrix.os == 'macos-latest' || matrix.os == 'windows-latest'
+        if: matrix.os == 'macos-latest'
         run: cargo build --release -p infra-agent -p infra-cli
       - name: Check native release metadata
-        if: matrix.os == 'macos-latest' || matrix.os == 'windows-latest'
+        if: matrix.os == 'macos-latest'
         shell: pwsh
         run: |
           $InfraPython = if ($IsWindows) { 'python' } else { 'python3' }
@@ -80,22 +87,5 @@ jobs:
           path: |
             target/release/infra
             target/release/infra-agent
-          if-no-files-found: error
-          retention-days: 7
-      - name: Windows installer and signed enrollment smoke
-        if: matrix.os == 'windows-latest'
-        shell: powershell
-        run: |
-          cargo build -p infra-gateway
-          if ($LASTEXITCODE -ne 0) { throw "Gateway build failed" }
-          .\scripts\smoke-install-windows.ps1
-      - name: Upload Windows x64 acceptance binaries
-        if: matrix.os == 'windows-latest'
-        uses: actions/upload-artifact@v7
-        with:
-          name: infra-acceptance-windows-x86_64
-          path: |
-            target/release/infra.exe
-            target/release/infra-agent.exe
           if-no-files-found: error
           retention-days: 7

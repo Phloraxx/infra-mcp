@@ -1,0 +1,48 @@
+name: Windows release check
+
+# Windows runners are slow to provision and queue heavily, so the Windows
+# suite is not part of the per-push matrix. It runs on release tags and on
+# demand instead.
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    name: windows-latest
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.99.0
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo fmt --all -- --check
+      - run: cargo clippy --workspace --all-targets -- -D warnings
+      - run: cargo test --workspace
+      - name: Build native acceptance binaries
+        run: cargo build --release -p infra-agent -p infra-cli
+      - name: Check native release metadata
+        shell: pwsh
+        run: |
+          python scripts/release_contract.py --binaries target/release
+          if ($LASTEXITCODE -ne 0) { throw "Native release metadata check failed" }
+      - name: Windows installer and signed enrollment smoke
+        shell: powershell
+        run: |
+          cargo build -p infra-gateway
+          if ($LASTEXITCODE -ne 0) { throw "Gateway build failed" }
+          .\scripts\smoke-install-windows.ps1
+      - name: Upload Windows x64 acceptance binaries
+        uses: actions/upload-artifact@v7
+        with:
+          name: infra-acceptance-windows-x86_64
+          path: |
+            target/release/infra.exe
+            target/release/infra-agent.exe
+          if-no-files-found: error
+          retention-days: 7

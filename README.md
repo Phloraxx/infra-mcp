@@ -198,7 +198,7 @@ cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace
 ```
 
-CI runs the full matrix on Ubuntu, macOS and Windows (x64 + ARM64), an Android job for the companion app, a headless browser suite for the dashboard, and release contract/signing checks. Design principles and workflow notes: [AGENTS.md](AGENTS.md), [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md).
+CI runs the matrix on Ubuntu (x64 + ARM64) and macOS on every push, plus a headless browser suite for the dashboard, an Android job for the companion app, and release contract/signing checks; the full Windows suite runs on release tags. Design principles and workflow notes: [AGENTS.md](AGENTS.md), [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md).
 
 ## Status and roadmap
 

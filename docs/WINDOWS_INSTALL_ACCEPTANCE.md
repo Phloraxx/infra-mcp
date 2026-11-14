@@ -14,7 +14,7 @@ Fix in candidate branch: make Windows installer preflight both binary assets bef
 
 ## Candidate Windows staging acceptance
 
-`scripts/smoke-install-windows.ps1` is run by `.github/workflows/rust.yml` on an isolated `windows-latest` runner under Windows PowerShell 5.1. It verifies:
+`scripts/smoke-install-windows.ps1` is run by `.github/workflows/windows-release-check.yml` on an isolated `windows-latest` runner (on release tags and manual dispatch) under Windows PowerShell 5.1. It verifies:
 - missing second binary fails without modifying installation/state;
 - paths with spaces, two-binary local source staging, user-level `--no-startup`;
 - ephemeral loopback gateway, one-time enrollment, persisted identity and configuration;
