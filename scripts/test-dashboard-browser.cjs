@@ -6,6 +6,24 @@ const http = require('node:http');
 const path = require('node:path');
 const { chromium } = require('playwright');
 const root = path.resolve(__dirname, '../apps/dashboard');
+// Second-pass fixture: a redacted snapshot of a real gateway /api/overview
+// response (scripts/snapshot-overview-fixture.cjs). The hand-written fixture
+// below deliberately omits optional fields; this one carries every field the
+// gateway emits, so a render path that only works on the sparse fixture fails.
+const snapshot = JSON.parse(fs.readFileSync(path.join(__dirname, 'fixtures/overview-snapshot.json'), 'utf8'));
+const SNAPSHOT_DEVICE_FIELDS = ['device_id','device_name','agent_version','platform','arch','capabilities','online','revoked','last_seen_unix_ms','connection_state','last_disconnect_reason','last_disconnect_at_unix_ms','connection_generation','active_jobs','active_terminals','active_transfers'];
+const SNAPSHOT_SESSION_FIELDS = ['id','kind','status','boot_id','started_at_unix_ms','device_id','device_name','device_online'];
+const SNAPSHOT_ACTIVITY_FIELDS = ['id','at_unix_ms','device_id','device_name','action','outcome','request_id'];
+for (const [kind, entries, fields] of [['device', snapshot.devices, SNAPSHOT_DEVICE_FIELDS], ['session', snapshot.sessions, SNAPSHOT_SESSION_FIELDS], ['activity', snapshot.activity, SNAPSHOT_ACTIVITY_FIELDS]]) {
+  assert(Array.isArray(entries) && entries.length > 0, `overview snapshot has no ${kind} entries`);
+  for (const entry of entries) {
+    assert.deepEqual(Object.keys(entry).sort(), [...fields].sort(), `overview snapshot ${kind} shape drifted from the gateway response; regenerate with scripts/snapshot-overview-fixture.cjs`);
+  }
+}
+// The fixture stores timestamps against a fixed epoch so no real capture time is
+// committed; shift them onto the current clock before serving them.
+const snapshotShift = Date.now() - snapshot._meta.epoch_unix_ms;
+const snapshotOverview = JSON.parse(JSON.stringify({devices: snapshot.devices, sessions: snapshot.sessions, activity: snapshot.activity}), (key, value) => key.endsWith('_unix_ms') && typeof value === 'number' ? value + snapshotShift : value);
 const terminalId = '00000000-0000-4000-8000-000000000001';
 const jobId = '00000000-0000-4000-8000-000000000002';
 const transferId = '00000000-0000-4000-8000-000000000003';
@@ -19,7 +37,7 @@ let sessions = [
   {id:jobId,kind:'job',status:'running',device_id:'online',device_name:badName,device_online:true,started_at_unix_ms:Date.now()},
   {id:transferId,kind:'transfer',status:'ready',device_id:'online',device_name:badName,device_online:true,started_at_unix_ms:Date.now()}
 ];
-let overviewMode=null, overviewCalls=0, hangEnrollment=false, enrollmentCalls=0;
+let overviewMode=null, overviewCalls=0, hangEnrollment=false, enrollmentCalls=0, useSnapshot=false;
 let fileListMode='legacy',failFilePage=false,filePageDelay=0,statusReply='ok';
 const pairId='00000000-0000-4000-8000-000000000004',pairDeviceId='00000000-0000-4000-8000-000000000005';
 let pairState='pending',pairApproveState='approved',pairOnline=false,pairReply='ok',pairDelay=0,hangApproval=false,approvalCalls=0,pairChecks=0;
@@ -71,7 +89,7 @@ const server=http.createServer(async(req,res)=>{
     if(req.url==='/api/pair/00000000-0000-4000-8000-000000000004/reject'&&req.method==='POST')return send({ok:true});
     if(req.url==='/api/enrollments'&&req.method==='POST'){enrollmentCalls++;if(hangEnrollment)return hang(res);return send({code:'fixture-5-minute-code',expires_at_unix_ms:Date.now()+300000});}
     if(req.url==='/api/events'){res.writeHead(200,{'Content-Type':'text/event-stream'});res.write(': connected\n\n');streams.add(res);res.on('close',()=>streams.delete(res));return;}
-    if(req.url==='/api/overview'){overviewCalls++;if(overviewMode)return hang(res,overviewMode==='body');return send({devices:fixtureDevices(),sessions,activity:[]});}
+    if(req.url==='/api/overview'){overviewCalls++;if(useSnapshot)return send(snapshotOverview);if(overviewMode)return hang(res,overviewMode==='body');return send({devices:fixtureDevices(),sessions,activity:[]});}
     if(req.url==='/api/devices')return send(fixtureDevices());
     if(req.url==='/api/devices/'+pairDeviceId+'/operations'){
       pairChecks++;const reply=pairReply,delay=pairDelay;
@@ -444,6 +462,21 @@ const server=http.createServer(async(req,res)=>{
     await page.locator('#overview-devices .device-row').first().waitFor();
     assert.equal(await page.evaluate(()=>getComputedStyle(document.documentElement).colorScheme),'dark');
 
+    // Second pass: the same UI against the real-shape snapshot. Every field the
+    // gateway emits is present, including the optional ones the sparse fixture
+    // omits, so a render path that only works on the sparse fixture fails here.
+    useSnapshot=true;
+    await page.reload();
+    await page.waitForFunction(count=>document.querySelectorAll('#overview-devices .device-row').length===count,snapshot.devices.length);
+    assert.equal(await page.locator('#overview-sessions .session-row').count(),snapshot.sessions.length);
+    assert.equal(await page.locator('#overview-activity .activity-row').count(),snapshot.activity.length);
+    assert.equal(await page.locator('#overview-devices .status.revoked').count(),1);
+    assert.equal(await page.evaluate(()=>window.xss),undefined);
+    await assertNoErrors('real-shape snapshot');
+    useSnapshot=false;
+    await page.reload();
+    await page.locator('#overview-devices [data-device="online"]').waitFor();
+
     // Both absent headers and a stalled JSON body must release the coalesced
     // refresh promise. Last confirmed device data remains visibly stale.
     for(const mode of ['headers','body']){
@@ -585,6 +618,6 @@ const server=http.createServer(async(req,res)=>{
     assert.equal(await page.evaluate(()=>state.listing),null);
     assert.equal(await page.locator('#files-path').inputValue(),'.');
     assert.deepEqual(errors,[]);
-    console.log('Dashboard browser gate PASS: zero console/page errors after sign-in, overview, device drawer, session pop-up, files, settings, terminal, sessions and the pairing dialog; pairing completion with live proof, uncertainty/no replay, bounded recovery, expiry and dialog/auth isolation; auth/device/XSS/terminal/session/CSP coverage; file pages with keyboard/mobile navigation, byte-shortened offsets, retained error recovery, stale-response isolation, legacy fallback and private-state clearing; bounded header/body timeout recovery and mutation no-replay.');
+    console.log('Dashboard browser gate PASS: real-shape overview snapshot second pass; zero console/page errors after sign-in, overview, device drawer, session pop-up, files, settings, terminal, sessions and the pairing dialog; pairing completion with live proof, uncertainty/no replay, bounded recovery, expiry and dialog/auth isolation; auth/device/XSS/terminal/session/CSP coverage; file pages with keyboard/mobile navigation, byte-shortened offsets, retained error recovery, stale-response isolation, legacy fallback and private-state clearing; bounded header/body timeout recovery and mutation no-replay.');
   }finally{for(const response of hungResponses)response.destroy();await browser.close();for(const stream of streams)stream.end();await new Promise(resolve=>server.close(resolve));}
 })().catch(error=>{console.error(error);server.close();process.exitCode=1;});

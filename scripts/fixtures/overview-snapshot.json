@@ -1,0 +1,143 @@
+{
+  "_meta": {
+    "generated_by": "scripts/snapshot-overview-fixture.cjs",
+    "redacted": true,
+    "epoch_unix_ms": 1767225600000,
+    "source": "gateway-response-schema"
+  },
+  "devices": [
+    {
+      "device_id": "device-1",
+      "device_name": "Device 1",
+      "agent_version": "redacted",
+      "platform": "linux",
+      "arch": "aarch64",
+      "capabilities": [
+        "exec",
+        "files",
+        "files.list_page",
+        "terminal",
+        "jobs",
+        "transfer",
+        "connection.readiness_v1"
+      ],
+      "online": true,
+      "revoked": false,
+      "last_seen_unix_ms": 1767225596000,
+      "connection_state": "online",
+      "last_disconnect_reason": null,
+      "last_disconnect_at_unix_ms": null,
+      "connection_generation": 7,
+      "active_jobs": 1,
+      "active_terminals": 1,
+      "active_transfers": 0
+    },
+    {
+      "device_id": "device-2",
+      "device_name": "Device 2",
+      "agent_version": "redacted",
+      "platform": "darwin",
+      "arch": "aarch64",
+      "capabilities": [
+        "exec",
+        "files",
+        "terminal",
+        "jobs",
+        "transfer"
+      ],
+      "online": false,
+      "revoked": false,
+      "last_seen_unix_ms": 1767225060000,
+      "connection_state": "reconnecting",
+      "last_disconnect_reason": "heartbeat_timeout",
+      "last_disconnect_at_unix_ms": 1767225000000,
+      "connection_generation": null,
+      "active_jobs": 0,
+      "active_terminals": 0,
+      "active_transfers": 0
+    },
+    {
+      "device_id": "device-3",
+      "device_name": "Device 3",
+      "agent_version": "redacted",
+      "platform": "windows",
+      "arch": "x86_64",
+      "capabilities": [
+        "exec",
+        "files",
+        "terminal"
+      ],
+      "online": false,
+      "revoked": true,
+      "last_seen_unix_ms": 1767139200000,
+      "connection_state": "revoked",
+      "last_disconnect_reason": "socket_closed",
+      "last_disconnect_at_unix_ms": 1767139200000,
+      "connection_generation": null,
+      "active_jobs": 0,
+      "active_terminals": 0,
+      "active_transfers": 0
+    }
+  ],
+  "sessions": [
+    {
+      "id": "00000000-0000-4000-8000-000000000001",
+      "kind": "terminal",
+      "status": "running",
+      "boot_id": "boot-1",
+      "started_at_unix_ms": 1767225480000,
+      "device_id": "device-1",
+      "device_name": "Device 1",
+      "device_online": true
+    },
+    {
+      "id": "00000000-0000-4000-8000-000000000002",
+      "kind": "job",
+      "status": "running",
+      "boot_id": "boot-1",
+      "started_at_unix_ms": 1767225300000,
+      "device_id": "device-1",
+      "device_name": "Device 1",
+      "device_online": true
+    },
+    {
+      "id": "00000000-0000-4000-8000-000000000003",
+      "kind": "transfer",
+      "status": "ready",
+      "boot_id": "boot-1",
+      "started_at_unix_ms": 1767225540000,
+      "device_id": "device-1",
+      "device_name": "Device 1",
+      "device_online": true
+    }
+  ],
+  "activity": [
+    {
+      "id": 1,
+      "at_unix_ms": 1767225595000,
+      "device_id": "device-1",
+      "device_name": "Device 1",
+      "action": "device.connect",
+      "outcome": "ok",
+      "request_id": null
+    },
+    {
+      "id": 2,
+      "at_unix_ms": 1767225570000,
+      "device_id": "device-1",
+      "device_name": "Device 1",
+      "action": "exec",
+      "outcome": "ok",
+      "request_id": "request-1"
+    },
+    {
+      "id": 3,
+      "at_unix_ms": 1767225000000,
+      "device_id": "device-2",
+      "device_name": "Device 2",
+      "action": "device.disconnect",
+      "outcome": "ok",
+      "request_id": null
+    }
+  ]
+}
