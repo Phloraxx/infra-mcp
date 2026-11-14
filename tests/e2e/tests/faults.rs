@@ -578,6 +578,14 @@ async fn copy_job_pauses_while_the_destination_is_offline_and_resumes_when_it_re
         reason.contains("offline") || reason.contains("uncertain chunk"),
         "the pause must name a known pause cause (offline endpoint or uncertain chunk): {reason}"
     );
+    // An uncertain chunk must also say which endpoint it was heading to. The
+    // destination is the side that went away here, so the reason names it.
+    if reason.contains("uncertain chunk") {
+        assert!(
+            reason.contains("destination endpoint"),
+            "an uncertain chunk must name the endpoint it was heading to: {reason}"
+        );
+    }
     assert!(
         paused["bytes_done"].as_u64().unwrap_or(0) >= before,
         "a pause must not lose confirmed progress: {paused}"
