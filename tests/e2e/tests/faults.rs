@@ -595,3 +595,39 @@ async fn a_stalled_agent_is_retired_on_the_heartbeat_deadline_and_replaced_clean
         "the retirement must not replace the newer generation: {device}"
     );
 }
+
+/// W5: one reconnect produces exactly one changed reconcile, and the idle
+/// pings that follow do not drive dashboard churn.
+#[tokio::test]
+async fn one_reconnect_produces_exactly_one_changed_reconcile() {
+    let fixture = Fixture::start().await;
+    // Wait for the initial connect's reconcile, then count from a clean slate.
+    for _ in 0..100 {
+        if fixture
+            .events
+            .count_for("sessions_changed", &fixture.device_id)
+            >= 1
+        {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    fixture.events.drain();
+
+    let connection = fixture.proxy.current_connection();
+    fixture.proxy.cut(connection);
+    fixture.wait_online().await;
+    // Cover at least one heartbeat interval: the opportunistic reconcile after a
+    // probe would have produced extra events under the old behaviour.
+    tokio::time::sleep(Duration::from_secs(12)).await;
+
+    let changed = fixture
+        .events
+        .count_for("sessions_changed", &fixture.device_id);
+    assert_eq!(
+        changed,
+        1,
+        "one reconnect must produce exactly one changed reconcile: {:?}",
+        fixture.events.take()
+    );
+}
