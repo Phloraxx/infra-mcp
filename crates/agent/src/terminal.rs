@@ -1,5 +1,8 @@
 use crate::worker_launch::{self, WorkerKind};
-use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
+use base64::{
+    Engine as _,
+    engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD},
+};
 use infra_protocol::{
     DEFAULT_READ_LIMIT, MAX_READ_LIMIT, OperationResult, ReconcileItem, ReconcileKind,
     TerminalAction, TerminalRequest,
@@ -50,10 +53,27 @@ struct SessionMeta {
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(tag = "action", rename_all = "snake_case")]
 enum ControlRequest {
-    Write { token: String, data: String },
-    Resize { token: String, rows: u16, cols: u16 },
-    Close { token: String },
-    Status { token: String },
+    Write {
+        token: String,
+        data: String,
+    },
+    /// Raw terminal input. The worker control socket is a local JSON protocol, so
+    /// the bytes are base64 here; the agent-to-gateway wire carries them raw.
+    WriteBytes {
+        token: String,
+        data_base64: String,
+    },
+    Resize {
+        token: String,
+        rows: u16,
+        cols: u16,
+    },
+    Close {
+        token: String,
+    },
+    Status {
+        token: String,
+    },
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -98,6 +118,11 @@ impl Terminals {
             } => self.read(session_id, offset.unwrap_or(0), bounded_length(length)),
             TerminalAction::Write { session_id, data } => {
                 self.control(session_id, |token| ControlRequest::Write { token, data })
+            }
+            // The payload of a binary write arrives in a bulk frame; the receive
+            // loop pairs it with this announcement before dispatching.
+            TerminalAction::WriteBinary { .. } => {
+                Err("binary terminal input must arrive in a bulk frame".into())
             }
             TerminalAction::Resize {
                 session_id,
@@ -233,6 +258,19 @@ impl Terminals {
             "output": String::from_utf8_lossy(&bytes), "has_more": next < end_offset,
             "offset_expired": requested_offset < meta.base_offset,
         }))
+    }
+
+    /// Write raw terminal input. Used by the bulk-frame path so arbitrary bytes
+    /// reach the PTY without a JSON string round trip on the agent wire.
+    pub fn write_bytes(&self, id: Uuid, data: &[u8]) -> Result<serde_json::Value, String> {
+        if data.is_empty() {
+            return Err("terminal input must not be empty".into());
+        }
+        let data_base64 = STANDARD.encode(data);
+        self.control(id, |token| ControlRequest::WriteBytes {
+            token,
+            data_base64,
+        })
     }
 
     fn control<F>(&self, id: Uuid, build: F) -> Result<serde_json::Value, String>
@@ -434,6 +472,21 @@ fn handle_control(
                     .write_all(data.as_bytes())
                     .map_err(|e| e.to_string())?;
                 writer.flush().map_err(|e| e.to_string())
+            }),
+        Ok(ControlRequest::WriteBytes {
+            token: supplied,
+            data_base64,
+        }) if supplied == token => STANDARD
+            .decode(data_base64)
+            .map_err(|_| "invalid terminal input encoding".to_string())
+            .and_then(|data| {
+                writer
+                    .lock()
+                    .map_err(|_| "writer lock poisoned".to_string())
+                    .and_then(|mut writer| {
+                        writer.write_all(&data).map_err(|e| e.to_string())?;
+                        writer.flush().map_err(|e| e.to_string())
+                    })
             }),
         Ok(ControlRequest::Resize {
             token: supplied,

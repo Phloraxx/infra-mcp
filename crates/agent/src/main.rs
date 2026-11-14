@@ -21,12 +21,19 @@ use identity::DeviceIdentity;
 use infra_local_state::{RuntimeStatus, now_ms, read_config, write_runtime};
 use infra_platform::identity as platform_identity;
 use infra_protocol::{
-    AgentOperation, AgentRequest, AgentResponse, AgentToGateway, DeviceAuthStart, DeviceHello,
-    GatewayToAgent, LegacyDeviceHello, OperationResult, PROTOCOL_VERSION, ReconcileSnapshot,
-    SignedDeviceHello,
+    AgentOperation, AgentRequest, AgentResponse, AgentToGateway, BulkFrame, BulkKind,
+    DeviceAuthStart, DeviceHello, GatewayToAgent, LegacyDeviceHello, OperationResult,
+    OwnedBulkFrame, PROTOCOL_VERSION, ReconcileSnapshot, SignedDeviceHello,
+    TERMINAL_BINARY_CAPABILITY, TRANSFER_BINARY_CAPABILITY, TerminalAction, TerminalRequest,
+    TransferAction, TransferRequest,
 };
 use jobs::Jobs;
-use std::{collections::BTreeMap, path::PathBuf, sync::Arc, time::Duration};
+use std::{
+    collections::{BTreeMap, HashMap},
+    path::PathBuf,
+    sync::Arc,
+    time::Duration,
+};
 use terminal::Terminals;
 use tokio::{
     process::Command,
@@ -55,6 +62,65 @@ struct AgentContext {
     jobs: Jobs,
     terminals: Terminals,
     transfers: Transfers,
+}
+
+/// One frame the writer task must put on the socket. JSON control frames and
+/// bulk payload frames share one channel so their order is the order they were
+/// queued: an announcement always precedes its payload.
+// The channel already carried `AgentToGateway` before bulk frames existed, so
+// the enum is no larger than the message type it replaced.
+#[allow(clippy::large_enum_variant)]
+enum Outbound {
+    Json(AgentToGateway),
+    Binary(Vec<u8>),
+}
+
+impl From<AgentToGateway> for Outbound {
+    fn from(message: AgentToGateway) -> Self {
+        Self::Json(message)
+    }
+}
+
+/// A bulk announcement waiting for the payload frame that completes it.
+struct PendingBulk {
+    /// Transfer or terminal id carried in the frame header.
+    id: Uuid,
+    /// Request id the eventual response must carry.
+    request_id: Uuid,
+    kind: BulkKind,
+    offset: u64,
+    length: usize,
+}
+
+/// Split a request into the announcement it is, if its payload arrives in a bulk
+/// frame. Everything else is dispatched normally.
+fn bulk_announcement(request: &AgentRequest) -> Option<PendingBulk> {
+    match &request.operation {
+        AgentOperation::Transfer(TransferRequest {
+            action:
+                TransferAction::UploadChunkBinary {
+                    transfer_id,
+                    offset,
+                    length,
+                },
+        }) => Some(PendingBulk {
+            id: *transfer_id,
+            request_id: request.id,
+            kind: BulkKind::UploadChunk,
+            offset: *offset,
+            length: *length,
+        }),
+        AgentOperation::Terminal(TerminalRequest {
+            action: TerminalAction::WriteBinary { session_id, length },
+        }) => Some(PendingBulk {
+            id: *session_id,
+            request_id: request.id,
+            kind: BulkKind::TerminalData,
+            offset: 0,
+            length: *length,
+        }),
+        _ => None,
+    }
 }
 
 #[derive(Debug)]
@@ -339,7 +405,9 @@ async fn run_connection(
             "jobs".into(),
             "jobs.wait_v1".into(),
             "terminal".into(),
+            TERMINAL_BINARY_CAPABILITY.into(),
             "transfer".into(),
+            TRANSFER_BINARY_CAPABILITY.into(),
             "system".into(),
             "network".into(),
             "services".into(),
@@ -441,34 +509,41 @@ async fn run_connection(
     // The gateway only understands the compact frame when it acknowledged the
     // capability; an old gateway keeps receiving full snapshots.
     let compact_reconcile = ack.reconcile_hash;
+    // Bulk frames are only accepted after the gateway acknowledged them; an old
+    // gateway omits the field and the JSON path stays in force.
+    let binary_frames = ack.binary_frames;
     let last_reconcile_hash = Arc::new(std::sync::Mutex::new(None::<String>));
 
-    let (out_tx, mut out_rx) = mpsc::channel::<AgentToGateway>(64);
+    let (out_tx, mut out_rx) = mpsc::channel::<Outbound>(64);
     let (heartbeat_tx, mut heartbeat_rx) = mpsc::channel::<AgentToGateway>(8);
     let writer = tokio::spawn(async move {
         loop {
             // Liveness must not queue behind large result/reconciliation bursts.
-            let message = tokio::select! {
+            let outbound = tokio::select! {
                 biased;
-                Some(message) = heartbeat_rx.recv() => message,
+                Some(message) = heartbeat_rx.recv() => Outbound::Json(message),
                 Some(message) = out_rx.recv() => message,
                 else => break,
             };
-            let text = serde_json::to_string(&message)?;
-            ws_tx.send(Message::Text(text.into())).await?;
+            match outbound {
+                Outbound::Json(message) => {
+                    let text = serde_json::to_string(&message)?;
+                    ws_tx.send(Message::Text(text.into())).await?;
+                }
+                Outbound::Binary(bytes) => ws_tx.send(Message::Binary(bytes.into())).await?,
+            }
         }
         Ok::<_, anyhow::Error>(())
     });
 
     out_tx
-        .send(reconcile_message(
-            &context,
-            &last_reconcile_hash,
-            compact_reconcile,
-        ))
+        .send(reconcile_message(&context, &last_reconcile_hash, compact_reconcile).into())
         .await?;
 
     let permits = Arc::new(Semaphore::new(MAX_CONCURRENT_REQUESTS));
+    // Announcements whose payload frame has not arrived yet. Connection-scoped:
+    // a cut connection drops them with the socket.
+    let mut pending_bulk: HashMap<Uuid, PendingBulk> = HashMap::new();
     loop {
         let frame = tokio::time::timeout(GATEWAY_IDLE_TIMEOUT, ws_rx.next())
             .await
@@ -489,11 +564,14 @@ async fn run_connection(
                                 .map_err(|_| {
                                     anyhow!("readiness response queue full; reconnecting")
                                 })?;
-                            let _ = out_tx.try_send(reconcile_message(
-                                &context,
-                                &last_reconcile_hash,
-                                compact_reconcile,
-                            ));
+                            let _ = out_tx.try_send(
+                                reconcile_message(
+                                    &context,
+                                    &last_reconcile_hash,
+                                    compact_reconcile,
+                                )
+                                .into(),
+                            );
                         }
                     }
                     Ok(GatewayToAgent::ConnectionReady(reply)) => {
@@ -516,6 +594,29 @@ async fn run_connection(
                         }
                     }
                     Ok(GatewayToAgent::Request(request)) => {
+                        if let Some(pending) = bulk_announcement(&request) {
+                            if !binary_frames {
+                                // A gateway that did not acknowledge bulk frames must
+                                // never send one; answer instead of waiting forever.
+                                out_tx
+                                    .try_send(Outbound::Json(AgentToGateway::Response(
+                                        AgentResponse {
+                                            id: request.id,
+                                            result: OperationResult::Failed {
+                                                error: "bulk binary frames were not negotiated on this connection".into(),
+                                            },
+                                        },
+                                    )))
+                                    .map_err(|_| anyhow!("agent response channel full; reconnecting"))?;
+                                continue;
+                            }
+                            if pending_bulk.insert(pending.id, pending).is_some() {
+                                return Err(anyhow!(
+                                    "duplicate bulk announcement for one transfer or session"
+                                ));
+                            }
+                            continue;
+                        }
                         // Never await a worker permit in the WebSocket receive loop: when
                         // all slots are busy, that would block Ping/Pong for up to a whole
                         // command timeout and cause an unnecessary device disconnect.
@@ -524,25 +625,32 @@ async fn run_connection(
                             let context = context.clone();
                             let last_hash = last_reconcile_hash.clone();
                             tokio::spawn(async move {
-                                let response = dispatch(request, context.clone()).await;
+                                let (response, payload) =
+                                    dispatch(request, context.clone(), binary_frames).await;
                                 drop(permit);
-                                let _ = out.send(AgentToGateway::Response(response)).await;
+                                let _ = out
+                                    .send(Outbound::Json(AgentToGateway::Response(response)))
+                                    .await;
+                                if let Some(frame) = payload {
+                                    // Immediately after its response: the gateway pairs
+                                    // the two on the same socket.
+                                    let _ = out.send(Outbound::Binary(frame.encode())).await;
+                                }
                                 // Reconcile newly finished workers after each operation.
                                 let _ = out
-                                    .send(reconcile_message(
-                                        &context,
-                                        &last_hash,
-                                        compact_reconcile,
-                                    ))
+                                    .send(
+                                        reconcile_message(&context, &last_hash, compact_reconcile)
+                                            .into(),
+                                    )
                                     .await;
                             });
                         } else {
-                            out_tx.try_send(AgentToGateway::Response(AgentResponse {
+                            out_tx.try_send(Outbound::Json(AgentToGateway::Response(AgentResponse {
                                 id: request.id,
                                 result: OperationResult::Failed {
                                     error: "agent_busy: concurrent request limit reached; retry later".into(),
                                 },
-                            })).map_err(|_| anyhow::anyhow!("agent response channel full; reconnecting"))?;
+                            }))).map_err(|_| anyhow::anyhow!("agent response channel full; reconnecting"))?;
                         }
                     }
                     Ok(GatewayToAgent::Ping) => {
@@ -550,17 +658,101 @@ async fn run_connection(
                             anyhow::anyhow!("heartbeat response queue full; reconnecting")
                         })?;
                         // Reconcile is opportunistic: no work snapshot is worth losing liveness.
-                        let _ = out_tx.try_send(reconcile_message(
-                            &context,
-                            &last_reconcile_hash,
-                            compact_reconcile,
-                        ));
+                        let _ = out_tx.try_send(
+                            reconcile_message(&context, &last_reconcile_hash, compact_reconcile)
+                                .into(),
+                        );
                     }
                     Ok(GatewayToAgent::HelloAck(_)) | Ok(GatewayToAgent::AuthChallenge(_)) => {
                         warn!("unexpected handshake frame ignored")
                     }
                     Err(err) => warn!(%err, "invalid gateway frame"),
                 }
+            }
+            Message::Binary(bytes) => {
+                // Branch before any deserialization: a binary frame is never JSON.
+                if !binary_frames {
+                    return Err(anyhow!(
+                        "binary frame received on a connection that did not negotiate bulk frames"
+                    ));
+                }
+                let frame = BulkFrame::decode(&bytes)
+                    .map_err(|error| anyhow!("malformed bulk frame: {error}"))?;
+                let Some(pending) = pending_bulk.remove(&frame.id) else {
+                    return Err(anyhow!(
+                        "bulk frame for {} has no matching announcement",
+                        frame.id
+                    ));
+                };
+                if pending.kind != frame.kind
+                    || pending.offset != frame.offset
+                    || pending.length != frame.payload.len()
+                {
+                    return Err(anyhow!(
+                        "bulk frame does not match its announcement: expected {:?} at {} with {} bytes",
+                        pending.kind,
+                        pending.offset,
+                        pending.length
+                    ));
+                }
+                let payload = frame.payload.to_vec();
+                let out = out_tx.clone();
+                let context = context.clone();
+                let last_hash = last_reconcile_hash.clone();
+                let permits = permits.clone();
+                let PendingBulk {
+                    id,
+                    request_id,
+                    kind,
+                    offset,
+                    ..
+                } = pending;
+                tokio::spawn(async move {
+                    let permit = permits.acquire_owned().await.ok();
+                    let result = match kind {
+                        BulkKind::UploadChunk => {
+                            let transfers = context.transfers.clone();
+                            match tokio::task::spawn_blocking(move || {
+                                transfers.upload_chunk_bytes(id, offset, &payload)
+                            })
+                            .await
+                            {
+                                Ok(Ok(body)) => OperationResult::Ok { body },
+                                Ok(Err(error)) => OperationResult::Failed { error },
+                                Err(error) => OperationResult::Failed {
+                                    error: error.to_string(),
+                                },
+                            }
+                        }
+                        BulkKind::TerminalData => {
+                            let terminals = context.terminals.clone();
+                            match tokio::task::spawn_blocking(move || {
+                                terminals.write_bytes(id, &payload)
+                            })
+                            .await
+                            {
+                                Ok(Ok(body)) => OperationResult::Ok { body },
+                                Ok(Err(error)) => OperationResult::Failed { error },
+                                Err(error) => OperationResult::Failed {
+                                    error: error.to_string(),
+                                },
+                            }
+                        }
+                        BulkKind::DownloadChunk => OperationResult::Failed {
+                            error: "download chunks are never sent to an agent".into(),
+                        },
+                    };
+                    drop(permit);
+                    let _ = out
+                        .send(Outbound::Json(AgentToGateway::Response(AgentResponse {
+                            id: request_id,
+                            result,
+                        })))
+                        .await;
+                    let _ = out
+                        .send(reconcile_message(&context, &last_hash, compact_reconcile).into())
+                        .await;
+                });
             }
             Message::Ping(_) => {}
             Message::Close(_) => break,
@@ -625,7 +817,56 @@ where
     }
 }
 
-async fn dispatch(request: AgentRequest, context: AgentContext) -> AgentResponse {
+/// Run one request. The optional frame is a bulk payload the gateway pairs with
+/// the response on the same socket; only a negotiated download chunk produces one.
+async fn dispatch(
+    request: AgentRequest,
+    context: AgentContext,
+    binary_frames: bool,
+) -> (AgentResponse, Option<OwnedBulkFrame>) {
+    let id = request.id;
+    // A negotiated download chunk answers with JSON metadata plus a bulk payload
+    // frame; every other operation answers with JSON only.
+    if binary_frames
+        && let AgentOperation::Transfer(TransferRequest {
+            action:
+                TransferAction::DownloadChunk {
+                    transfer_id,
+                    offset,
+                    length,
+                },
+        }) = &request.operation
+    {
+        let (transfer_id, offset, length) = (*transfer_id, *offset, *length);
+        let transfers = context.transfers.clone();
+        let result = match tokio::task::spawn_blocking(move || {
+            transfers.download_chunk_binary(transfer_id, offset, length)
+        })
+        .await
+        {
+            Ok(Ok((mut body, bytes))) => {
+                body["data_binary"] = serde_json::json!(true);
+                body["length"] = serde_json::json!(bytes.len());
+                return (
+                    AgentResponse {
+                        id,
+                        result: OperationResult::Ok { body },
+                    },
+                    Some(OwnedBulkFrame::new(
+                        BulkKind::DownloadChunk,
+                        transfer_id,
+                        offset,
+                        bytes,
+                    )),
+                );
+            }
+            Ok(Err(error)) => OperationResult::Failed { error },
+            Err(error) => OperationResult::Failed {
+                error: error.to_string(),
+            },
+        };
+        return (AgentResponse { id, result }, None);
+    }
     let result = match request.operation {
         AgentOperation::Status => OperationResult::Ok {
             body: serde_json::json!({"pid": std::process::id(), "protocol": PROTOCOL_VERSION}),
@@ -724,10 +965,7 @@ async fn dispatch(request: AgentRequest, context: AgentContext) -> AgentResponse
                 })
         }
     };
-    AgentResponse {
-        id: request.id,
-        result,
-    }
+    (AgentResponse { id, result }, None)
 }
 
 async fn exec(command: String, cwd: Option<String>, timeout_ms: u64) -> OperationResult {

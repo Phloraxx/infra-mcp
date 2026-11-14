@@ -65,6 +65,11 @@ impl Transfers {
                 offset,
                 data_base64,
             } => self.upload_chunk(transfer_id, offset, &data_base64),
+            // The payload of a binary chunk arrives in a bulk frame, never in the
+            // announcement; the receive loop pairs the two before dispatching.
+            TransferAction::UploadChunkBinary { .. } => {
+                Err("binary upload chunk payload must arrive in a bulk frame".into())
+            }
             TransferAction::UploadCommit { transfer_id } => self.upload_commit(transfer_id),
             TransferAction::DownloadBegin { path } => self.download_begin(path),
             TransferAction::DownloadChunk {
@@ -135,14 +140,25 @@ impl Transfers {
         offset: u64,
         data_base64: &str,
     ) -> Result<serde_json::Value, String> {
+        let data = STANDARD
+            .decode(data_base64)
+            .map_err(|_| "data_base64 is invalid".to_string())?;
+        self.upload_chunk_bytes(id, offset, &data)
+    }
+
+    /// Write one chunk of an upload. Shared by the base64 JSON action and the
+    /// bulk-frame path so both enforce the same offset and size rules.
+    pub fn upload_chunk_bytes(
+        &self,
+        id: Uuid,
+        offset: u64,
+        data: &[u8],
+    ) -> Result<serde_json::Value, String> {
         let dir = self.root.join(id.to_string());
         let mut meta = read_meta(&dir).map_err(|_| "transfer not found".to_string())?;
         if meta.direction != "upload" || meta.status != "uploading" {
             return Err("transfer is not an active upload".into());
         }
-        let data = STANDARD
-            .decode(data_base64)
-            .map_err(|_| "data_base64 is invalid".to_string())?;
         if data.is_empty() || data.len() > MAX_CHUNK {
             return Err(format!("upload chunk must be 1..{MAX_CHUNK} decoded bytes"));
         }
@@ -169,7 +185,7 @@ impl Transfers {
             let mut existing = vec![0_u8; data.len()];
             file.read_exact(&mut existing)
                 .map_err(|error| error.to_string())?;
-            if existing != data {
+            if existing.as_slice() != data {
                 return Err("retry chunk does not match already-written data".into());
             }
             return Ok(serde_json::json!({
@@ -186,7 +202,7 @@ impl Transfers {
             .append(true)
             .open(&staging)
             .map_err(|error| error.to_string())?;
-        file.write_all(&data).map_err(|error| error.to_string())?;
+        file.write_all(data).map_err(|error| error.to_string())?;
         file.flush().map_err(|error| error.to_string())?;
         meta.bytes_transferred = next;
         meta.updated_at_unix_ms = now_ms();
@@ -283,6 +299,19 @@ impl Transfers {
         offset: u64,
         length: usize,
     ) -> Result<serde_json::Value, String> {
+        let (mut body, bytes) = self.download_chunk_bytes(id, offset, length)?;
+        body["data_base64"] = serde_json::json!(STANDARD.encode(bytes));
+        Ok(body)
+    }
+
+    /// Read one chunk of a download. The caller decides how to carry the bytes:
+    /// base64 inside the JSON body, or a bulk frame on a negotiated connection.
+    pub fn download_chunk_bytes(
+        &self,
+        id: Uuid,
+        offset: u64,
+        length: usize,
+    ) -> Result<(serde_json::Value, Vec<u8>), String> {
         let dir = self.root.join(id.to_string());
         let mut meta = read_meta(&dir).map_err(|_| "transfer not found".to_string())?;
         if meta.direction != "download" || !matches!(meta.status.as_str(), "ready" | "completed") {
@@ -317,13 +346,26 @@ impl Transfers {
             meta.status = "completed".into();
         }
         write_meta(&dir, &meta).map_err(|error| error.to_string())?;
-        Ok(serde_json::json!({
-            "transfer": public_meta(&meta),
-            "offset": start,
-            "next_offset": next,
-            "data_base64": STANDARD.encode(bytes),
-            "has_more": next < meta.size
-        }))
+        Ok((
+            serde_json::json!({
+                "transfer": public_meta(&meta),
+                "offset": start,
+                "next_offset": next,
+                "has_more": next < meta.size
+            }),
+            bytes,
+        ))
+    }
+
+    /// Read one chunk for the bulk-frame path. The bytes travel raw in a frame,
+    /// so the body carries only the metadata the gateway validates against.
+    pub fn download_chunk_binary(
+        &self,
+        id: Uuid,
+        offset: u64,
+        length: Option<usize>,
+    ) -> Result<(serde_json::Value, Vec<u8>), String> {
+        self.download_chunk_bytes(id, offset, length.unwrap_or(DEFAULT_CHUNK))
     }
 
     fn status(&self, id: Uuid) -> Result<serde_json::Value, String> {
@@ -503,5 +545,69 @@ mod tests {
         );
         assert_eq!(chunk["next_offset"], 7);
         assert!(started["transfer"]["sha256"].as_str().is_some());
+    }
+
+    #[test]
+    fn binary_chunks_share_the_offset_rules_and_return_the_same_bytes() {
+        let dir = tempdir().unwrap();
+        let transfers = Transfers::new(dir.path(), "boot".into()).unwrap();
+        let source = dir.path().join("source.bin");
+        let content: Vec<u8> = (0..1024).map(|index| (index % 251) as u8).collect();
+        fs::write(&source, &content).unwrap();
+        let started = transfers
+            .download_begin(source.to_string_lossy().into_owned())
+            .unwrap();
+        let id = Uuid::parse_str(started["transfer"]["id"].as_str().unwrap()).unwrap();
+
+        let (body, bytes) = transfers.download_chunk_binary(id, 100, Some(64)).unwrap();
+        assert_eq!(body["offset"], 100);
+        assert_eq!(body["next_offset"], 164);
+        assert_eq!(bytes, content[100..164]);
+        assert!(
+            body.get("data_base64").is_none(),
+            "the binary path must not base64 the payload: {body}"
+        );
+        let json = transfers.download_chunk(id, 100, 64).unwrap();
+        assert_eq!(
+            STANDARD
+                .decode(json["data_base64"].as_str().unwrap())
+                .unwrap(),
+            bytes,
+            "both paths must serve identical bytes"
+        );
+
+        let destination = dir.path().join("out.bin");
+        let upload = transfers
+            .upload_begin(
+                destination.to_string_lossy().into_owned(),
+                content.len() as u64,
+                None,
+                false,
+                false,
+            )
+            .unwrap();
+        let upload_id = Uuid::parse_str(upload["transfer"]["id"].as_str().unwrap()).unwrap();
+        transfers
+            .upload_chunk_bytes(upload_id, 0, &content[..512])
+            .unwrap();
+        let retry = transfers
+            .upload_chunk_bytes(upload_id, 0, &content[..512])
+            .unwrap();
+        assert_eq!(retry["idempotent_retry"], true);
+        assert!(
+            transfers
+                .upload_chunk_bytes(upload_id, 0, b"different")
+                .is_err(),
+            "a retry that disagrees with written bytes must fail"
+        );
+        assert!(
+            transfers.upload_chunk_bytes(upload_id, 0, &[]).is_err(),
+            "an empty chunk is not a chunk"
+        );
+        transfers
+            .upload_chunk_bytes(upload_id, 512, &content[512..])
+            .unwrap();
+        transfers.upload_commit(upload_id).unwrap();
+        assert_eq!(fs::read(destination).unwrap(), content);
     }
 }
