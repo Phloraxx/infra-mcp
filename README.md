@@ -1,167 +1,209 @@
 # Infra MCP
 
-Infra MCP is a personal multi-device control plane that lets AI clients such as ChatGPT, Hermes and Pi operate authorized macOS, Windows, and Linux computers through MCP.
+<div align="center">
 
-The product goal is not to be a thin SSH wrapper or a clone of Desktop Commander. The goal is a smaller, faster, more reliable, AI-native remote-control system with persistent terminals, structured system operations, resumable file transfer, multi-device routing, strong auditing, and eventually semantic desktop automation.
+**A private, self-hosted control plane that lets AI clients operate your computers.**
 
-> **Current status:** **Infra v1 is actively implemented in Rust alongside the working v0.3 deployment.** The Rust control plane now covers signed device enrollment/authentication, persistent SQLite state/audit metadata, MCP `devices`/`exec`/`files`/`search`/`processes`/`jobs`/`terminal`/`transfer` plus structured `system`/`network`/`services`/`containers`/`git`, durable workers and PTYs, resumable binary transfer, native installers/startup adapters, `infra` status/doctor/repair commands, and a live embedded dashboard foundation. The live v0.3 runtime remains untouched until the benchmark/cutover criteria are met.
+One Rust gateway, signed native agents on every desktop OS, an embedded dashboard, and MCP-native tools whose terminals, jobs and transfers survive disconnects.
 
-## Read this first (23 October 2026)
+![CI](https://github.com/Phloraxx/infra-mcp/actions/workflows/rust.yml/badge.svg)
+![Platforms](https://img.shields.io/badge/platforms-macOS%20%7C%20Windows%20%7C%20Linux%20%7C%20Android-blue)
+![License](https://img.shields.io/badge/license-MIT-green)
+![Release](https://img.shields.io/badge/release-v0.1.1--rc-orange)
 
-The **preferred near-term installer design** is [docs/ONE_COMMAND_SETUP.md](docs/ONE_COMMAND_SETUP.md), with broader pairing/UX design in [docs/ONBOARDING_REDESIGN.md](docs/ONBOARDING_REDESIGN.md). The underlying current-state review and infrastructure plan remain in [docs/CURRENT_REALITY.md](docs/CURRENT_REALITY.md) and [docs/NEXT_STEPS.md](docs/NEXT_STEPS.md).
+</div>
 
-**Next direction:** keep the existing Rust gateway, SQLite, outbound authenticated agents, and Android service. Make Tailscale optional rather than required: a private loopback gateway behind an existing HTTPS ingress, signed agents connecting over public `wss://` on 443, tested OAuth for MCP, and smooth installation/recovery. Measure persistent-connection latency and actual failures before introducing another transport or rewriting the UI. The feature branch is not production, and old fallback services stay until acceptance.
+![Infra MCP dashboard (desktop, dark edition)](docs/previews/dark/overview-desktop.png)
 
-## Android companion — Infra Phone v0.3
+> Screenshots use fixture data, not live devices. The mobile layout:
 
-The **Motorola Edge 60 Stylus** is enrolled as a first-class Android device over the existing signed Infra-MCP gateway. Live-verified v0.3 capabilities include scoped files, SHA-256-checked binary transfers, restricted SenseGuide development commands, user-reviewed APK installation and temporary, owner-enabled SenseGuide-only screenshot/tap access.
+<p align="center">
+  <img src="docs/previews/dark/overview-mobile.png" width="280" alt="Infra MCP dashboard on mobile">
+</p>
 
-**Start with [Android current status](docs/ANDROID_CURRENT_STATUS.md)** for the validated capabilities, owner workflow, privacy and safety constraints, and outstanding reliability tests. Historic desktop/Oracle v0.3 references elsewhere in this README describe a **different legacy deployment**, not the Android app version.
+---
 
-## Product principles
+## Why Infra MCP
 
-1. **Native and lightweight.** The agent should be one native binary with no Node/npm runtime dependency.
-2. **Multi-device first.** One client connection should control many authorized devices consistently.
-3. **Persistent interaction.** PTYs, jobs, transfers, and sessions must survive individual MCP requests and temporary network interruptions where possible.
-4. **Structured tools plus an escape hatch.** Prefer typed operations for common tasks, while retaining arbitrary user-level shell execution for flexibility.
-5. **Privilege separation.** The normal agent runs as the signed-in user. Elevated operations go through a separate, optional privileged helper.
-6. **AI-native desktop control.** Prefer accessibility/UI trees and semantic element targeting; use screenshots and coordinates as fallback mechanisms.
-7. **Auditable by default.** Every consequential operation should have a durable, searchable audit record without leaking secrets.
-8. **Easy to install, repair, update, and remove.** Reboot persistence and reconnection are product requirements, not manual setup notes.
+Most "AI runs your computer" setups are an SSH wrapper around a single machine. Infra MCP is a **control plane**: one gateway you own, many devices that dial out to it, and a compact set of typed MCP tools designed for models instead of humans typing shell commands.
 
-## Target architecture
+- **Native and lightweight.** Gateway, agent and CLI are Rust binaries. No Node.js runtime on your devices.
+- **Device-initiated connections.** Agents connect outbound over WSS; your machines never open an inbound port.
+- **Signed identities.** Every device owns a local Ed25519 key, enrolls through a one-time owner-approved code, and re-authenticates with a fresh challenge-response on every connection.
+- **Persistent work.** PTY sessions, background jobs and resumable file transfers live in durable worker processes and reconcile after reconnects, so a dropped link does not kill your work.
+- **Bounded and auditable.** Operations have explicit limits, explicit `outcome_unknown` states instead of unsafe replays, and a durable audit trail that never records secrets or file contents.
+- **Multi-device by design.** One client connection addresses a fleet: your Mac, Windows box, Linux server and Android phone behind the same gateway.
+
+## Architecture
 
 ```text
                          AI client
+                     (ChatGPT, MCP app)
                             |
                      MCP Streamable HTTP
-                            |
                             v
                   +---------------------+
                   |    infra-gateway    |
-                  |        Rust         |
-                  | OAuth + SQLite      |
-                  | sessions + audit    |
+                  |     Rust, SQLite    |
+                  |  auth, sessions,   |
+                  |  dispatch, audit    |
                   +----------+----------+
                              |
-                 persistent agent transport
-                   WSS first; QUIC-capable
+                  persistent agent transport
+                  (outbound WSS, reconnect,
+                   generation supersession)
                              |
-          +------------------+------------------+
+          +------------------+------------------+------------------+
+          |                  |                  |                  |
+          v                  v                  v                  v
+   +-------------+    +-------------+    +-------------+    +-------------+
+   | macOS agent |    |Windows agent|    | Linux agent |    |Android agent|
+   |    Rust     |    |    Rust     |    |    Rust     |    | Infra Phone |
+   +------+------+    +------+------+    +------+------+    +-------------+
           |                  |                  |
-          v                  v                  v
-   +-------------+     +-------------+    +-------------+
-   | macOS agent |     |Windows agent|    | Linux agent |
-   |    Rust     |     |    Rust     |    |    Rust     |
-   +------+------+     +------+------+    +------+------+
-          |                   |                  |
-      optional            optional           optional
-  privileged helper   privileged helper  privileged helper
+        optional           optional           optional
+   privileged helper   privileged helper   privileged helper
 ```
 
-The gateway is the MCP-facing control plane. Device agents make outbound authenticated connections to the gateway, so individual computers do not need public inbound ports.
+The gateway is the only component that needs to be reachable; everything else dials home. Each agent runs as the signed-in user, keeps its private key in the OS credential store, and reports capabilities so the gateway can route requests to devices that actually support them.
 
-## Tool surface
+## MCP tool surface
 
-The MCP interface remains compact. The implemented families are:
+Compact tool families instead of dozens of micro-tools:
 
-- `devices`
-- `exec`
-- `jobs`
-- `terminal`
-- `files`
-- `search`
-- `processes`
-- `copy`
-- `desktop`
-- `transfer`
-- `system`
-- `network`
-- `services`
-- `containers`
-- `git`
-- `hermes`
-- `hermes_memory`
+| Family | What it does |
+| --- | --- |
+| `devices` | Fleet listing, per-device status and capabilities |
+| `exec` | Bounded one-shot command execution |
+| `jobs` | Durable background jobs: start, read output, wait, cancel |
+| `terminal` | Persistent PTY/ConPTY sessions with transcript reads |
+| `files` | Read, write, append, exact edit, list, stat, hash, move |
+| `search` | Regex/literal file and content search with gitignore awareness |
+| `transfer` | Resumable, SHA-256-verified binary upload/download |
+| `processes` | Process listing and direct tree termination |
+| `system` | CPU, memory, load, disks, network interfaces |
+| `network` | DNS resolution, TCP checks, listener enumeration |
+| `services` | systemd / launchd / Windows SCM status and control |
+| `containers` | Docker list, inspect, logs, start/stop/restart |
+| `git` | Status, diff, log, branches, fetch, pull, push |
+| `desktop` | Screen capture and desktop automation actions |
 
-Do not create dozens of tiny MCP tools when one coherent typed family is easier for the model to choose correctly.
+Per-action schemas and retry semantics: [docs/AGENT_CLIENT_GUIDE.md](docs/AGENT_CLIENT_GUIDE.md).
 
-## Technology direction
+## The dashboard
 
-- **Rust** for the gateway and device agent.
-- **Tokio** async runtime.
-- **MCP Streamable HTTP** between MCP clients and the gateway.
-- **SQLite** for device metadata, sessions, jobs, audit events, and policy state.
-- **WebSocket over TLS** for the first production agent transport, behind a transport abstraction.
-- **QUIC/WebTransport** as an optional later transport after the protocol and resumability semantics are stable.
-- Platform-native PTY, credential-store, accessibility, screen-capture, and service APIs behind Rust traits/modules.
-- Optional **Tauri** tray/dashboard shell later; the headless agent must not depend on it.
+The gateway embeds a dependency-free dark dashboard: Overview, Devices, Sessions, Activity and Settings, owner-approved device enrollment with generated per-OS bootstrap commands, live state over server-sent events, an attachable browser terminal, and bounded file browsing. Owner sign-in uses an Argon2id password with a rotating HMAC session cookie; the dashboard never touches `localStorage` with credentials.
 
-Exact crates are implementation choices unless locked by `docs/DECISIONS.md`.
+Design and implementation history: [docs/DASHBOARD.md](docs/DASHBOARD.md).
 
-## Proposed v1 repository layout
+## Getting started
+
+> Infra v1 is in **release-candidate** stage (`v0.1.1-rc.x`). Binaries are functional and signed with the release publisher key, but this is not yet a recommended production installation. Read [docs/RELEASE_CANDIDATE.md](docs/RELEASE_CANDIDATE.md) for current acceptance limits.
+
+### 1. Run a gateway
+
+Build and run the gateway on a host you control (any Linux/macOS/Windows box; a small VPS or home server is fine):
+
+```sh
+git clone https://github.com/Phloraxx/infra-mcp.git
+cd infra-mcp
+cargo build --release -p infra-gateway
+```
+
+The gateway serves MCP and the dashboard over HTTP(S). Put TLS in front before exposing anything; see [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md) and [docs/SECURITY_MODEL.md](docs/SECURITY_MODEL.md).
+
+### 2. Enroll a device
+
+On each device, download the installer, read it, then run it and approve the pairing code in the dashboard:
+
+```sh
+curl -fsSL -o install.sh https://raw.githubusercontent.com/Phloraxx/infra-mcp/main/scripts/install.sh
+less install.sh                      # review what it does
+sh install.sh --gateway wss://your-gateway/agent
+```
+
+```powershell
+Invoke-WebRequest -OutFile install.ps1 https://raw.githubusercontent.com/Phloraxx/infra-mcp/main/scripts/install.ps1
+Get-Content install.ps1 | Out-Host   # review what it does
+.install.ps1 -Gateway wss://your-gateway/agent
+```
+
+Release mode verifies SHA-256 sidecars before installing binaries. The installer registers a per-user startup entry (systemd user unit, LaunchAgent, or Windows Scheduled Task), and `infra status` / `infra doctor` / `infra repair` keep the setup healthy.
+
+For the full pairing and recovery design: [docs/ONE_COMMAND_SETUP.md](docs/ONE_COMMAND_SETUP.md), [docs/INSTALLATION_UX.md](docs/INSTALLATION_UX.md).
+
+### 3. Connect an MCP client
+
+Point your MCP client at the gateway's MCP endpoint (Streamable HTTP) and select a device in your prompts. End-to-end check:
+
+```sh
+scripts/smoke-v1.sh                  # signed enrollment, exec, reconnect
+scripts/smoke-install-dashboard.sh   # installer + dashboard + sessions
+```
+
+## Android companion — Infra Phone
+
+`apps/android-agent` is a first-class Android client (**Infra Phone**) enrolled over the same signed gateway: scoped files, SHA-256-checked transfers, owner-reviewed APK installs, and a service that reconnects like the desktop agents. Current validated capabilities, safety constraints and open reliability tests: [docs/ANDROID_CURRENT_STATUS.md](docs/ANDROID_CURRENT_STATUS.md).
+
+## Security
+
+- Per-device Ed25519 keys never leave the device; fresh challenge-response on every connection; captured signatures are bound to a single connection.
+- One-time enrollment codes are random, short-lived, hashed at rest, single-use and owner-approved.
+- Audit records store action, outcome and request IDs, never stdout, secrets or file contents.
+- Escalated operations are planned as a separate optional privileged helper; agents run as the signed-in user.
+- Releases ship a signed Ed25519 manifest and SHA-256 sidecars; the updater refuses unverified artifacts.
+
+Full model: [docs/SECURITY_MODEL.md](docs/SECURITY_MODEL.md) · reporting: [SECURITY.md](SECURITY.md) · release trust: [docs/RELEASE_SIGNING.md](docs/RELEASE_SIGNING.md), [docs/RELEASE_PUBLISHER_KEY.md](docs/RELEASE_PUBLISHER_KEY.md).
+
+## Repository layout
 
 ```text
 infra-mcp/
-├── Cargo.toml
 ├── crates/
-│   ├── protocol/            # versioned agent protocol types
-│   ├── gateway/             # MCP, OAuth, device/session broker, SQLite
-│   ├── agent/               # headless cross-platform agent
-│   ├── platform/            # platform abstractions and implementations
-│   └── privileged-helper/   # optional elevated helper
+│   ├── protocol/      # versioned wire types shared by gateway and agents
+│   ├── gateway/       # MCP server, broker, SQLite state, audit, dashboard
+│   ├── agent/         # headless cross-platform device agent
+│   ├── platform/      # per-OS abstractions (PTY, services, credential store)
+│   ├── local-state/   # atomic local config/runtime/proof state
+│   └── cli/           # the `infra` CLI (status, doctor, install, repair)
 ├── apps/
-│   └── dashboard/           # optional web/tray UI when needed
-├── docs/
-└── legacy/                  # old prototype code after migration begins
+│   ├── dashboard/     # embedded web dashboard (HTML/CSS/JS, no build step)
+│   └── android-agent/ # Infra Phone Android app
+├── scripts/           # installers, smoke tests, release signing/contract
+└── docs/              # design and status documents
 ```
 
-Do not move/delete the current TypeScript code merely to match this layout. Preserve it until v1 reaches parity and the migration is explicitly performed.
+## Documentation
 
-## Start here
+| Topic | Document |
+| --- | --- |
+| Product spec | [docs/PRODUCT_SPEC.md](docs/PRODUCT_SPEC.md) |
+| Architecture | [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) |
+| Wire protocol | [docs/PROTOCOL.md](docs/PROTOCOL.md) |
+| Tool contracts | [docs/AGENT_CLIENT_GUIDE.md](docs/AGENT_CLIENT_GUIDE.md) |
+| Security model | [docs/SECURITY_MODEL.md](docs/SECURITY_MODEL.md) |
+| Dashboard design | [docs/DASHBOARD.md](docs/DASHBOARD.md) |
+| Installation UX | [docs/ONE_COMMAND_SETUP.md](docs/ONE_COMMAND_SETUP.md) |
+| Android agent | [docs/ANDROID_CURRENT_STATUS.md](docs/ANDROID_CURRENT_STATUS.md) |
+| Implementation status | [docs/IMPLEMENTATION_STATUS.md](docs/IMPLEMENTATION_STATUS.md) |
+| Decisions | [docs/DECISIONS.md](docs/DECISIONS.md) |
+| Roadmap | [docs/ROADMAP.md](docs/ROADMAP.md) |
+| Deployment | [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md) |
 
-An implementation agent should read, in order:
+## Development
 
-1. [`AGENTS.md`](AGENTS.md)
-2. [`docs/PRODUCT_SPEC.md`](docs/PRODUCT_SPEC.md)
-3. [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md)
-4. [`docs/PROTOCOL.md`](docs/PROTOCOL.md)
-5. [`docs/TOOLS.md`](docs/TOOLS.md)
-6. [`docs/SECURITY_MODEL.md`](docs/SECURITY_MODEL.md)
-7. [`docs/ROADMAP.md`](docs/ROADMAP.md)
-8. [`docs/MIGRATION.md`](docs/MIGRATION.md)
-9. [`docs/BENCHMARK.md`](docs/BENCHMARK.md)
+```sh
+cargo fmt --all
+cargo clippy --workspace --all-targets -- -D warnings
+cargo test --workspace
+```
 
-Supporting documents:
+CI runs the full matrix on Ubuntu, macOS and Windows (x64 + ARM64), an Android job for the companion app, a headless browser suite for the dashboard, and release contract/signing checks. Design principles and workflow notes: [AGENTS.md](AGENTS.md), [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md).
 
-- [`docs/PLATFORM.md`](docs/PLATFORM.md)
-- [`docs/DEVELOPMENT.md`](docs/DEVELOPMENT.md)
-- [`docs/DEPLOYMENT.md`](docs/DEPLOYMENT.md)
-- [`docs/DECISIONS.md`](docs/DECISIONS.md)
+## Status and roadmap
 
-## Implementation progress
-
-The foundation and first persistent-control layer are implemented. See [`docs/IMPLEMENTATION_STATUS.md`](docs/IMPLEMENTATION_STATUS.md) for the exact current state.
-
-For safe local end-to-end checks, `scripts/smoke-v1.sh` verifies signed enrollment/authentication, MCP execution and identity reconnect. `scripts/smoke-install-dashboard.sh` additionally exercises the embedded dashboard, one-time enrollment, native installer source mode, persisted local config/identity, online reconnect, `infra status`, `infra doctor`, sessions and activity APIs. Both use isolated temporary state and do not deploy or modify v0.3.
-
-## Agent-facing tool contracts
-
-Infra is the device execution layer for clients such as ChatGPT, Hermes and Pi.
-See [agent integration](docs/AGENT_CLIENT_GUIDE.md) for per-action MCP schemas,
-bounded background-job waiting, compact discovery and safe retry behavior.
-These changes are source-branch work, not an automatic production deployment.
-
-## Optional Hermes bridge
-
-An opt-in bridge can expose a local Hermes agent, its native memory and its session search alongside existing device tools through the same Infra MCP endpoint. See [Hermes bridge design, configuration, and acceptance gates](docs/HERMES_BRIDGE.md). This is not enabled in production by default.
+The Rust control plane is feature-complete for day-to-day remote operation and running live burn-in validation. Active areas: publisher-authenticated first-install trust, physical Windows login/reboot/rollback validation, public OAuth for MCP clients, and long-term soak testing. Current snapshot: [docs/CURRENT_REALITY.md](docs/CURRENT_REALITY.md), next steps: [docs/NEXT_STEPS.md](docs/NEXT_STEPS.md).
 
 ## License
 
-No license has been selected yet. Do not assume third-party redistribution rights until a license is added.
-
-
-## Android companion (planning track)
-
-`apps/android-agent/` contains a separately buildable **v0.1 Android prototype** (device diagnostics, scoped local file API and short-lived private hosting). It does **not** yet directly enroll/connect to this Rust Infra gateway, or provide ADB/root/screen automation.
-
-The first-class Android device roadmap calls for signed outbound WSS to the same gateway so ChatGPT sees the phone in the existing `devices` MCP tool without the temporary Oracle helper. See the [full plan](docs/ANDROID_AGENT_PLAN.md), [protocol adapter](docs/ANDROID_PROTOCOL_ADAPTER.md) and [security/acceptance checklist](docs/ANDROID_SECURITY_AND_TESTS.md).
+[MIT](LICENSE) © 2026 Sourav P Bijoy
