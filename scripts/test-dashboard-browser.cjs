@@ -28,7 +28,33 @@ const fixtureDevices=()=>pairState==='approved'?[...devices,{device_id:pairDevic
 const hungResponses=new Set();
 const hang=(res,body=false)=>{hungResponses.add(res);res.on('close',()=>hungResponses.delete(res));if(body){res.writeHead(200,{'Content-Type':'application/json'});res.write('{"devices":');}};
 let authenticated=false, output='fixture PTY ready\r\n', failWrite=false, failRead=false, delayedRead=false, readDelay=0;
-const operations=[], errors=[], streams=new Set();
+const operations=[], errors=[], networkErrors=[], streams=new Set();
+// A render-path ReferenceError reaches the user as a persistent connection-lost
+// banner, so an uncaught exception or a console error fails the gate. Chromium
+// also logs every non-2xx response as a console error; those are tracked
+// separately so a deliberate failure window can assert the exact status while an
+// unexpected one still fails the gate. Console events arrive over CDP, so each
+// assertion settles briefly before reading the collected messages.
+const isNetworkLog=text=>text.startsWith('Failed to load resource:');
+const settle=()=>new Promise(resolve=>setTimeout(resolve,120));
+const assertNoErrors=async phase=>{
+  await settle();
+  assert.deepEqual(errors,[],`Unexpected console/page error during ${phase}: ${errors.join(' | ')}`);
+  assert.deepEqual(networkErrors,[],`Unexpected failed request during ${phase}: ${networkErrors.join(' | ')}`);
+};
+const assertExpectedErrors=async(phase,pattern)=>{
+  await settle();
+  const seen=errors.splice(0);
+  assert(seen.length>0,`Expected the app to report a failure during ${phase}`);
+  for(const message of seen)assert.match(message,pattern,`Unexpected error during ${phase}`);
+};
+// Deliberate failure windows: the request is expected to fail, so assert the
+// status instead of ignoring the channel. Aborted requests may or may not be
+// logged, so an empty drain is allowed.
+const drainNetworkErrors=async(phase,pattern)=>{
+  await settle();
+  for(const message of networkErrors.splice(0))assert.match(message,pattern,`Unexpected failed request during ${phase}`);
+};
 const server=http.createServer(async(req,res)=>{
   const send=(value,status=200)=>{res.writeHead(status,{'Content-Type':'application/json','Cache-Control':'no-store'});res.end(JSON.stringify(value));};
   if(req.url==='/api/auth/session'){
@@ -115,7 +141,7 @@ const server=http.createServer(async(req,res)=>{
   try{
     const page=await browser.newPage({viewport:{width:1280,height:900}});
     page.on('pageerror',e=>errors.push(e.message));
-    page.on('console',msg=>{if(msg.type()==='error'&&msg.text().includes('Content Security Policy'))errors.push(msg.text());});
+    page.on('console',msg=>{if(msg.type()!=='error')return;const text=msg.text();(isNetworkLog(text)?networkErrors:errors).push(text);});
     await page.goto(base);await page.locator('#login-submit:not([disabled])').waitFor();
     assert.match(await page.locator('.signin-card h2').textContent(),/Welcome back/);
     assert.match(await page.locator('#signin-status').textContent(),/gateway online/i);
@@ -142,25 +168,30 @@ const server=http.createServer(async(req,res)=>{
     assert.equal(await page.locator('#app-shell').isVisible(),false);
     await page.locator('#login-username').fill('owner');await page.locator('#login-password').fill('wrong');await page.locator('#login-submit').click();
     await page.waitForFunction(()=>document.querySelector('#login-error').textContent.includes('Incorrect'));assert.equal(await page.locator('#app-shell').isVisible(),false);
+    await drainNetworkErrors('wrong password',/401/);
     await page.locator('#login-password').fill('fixture-password-123');await page.locator('#login-submit').click();
     await page.locator('#overview-devices [data-device="online"]').waitFor();
+    await assertNoErrors('sign-in');
     assert.equal(await page.locator('#overview-devices .device-avatar svg.ui-icon').count(),2);
     assert.equal(await page.locator('#summary .metric-icon svg.ui-icon').count(),4);
     assert.equal(await page.locator('#overview-sessions .session-kind-icon svg.ui-icon').count(),3);
     assert.equal(await page.locator('#overview-devices .device-row').count(),2);
     assert.match(await page.locator('#summary').textContent(),/Connected/);
+    await assertNoErrors('overview');
     // Console: the amber chip jumps to the offline device; the gear reaches settings; zone search filters rows.
     await page.locator('#summary .attention-chip').click();
     await page.waitForFunction(()=>document.querySelector('#device-detail').classList.contains('active'));
     assert.equal(await page.locator('#view-title').textContent(),'Rose');
     await page.locator('#drawer-close').click();
     await page.waitForFunction(()=>document.querySelector('#overview').classList.contains('active'));
+    await assertNoErrors('device drawer');
     await page.locator('#settings-gear').click();
     await page.locator('#settings-pop:not([hidden])').waitFor();
     await page.locator('#pop-password').click();
     await page.waitForFunction(()=>document.querySelector('#settings').classList.contains('active'));
     await page.locator('#settings .text-button.back').click();
     await page.waitForFunction(()=>document.querySelector('#overview').classList.contains('active'));
+    await assertNoErrors('settings');
     await page.locator('#zone-search').fill('windows');
     assert.equal(await page.locator('#overview-devices .device-row:not(.hidden)').count(),1);
     await page.locator('#zone-search').fill('');
@@ -174,6 +205,7 @@ const server=http.createServer(async(req,res)=>{
     await page.waitForFunction(()=>document.querySelector('#session-detail').classList.contains('active'));
     await page.locator('#session-close').click();
     await page.waitForFunction(()=>document.querySelector('#overview').classList.contains('active'));
+    await assertNoErrors('session pop-up');
     // v4.2: fleet strip mirrors per-device presence; arrow keys walk the rows.
     assert.equal(await page.locator('#summary .fleet-strip i').count(),2);
     await page.locator('#overview-devices .device-row').first().focus();
@@ -295,6 +327,7 @@ const server=http.createServer(async(req,res)=>{
     assert.equal(operations.filter(op=>op.op==='files'&&op.action.action==='list').at(-1).action.offset,2);
     failFilePage=true;await page.locator('#files-next').click();
     await page.waitForFunction(()=>document.querySelector('#device-error').textContent.includes('directory temporarily unavailable'));
+    await drainNetworkErrors('file page failure',/503/);
     assert.equal(await page.locator('#files-list [data-file-path]').count(),2);
     assert.match(await page.locator('#files-note').textContent(),/last confirmed page/);
     failFilePage=false;await page.locator('#files-path').fill('unsubmitted-path');await page.locator('#files-next').click();
@@ -333,6 +366,7 @@ const server=http.createServer(async(req,res)=>{
     assert.equal(await page.locator('#files-pagination').isVisible(),false);
     const legacy=operations.filter(op=>op.op==='files'&&op.action.action==='list').at(-1).action;
     assert.equal(legacy.offset,undefined);assert.equal(legacy.length,undefined);fileListMode='legacy';
+    await assertNoErrors('files');
     await page.goto(base+'/#devices');
     await page.locator('#device-search').fill('no-such-device');
     assert.equal(await page.locator('#all-devices .device-row:not(.hidden)').count(),0);
@@ -371,6 +405,7 @@ const server=http.createServer(async(req,res)=>{
     assert.equal(operations.filter(o=>o.action?.action==='write').length,writes);
     failWrite=false;await page.locator('#session-resume').click();await page.locator('.xterm-helper-textarea').focus();await page.keyboard.type('Z');await page.waitForTimeout(150);
     assert.equal(operations.filter(o=>o.action?.action==='write').at(-1).action.data,'Z');
+    await assertNoErrors('terminal');
     await page.goto(base+'/#devices');assert.equal(operations.filter(o=>o.action?.action==='close').length,0);
     await page.locator('#all-devices [data-device="offline"]').click();
     await page.waitForFunction(()=>document.querySelector('#device-summary').textContent.includes('No heartbeat was received'));
@@ -380,6 +415,7 @@ const server=http.createServer(async(req,res)=>{
     await page.waitForFunction(()=>document.querySelector('#session-output').textContent.includes('fixture job output'));
     page.once('dialog',dialog=>dialog.accept());await page.locator('#session-stop').click();await page.waitForTimeout(100);
     assert(operations.some(o=>o.op==='jobs'&&o.action.action==='cancel'&&o.action.job_id===jobId));
+    await assertNoErrors('sessions');
     await page.setViewportSize({width:390,height:844});await page.goto(base);await page.locator('#overview-devices [data-device="online"]').waitFor();
     await page.locator('#overview-devices [data-device="online"]').click();
     if(process.env.INFRA_QA_SCREENSHOT){await page.waitForTimeout(300);await page.screenshot({path:process.env.INFRA_QA_SCREENSHOT,fullPage:true});}
@@ -421,10 +457,14 @@ const server=http.createServer(async(req,res)=>{
       overviewMode=null;
       await page.evaluate(()=>refresh());
       await page.waitForFunction(()=>document.querySelector('#gateway-label').textContent==='Gateway online');
+      await assertExpectedErrors('overview timeout recovery',/Request timed out/);
+      await drainNetworkErrors('overview timeout recovery',/net::ERR_|Failed to load resource/);
     }
     // Separate context: virtual time checks the real wait/expiry UI without
     // waiting 90 seconds or changing production budgets.
     const pairPage=await browser.newPage({viewport:{width:390,height:844}});
+    pairPage.on('pageerror',e=>errors.push(e.message));
+    pairPage.on('console',msg=>{if(msg.type()!=='error')return;const text=msg.text();(isNetworkLog(text)?networkErrors:errors).push(text);});
     await pairPage.clock.install();
     const waitFixture=async(predicate,message)=>{
       for(let n=0;!predicate()&&n<240;n++)await new Promise(resolve=>setTimeout(resolve,25));
@@ -461,6 +501,7 @@ const server=http.createServer(async(req,res)=>{
       await pairPage.clock.fastForward(11_000);
       await pairPage.locator('#pair-open:not(.hidden)').waitFor();
       hangApproval=false;
+      await drainNetworkErrors('lost approval response',/net::ERR_|Failed to load resource/);
       assert.equal(approvalCalls,lostBefore+1,'Lost response must be observed without approval replay');
 
       // If approval did not commit, explicitly review the request; no replay.
@@ -484,6 +525,7 @@ const server=http.createServer(async(req,res)=>{
       await pairPage.locator('[data-pair-action="approve"]').click();
       await pairPage.waitForFunction(()=>document.querySelector('#pair-result').textContent.includes('request is no longer available'));
       assert.equal(await pairPage.locator('#pair-open').isVisible(),false);
+      await drainNetworkErrors('missing pairing request',/404/);
 
       // A late successful status from a closed dialog cannot verify a reopened
       // flow whose new check fails. The observer cancels the old request.
@@ -508,11 +550,13 @@ const server=http.createServer(async(req,res)=>{
       await waitFixture(()=>pairChecks>logoutBefore,'Logout check was not reached');
       authenticated=false;
       await pairPage.evaluate(()=>jsonFetch('/api/pair/requests').catch(()=>{}));
+      await drainNetworkErrors('signed-out pairing poll',/401/);
       assert.equal(await pairPage.locator('#enroll-dialog').isVisible(),false);
       assert.equal(await pairPage.locator('#pair-result').textContent(),'');
       assert.equal(await pairPage.locator('#pending-pairs').textContent(),'');
       await new Promise(resolve=>setTimeout(resolve,1000));
       assert.equal(await pairPage.locator('#pair-result').textContent(),'');
+      await assertNoErrors('pairing dialog');
     }finally{
       await pairPage.close();authenticated=true;pairState='pending';pairApproveState='approved';pairOnline=false;pairReply='ok';pairDelay=0;hangApproval=false;
     }
@@ -527,6 +571,7 @@ const server=http.createServer(async(req,res)=>{
       catch(error){return {code:error.code,message:error.message};}
     });
     hangEnrollment=false;
+    await drainNetworkErrors('hung enrollment',/net::ERR_|Failed to load resource/);
     assert.equal(timeout.code,'request_timeout');
     assert.match(timeout.message,/outcome may be unknown/);
     assert.equal(enrollmentCalls,mutationsBefore+1);
@@ -540,6 +585,6 @@ const server=http.createServer(async(req,res)=>{
     assert.equal(await page.evaluate(()=>state.listing),null);
     assert.equal(await page.locator('#files-path').inputValue(),'.');
     assert.deepEqual(errors,[]);
-    console.log('Dashboard browser gate PASS: pairing completion with live proof, uncertainty/no replay, bounded recovery, expiry and dialog/auth isolation; auth/device/XSS/terminal/session/CSP coverage; file pages with keyboard/mobile navigation, byte-shortened offsets, retained error recovery, stale-response isolation, legacy fallback and private-state clearing; bounded header/body timeout recovery and mutation no-replay.');
+    console.log('Dashboard browser gate PASS: zero console/page errors after sign-in, overview, device drawer, session pop-up, files, settings, terminal, sessions and the pairing dialog; pairing completion with live proof, uncertainty/no replay, bounded recovery, expiry and dialog/auth isolation; auth/device/XSS/terminal/session/CSP coverage; file pages with keyboard/mobile navigation, byte-shortened offsets, retained error recovery, stale-response isolation, legacy fallback and private-state clearing; bounded header/body timeout recovery and mutation no-replay.');
   }finally{for(const response of hungResponses)response.destroy();await browser.close();for(const stream of streams)stream.end();await new Promise(resolve=>server.close(resolve));}
 })().catch(error=>{console.error(error);server.close();process.exitCode=1;});
