@@ -35,7 +35,8 @@ shield:'<path d="m12 2 8 4v6c0 5-3 8-8 10-5-2-8-5-8-10V6z"/><path d="m9 12 2 2 4
 logout:'<path d="M10 3H5a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h5M14 16l4-4-4-4m4 4H9"/>',
 close:'<path d="M6 6l12 12M18 6 6 18"/>',
 copy:'<rect x="8" y="8" width="12" height="12" rx="2"/><path d="M16 8V5a2 2 0 0 0-2-2H5a2 2 0 0 0-2 2v9a2 2 0 0 0 2 2h3"/>',
-key:'<circle cx="8" cy="15" r="4"/><path d="M11 12 21 2l1 4-3 1-1 3-3 1-4 4"/>'
+key:'<circle cx="8" cy="15" r="4"/><path d="M11 12 21 2l1 4-3 1-1 3-3 1-4 4"/>',
+gear:'<circle cx="12" cy="12" r="3.2"/><path d="M12 2.8v2.4M12 18.8v2.4M2.8 12h2.4M18.8 12h2.4M5.5 5.5l1.7 1.7M16.8 16.8l1.7 1.7M18.5 5.5l-1.7 1.7M7.2 16.8l-1.7 1.7"/>'
 });
 function icon(name){
   const safe=Object.hasOwn(iconShapes,name)?name:'devices';
@@ -58,7 +59,7 @@ function decorateStaticIcons(){
     ['#files-browse .secondary','folder'],['#file-close','close'],
     ['#file-next','right'],['#device-permissions','shield'],
     ['#create-enrollment','key'],
-    ['.search-icon','search'],['#terminal-open .primary','terminal']
+    ['.search-icon','search'],['#terminal-open .primary','terminal'],['#settings-gear','gear'],['#drawer-close','close'],['#session-close','close']
   ];
   for(const [selector,name] of controls){
     const element=$(selector);if(!element)continue;
@@ -102,8 +103,9 @@ async function jsonFetch(url,options={}){
 function showSignedOut(){state.authenticated=false;state.events?.close();state.events=null;state.streamHealthy=false;clearTimeout(state.refreshTimer);state.refreshTimer=null;$('#app-shell').classList.add('hidden');$('#signin').classList.remove('hidden');$('#login-submit').disabled=false;$('#login-submit').textContent='Sign in';}
 function showSignedIn(){state.authenticated=true;$('#signin').classList.add('hidden');$('#app-shell').classList.remove('hidden');}
 async function authStatus(){
-  try{const v=await requestWithDeadline('/api/auth/session',{credentials:'same-origin'},async response=>{if(!response.ok)throw new Error('Authentication status unavailable');return response.json();});state.loginMethod=v.login_method||'password';$('#username-label').classList.toggle('hidden',state.loginMethod!=='password');$('#login-username').required=state.loginMethod==='password';$('#password-label').textContent=state.loginMethod==='password'?'Password':'Admin credential';$('#password-change').classList.toggle('hidden',state.loginMethod!=='password');$('#auth-state').textContent=v.authenticated?'Signed in':'Signed out';if(v.authenticated)showSignedIn();else showSignedOut();return !!v.authenticated;}
-  catch(error){showSignedOut();$('#login-error').textContent='Cannot reach Infra. Try again shortly.';return false;}
+  try{const v=await requestWithDeadline('/api/auth/session',{credentials:'same-origin'},async response=>{if(!response.ok)throw new Error('Authentication status unavailable');return response.json();});state.loginMethod=v.login_method||'password';$('#username-label').classList.toggle('hidden',state.loginMethod!=='password');$('#login-username').required=state.loginMethod==='password';$('#password-label').textContent=state.loginMethod==='password'?'Password':'Admin credential';$('#password-change').classList.toggle('hidden',state.loginMethod!=='password');$('#auth-state').textContent=v.authenticated?'Signed in':'Signed out';if($('#signin-status'))$('#signin-status').innerHTML='<span class="dot"></span>gateway online';
+  if(v.authenticated)showSignedIn();else showSignedOut();return !!v.authenticated;}
+  catch(error){showSignedOut();if($('#signin-status'))$('#signin-status').innerHTML='<span class="dot offline"></span>gateway unreachable';$('#login-error').textContent='Cannot reach Infra. Try again shortly.';return false;}
 }
 $('#login-form').addEventListener('submit',async event=>{
   event.preventDefault();const button=$('#login-submit');button.disabled=true;button.textContent='Signing in…';$('#login-error').textContent='';
@@ -158,16 +160,18 @@ function activeSession(s){return ['running','starting','canceling','uploading','
 function render(){
   const online=state.devices.filter(d=>d.online&&!d.revoked).length,offline=state.devices.filter(d=>!d.online&&!d.revoked).length,revoked=state.devices.filter(d=>d.revoked).length,active=state.sessions.filter(activeSession).length;
   const metrics=[['Connected',online,'online','check'],['Offline',offline,'offline','offline'],['Active sessions',active,'work','terminal'],['Total devices',state.devices.length-revoked,'enrolled','devices']];
-  const indicator=$('#overview-availability');if(indicator){indicator.classList.toggle('has-offline',offline>0);indicator.innerHTML='<span class="availability-dot"></span>'+online+' of '+(state.devices.length-revoked)+' connected';}
-  $('#summary').innerHTML=metrics.map(([k,v,c,i])=>`<div class="summary-card ${c}"><div class="metric-top"><span>${k}</span><span class="metric-icon">${icon(i)}</span></div><strong>${v}</strong></div>`).join('');
+  const offlineDevices=state.devices.filter(d=>!d.revoked&&!d.online);
+  $('#summary').innerHTML=metrics.map(([k,v,c,i])=>`<div class="summary-card ${c}"><div class="metric-top"><span>${k}</span><span class="metric-icon">${icon(i)}</span></div><strong>${v}</strong></div>`).join('')+(offlineDevices.length?`<button type="button" class="attention-chip" data-device="${esc(offlineDevices[0].device_id)}"><i></i>needs attention &rarr;</button>`:'');
   const devices=state.devices.length?state.devices.map(deviceRow).join(''):emptyState('No devices enrolled yet.','devices');
   $('#all-devices').innerHTML=devices;applyDeviceSearch();
-  $('#overview-devices').innerHTML=state.devices.length?state.devices.slice(0,5).map(deviceRow).join(''):'<div class="first-device">'+icon('devices')+'<h3>Add your first computer</h3><p>Install Infra, compare the pairing codes, and approve it here.</p><button class="primary" data-add-device>Add a device</button></div>';
+  $('#overview-devices').innerHTML=state.devices.length?state.devices.map(deviceRow).join(''):'<div class="first-device">'+icon('devices')+'<h3>Add your first computer</h3><p>Install Infra, compare the pairing codes, and approve it here.</p><button class="primary" data-add-device>Add a device</button></div>';
   const sessions=state.sessions.filter(activeSession);renderSessionList();
   $('#overview-sessions').innerHTML=sessions.length?sessions.slice(0,6).map(sessionRow).join(''):emptyState('No sessions running right now.','terminal');
+  $('#overview-activity').innerHTML=state.activity.length?state.activity.slice(0,7).map(activityRow).join(''):emptyState('No activity recorded yet.','activity');
   $('#activity-list').innerHTML=state.activity.length?state.activity.map(activityRow).join(''):emptyState('No operational activity recorded yet.','activity');
-  const attention=[];state.devices.filter(d=>!d.revoked&&!d.online).forEach(d=>attention.push(`<div class="attention-row"><div class="session-title">${esc(d.device_name)} is ${esc(deviceState(d))}</div><div class="session-meta">Last seen ${relative(d.last_seen_unix_ms)}. ${esc(reconnectExplanation(d))}</div><button class="secondary" data-device="${esc(d.device_id)}">Review connection</button></div>`));
-  $('#attention').innerHTML=attention.join('');$('#attention-section').classList.toggle('hidden',attention.length===0);renderDevice();
+  $('#devices-count').textContent=online+' of '+(state.devices.length-revoked)+' online';
+  $('#work-count').textContent=active+' running';
+  renderDevice();applyZoneSearch();
 }
 // Merge bursts of SSE notifications and periodic fallbacks into a single in-flight
 // snapshot request. Never allow an older authenticated request to overwrite newer state.
@@ -428,7 +432,14 @@ $('#device-rename-form').addEventListener('submit',async event=>{
   }catch(error){$('#device-rename-error').textContent=error.message;}
   finally{button.disabled=false;}
 });
-$('#logout-session').addEventListener('click',async()=>{let failure='';try{await requestWithDeadline('/api/auth/session',{method:'DELETE',credentials:'same-origin',headers:{'X-Infra-CSRF':'1'}},async response=>{if(!response.ok)throw new Error('Sign-out could not be confirmed.');});}catch(error){failure='Local view cleared; server sign-out could not be confirmed. '+error.message;}finally{clearPrivateViews();$('#login-password').value='';$('#password-change').reset();showSignedOut();$('#login-error').textContent=failure;}});
+async function signOut(){
+  let failure='';
+  try{await requestWithDeadline('/api/auth/session',{method:'DELETE',credentials:'same-origin',headers:{'X-Infra-CSRF':'1'}},async response=>{if(!response.ok)throw new Error('Sign-out could not be confirmed.');});}
+  catch(error){failure='Local view cleared; server sign-out could not be confirmed. '+error.message;}
+  finally{clearPrivateViews();$('#login-password').value='';$('#password-change').reset();showSignedOut();$('#login-error').textContent=failure;}
+}
+$('#logout-session').addEventListener('click',signOut);
+$('#pop-signout').addEventListener('click',()=>{settingsPop.hidden=true;signOut();});
 
 function currentDevice(id=state.device){return state.devices.find(d=>d.device_id===id);}
 function available(id){const d=currentDevice(id);return !!d?.online&&!d.revoked;}
@@ -441,7 +452,7 @@ function route(){
   const key=parts.slice(0,4).join('/');
   if(state.attachment&&state.attachment.key!==key)detachSession();
   if(parts[0]==='add-device'){
-    showView('devices','Devices','Reachability and capability across your fleet.');
+    showView('overview','Overview','Your private control plane at a glance.');
     if(!$('#enroll-dialog').open)$('#add-device').click();
   }else if(parts[0]==='device'&&parts[1]){
     if(state.device!==parts[1]){state.health=null;$('#permission-result').textContent='';$('#device-diagnostics').open=false;state.file=null;clearFileListing();$('#file-content').textContent='';$('#file-preview').classList.add('hidden');$('#device-status-output').classList.add('hidden');}
@@ -488,13 +499,47 @@ function applyDeviceSearch(){
   }
 }
 $('#device-search').addEventListener('input',applyDeviceSearch);
+function applyZoneSearch(){
+  const search=$('#zone-search');if(!search)return;
+  const query=search.value.trim().toLocaleLowerCase();
+  let found=0;
+  $$('#overview-devices .device-row').forEach(row=>{
+    const id=row.querySelector('[data-device]')?.dataset.device;
+    const device=state.devices.find(d=>d.device_id===id);
+    const text=[device?.device_name,device?.platform,device?.arch,...(device?.capabilities||[])].join(' ').toLocaleLowerCase();
+    const match=!query||text.includes(query);
+    row.classList.toggle('hidden',!match);
+    if(match)found++;
+  });
+  $('#zone-search-empty')?.remove();
+  if(query&&!found){
+    const empty=document.createElement('p');
+    empty.id='zone-search-empty';empty.className='empty';empty.textContent='No matching devices.';
+    $('#overview-devices').append(empty);
+  }
+}
+$('#zone-search').addEventListener('input',applyZoneSearch);
 document.addEventListener('keydown',event=>{
   if(event.key!=='/'||event.metaKey||event.ctrlKey||event.altKey||event.isComposing||!state.authenticated)return;
   if(event.target instanceof HTMLInputElement||event.target instanceof HTMLTextAreaElement||event.target.isContentEditable)return;
   // Never hijack typing in an active xterm session.
   if(state.attachment?.kind==='terminal')return;
-  event.preventDefault();setView('devices');$('#device-search').focus();
+  event.preventDefault();setView('overview');$('#zone-search').focus();
 });
+document.addEventListener('keydown',event=>{
+  if(event.key!=='Escape')return;
+  if($('#enroll-dialog')?.open)return;
+  const hash=location.hash;
+  if(hash.startsWith('#device/')||hash.startsWith('#session/'))setView('overview');
+});
+const settingsPop=$('#settings-pop');
+$('#settings-gear').addEventListener('click',event=>{event.stopPropagation();settingsPop.hidden=!settingsPop.hidden;});
+document.addEventListener('click',event=>{if(!settingsPop.hidden&&!settingsPop.contains(event.target))settingsPop.hidden=true;});
+$('#pop-password').addEventListener('click',()=>{settingsPop.hidden=true;setView('settings');});
+$('#pop-keys').addEventListener('click',()=>{settingsPop.hidden=true;setView('settings');});
+$('#drawer-close').addEventListener('click',()=>setView('overview'));
+$('#drawer-scrim').addEventListener('click',()=>setView('overview'));
+$('#session-close').addEventListener('click',()=>setView('overview'));
 function renderSessionList(){
   const select=$('#session-device'),chosen=select.value;
   select.innerHTML='<option value="">All devices</option>'+state.devices.map(d=>`<option value="${esc(d.device_id)}">${esc(d.device_name)}</option>`).join('');select.value=chosen;
@@ -509,7 +554,7 @@ function renderDevice(){
   if(!d){$('#device-summary').textContent='Device unavailable. Sign in or return to Devices.';$$('.device-pane').forEach(p=>p.classList.add('hidden'));return;}
   $('#view-title').textContent=d.device_name;
   const status=deviceState(d);
-  $('#device-summary').innerHTML=`<div class="device-hero-head"><div class="device-hero-avatar ${d.online&&!d.revoked?'online':''}">${platformIcon(d.platform)}</div><div class="device-hero-copy"><span class="eyebrow">DEVICE</span><h2>${esc(d.device_name)}</h2><p>${esc(d.platform)} · ${esc(d.arch)} · Infra ${esc(d.agent_version)}</p></div><span class="status ${status}">${status}</span></div><div class="device-metrics"><div class="device-metric"><span>Last seen</span><strong>${relative(d.last_seen_unix_ms)}</strong></div><div class="device-metric"><span>Terminals</span><strong>${d.active_terminals||0}</strong></div><div class="device-metric"><span>Jobs</span><strong>${d.active_jobs||0}</strong></div><div class="device-metric"><span>Transfers</span><strong>${d.active_transfers||0}</strong></div><div class="device-metric"><span>Device ID</span><code>${esc(d.device_id)}</code></div></div>${d.online?'':`<p class="small muted" style="margin-top:12px">${esc(reconnectExplanation(d))} Session state shown here is the last reported state.</p>`}`;
+  $('#device-summary').innerHTML=`<div class="device-hero-head"><div class="device-hero-avatar ${d.online&&!d.revoked?'online':''}">${platformIcon(d.platform)}</div><div class="device-hero-copy"><p>${esc(d.platform)} · ${esc(d.arch)} · Infra ${esc(d.agent_version)}</p></div><span class="status ${status}">${status}</span></div><div class="device-metrics"><div class="device-metric"><span>Last seen</span><strong>${relative(d.last_seen_unix_ms)}</strong></div><div class="device-metric"><span>Terminals</span><strong>${d.active_terminals||0}</strong></div><div class="device-metric"><span>Jobs</span><strong>${d.active_jobs||0}</strong></div><div class="device-metric"><span>Transfers</span><strong>${d.active_transfers||0}</strong></div><div class="device-metric"><span>Device ID</span><code>${esc(d.device_id)}</code></div></div>${d.online?'':`<p class="small muted" style="margin-top:12px">${esc(reconnectExplanation(d))} Session state shown here is the last reported state.</p>`}`;
   const caps=new Set(d.capabilities||[]);
   const defs=[['Shell','exec','terminal'],['Files','files','folder'],['Terminal','terminal','terminal'],['Jobs','jobs','jobs'],['Transfers','transfer','transfer'],['System','system','cpu'],['Network','network','network'],['Services','services','layers'],['Docker','containers','package'],['Git','git','git'],['Desktop','desktop','monitor']];
   $('#device-capabilities').innerHTML=defs.map(([name,cap,iconName])=>{const iconSvg=icon(iconName);const advertised=caps.has(cap),availableNow=advertised&&d.online;return `<div class="capability-card ${availableNow?'available':''}"><div class="cap-icon">${iconSvg}</div><strong>${name}</strong><p>${advertised?(d.online?(cap==='desktop'?'Permission check needed':'Available'):'Device offline'):'Not advertised'}</p></div>`;}).join('');

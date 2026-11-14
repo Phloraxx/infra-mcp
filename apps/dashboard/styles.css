@@ -1032,3 +1032,97 @@ dialog::backdrop{background:rgba(4,6,10,.65);backdrop-filter:blur(7px);-webkit-b
 dialog,.dialog-card{color:var(--ink)}
 .overview-stack .section-head h2{color:var(--ink)}
 .signin-footnote #signin-lock{color:var(--ink-3)}
+
+/* ==========================================================================
+   Infra v4 — console. One screen: a topbar, a KPI line, three zones,
+   a device drawer and a full-screen session overlay. Layered over v3.
+   ========================================================================== */
+.shell{display:block}
+main{max-width:1180px;padding:26px clamp(20px,3.4vw,56px) 90px}
+
+/* Console bar */
+#console-bar{position:sticky;top:0;z-index:60;display:flex;align-items:center;gap:12px;min-height:56px;padding:8px clamp(14px,3vw,36px);background:rgba(7,9,12,.84);backdrop-filter:blur(14px);-webkit-backdrop-filter:blur(14px);border-bottom:1px solid var(--line)}
+#console-bar .brand{display:flex;align-items:center;gap:9px;padding:0;margin:0;font-size:15px;font-weight:640;letter-spacing:-.03em;flex:none}
+#console-bar .brand .brand-mark{width:20px;height:20px}
+.gw-chip{display:flex;align-items:center;gap:8px;border:1px solid var(--line-2);border-radius:999px;padding:5px 12px;font-size:11px;color:var(--ink-2);white-space:nowrap;flex:none}
+.gw-chip .dot{width:6px;height:6px;border-radius:50%;background:var(--ink-4);flex:none}
+.gw-chip .dot.online{background:var(--green);animation:infra-pulse 2.8s ease-in-out infinite}
+.console-search{position:relative;flex:1;max-width:340px;margin-left:auto;min-width:0}
+.console-search input{width:100%;min-height:34px;background:var(--bg-2);border:1px solid var(--line-2);border-radius:8px;padding:6px 12px 6px 34px;font-size:12.5px}
+.console-search .search-icon{left:11px;bottom:9px}
+.console-actions{display:flex;align-items:center;gap:8px;flex:none}
+#console-bar #add-device{min-height:34px;padding:6px 13px;font-size:12px}
+.gear-wrap{position:relative}
+#settings-gear{width:34px;min-width:34px;height:34px;min-height:34px;padding:0}
+.settings-pop{position:absolute;right:0;top:calc(100% + 8px);width:210px;background:var(--surface-2);border:1px solid var(--line-2);border-radius:10px;padding:5px;box-shadow:0 18px 50px -12px rgba(0,0,0,.75);z-index:70}
+.settings-pop[hidden]{display:none}
+.settings-pop button{display:flex;width:100%;border:0;background:none;color:var(--ink-2);font-size:12.5px;font-weight:520;padding:9px 11px;border-radius:7px;text-align:left;min-height:36px}
+.settings-pop button:hover{background:rgba(242,244,250,.05);color:var(--ink)}
+.settings-pop hr{border:0;border-top:1px solid var(--line);margin:5px 4px}
+.settings-pop .pop-danger{color:var(--red)}
+.settings-pop .pop-danger:hover{background:rgba(223,139,133,.09);color:var(--red)}
+
+/* KPI line */
+#summary{display:flex;flex-wrap:wrap;align-items:center;background:none;border:0;border-top:1px solid var(--line-2);border-bottom:1px solid var(--line-2);border-radius:0;gap:0;padding:12px 0;margin:0 0 18px;min-height:56px;overflow:visible}
+.summary-card{display:flex;align-items:baseline;gap:9px;background:none;border:0;border-left:1px solid var(--line);border-radius:0;padding:2px 22px}
+.summary-card:first-child{border-left:0;padding-left:0}
+.summary-card .metric-top{display:contents}
+.summary-card span{font-size:12px;color:var(--ink-3);white-space:nowrap}
+.summary-card strong{font-size:21px;margin:0;color:var(--ink);letter-spacing:-.02em;line-height:1;font-variant-numeric:tabular-nums}
+.summary-card.online strong{color:var(--green)}
+.attention-chip{display:inline-flex;align-items:center;gap:8px;margin-left:auto;border:1px solid rgba(217,181,117,.32);background:rgba(217,181,117,.07);color:var(--amber);border-radius:999px;padding:6px 13px;font-size:11.5px;font-weight:560;min-height:30px;transition:background .15s var(--ease)}
+.attention-chip i{width:6px;height:6px;border-radius:50%;background:var(--amber)}
+.attention-chip:hover{background:rgba(217,181,117,.15)}
+
+/* Zones */
+.overview-stack{grid-template-columns:5fr 4fr 3fr;gap:14px}
+.overview-stack .section-head{align-items:center;margin-bottom:2px;padding:4px 10px}
+.overview-stack .section-head>div{display:flex;align-items:baseline;gap:10px}
+.overview-stack .section-head h2{font:560 10.5px ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;letter-spacing:.13em;text-transform:uppercase;color:var(--ink-3)}
+.overview-stack .section-head p{font-size:11px;color:var(--ink-4);margin:0;white-space:nowrap}
+.overview-stack .section-head .text-button{font-size:11px;min-height:0;padding:2px 0}
+
+/* Device drawer */
+#device-detail{position:fixed;inset:0;z-index:80;display:none;overflow:hidden}
+#device-detail.active{display:block}
+.drawer-scrim{position:absolute;inset:0;background:rgba(4,6,10,.55);backdrop-filter:blur(4px);-webkit-backdrop-filter:blur(4px)}
+.drawer-body{position:absolute;top:0;right:0;bottom:0;width:min(500px,100%);background:var(--bg);border-left:1px solid var(--line-2);overflow-y:auto;overscroll-behavior:contain;padding:20px 26px 40px;animation:drawer-in .3s var(--ease)}
+@keyframes drawer-in{from{transform:translateX(30px);opacity:.3}to{transform:none;opacity:1}}
+.drawer-head{display:flex;align-items:center;justify-content:space-between;gap:12px;margin-bottom:16px}
+.drawer-kicker{display:block;font:560 10px ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;letter-spacing:.13em;text-transform:uppercase;color:var(--ink-4);margin-bottom:5px}
+.drawer-head h2{font-size:19px;font-weight:640;letter-spacing:-.03em;overflow-wrap:anywhere}
+#device-detail .device-metrics{grid-template-columns:repeat(2,minmax(0,1fr));gap:12px 20px}
+#device-detail .capability-grid{grid-template-columns:repeat(2,minmax(0,1fr))}
+#device-detail .connection-health{flex-direction:column;align-items:flex-start;gap:14px}
+#device-detail .connection-health button{width:100%}
+
+/* Session overlay */
+#session-detail{position:fixed;inset:0;z-index:90;background:var(--bg);overflow-y:auto;padding:18px clamp(14px,3vw,40px) 40px}
+#session-detail .session-workspace{max-width:1080px;margin:0 auto}
+#session-detail .session-workspace-head{flex-wrap:wrap;gap:12px}
+
+/* Friendlier login touches */
+.signin-card .signin-subtitle{margin:16px 0 18px}
+.signin-status{display:inline-flex;align-items:center;gap:8px;border:1px solid var(--line-2);border-radius:999px;padding:5px 12px;font-size:11.5px;color:var(--ink-2);margin:0 0 34px}
+.signin-status .dot{width:6px;height:6px;border-radius:50%;background:var(--green);flex:none}
+.signin-status .dot.offline{background:var(--amber)}
+.signin-enter{font-size:11px;color:var(--ink-4);margin:-16px 0 0}
+
+/* Responsive */
+@media(max-width:1150px){.overview-stack{grid-template-columns:1fr 1fr}.overview-activity-panel{grid-column:1/-1}}
+@media(max-width:900px){.console-search{display:none}}
+@media(max-width:650px){
+  #console-bar{gap:10px}
+  .gw-chip{font-size:10px;padding:4px 9px}
+  #console-bar #add-device{min-width:40px;min-height:40px;padding:8px 11px;font-size:0;gap:0}
+  main{padding:20px 16px 60px}
+  #summary{padding:10px 0;row-gap:12px}
+  .summary-card{padding:2px 12px}
+  .summary-card:first-child{padding-left:0}
+  .summary-card strong{font-size:19px}
+  .attention-chip{margin-left:0}
+  .overview-stack{grid-template-columns:1fr}
+  .drawer-body{left:0;right:0;top:auto;bottom:0;width:100%;max-height:88dvh;border-left:0;border-top:1px solid var(--line-2);border-radius:16px 16px 0 0;padding:16px 16px 32px;animation:sheet-in .32s var(--ease)}
+  #session-detail{padding:12px 12px 24px}
+}
+@keyframes sheet-in{from{transform:translateY(48px)}to{transform:none}}

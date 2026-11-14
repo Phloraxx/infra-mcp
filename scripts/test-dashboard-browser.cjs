@@ -117,6 +117,8 @@ const server=http.createServer(async(req,res)=>{
     page.on('pageerror',e=>errors.push(e.message));
     page.on('console',msg=>{if(msg.type()==='error'&&msg.text().includes('Content Security Policy'))errors.push(msg.text());});
     await page.goto(base);await page.locator('#login-submit:not([disabled])').waitFor();
+    assert.match(await page.locator('.signin-card h2').textContent(),/Welcome back/);
+    assert.match(await page.locator('#signin-status').textContent(),/gateway online/i);
     assert(await page.locator('.signin-showcase-brand img.brand-mark').evaluate(img=>img.complete&&img.naturalWidth>0),'Infra logo did not load');
     assert.equal(await page.locator('.signin-showcase-brand img.brand-mark').getAttribute('src'),'/assets/logo.png');
     assert.equal(await page.locator('.signin-main .brand-mark').count(),1);
@@ -147,6 +149,22 @@ const server=http.createServer(async(req,res)=>{
     assert.equal(await page.locator('#overview-sessions .session-kind-icon svg.ui-icon').count(),3);
     assert.equal(await page.locator('#overview-devices .device-row').count(),2);
     assert.match(await page.locator('#summary').textContent(),/Connected/);
+    // Console: the amber chip jumps to the offline device; the gear reaches settings; zone search filters rows.
+    await page.locator('#summary .attention-chip').click();
+    await page.waitForFunction(()=>document.querySelector('#device-detail').classList.contains('active'));
+    assert.equal(await page.locator('#view-title').textContent(),'Rose');
+    await page.locator('#drawer-close').click();
+    await page.waitForFunction(()=>document.querySelector('#overview').classList.contains('active'));
+    await page.locator('#settings-gear').click();
+    await page.locator('#settings-pop:not([hidden])').waitFor();
+    await page.locator('#pop-password').click();
+    await page.waitForFunction(()=>document.querySelector('#settings').classList.contains('active'));
+    await page.locator('#settings .text-button.back').click();
+    await page.waitForFunction(()=>document.querySelector('#overview').classList.contains('active'));
+    await page.locator('#zone-search').fill('windows');
+    assert.equal(await page.locator('#overview-devices .device-row:not(.hidden)').count(),1);
+    await page.locator('#zone-search').fill('');
+    assert.equal(await page.locator('#overview-devices .device-row:not(.hidden)').count(),2);
     if(process.env.INFRA_QA_OVERVIEW_SCREENSHOT||process.env.INFRA_QA_MOBILE_OVERVIEW_SCREENSHOT){
       // Public design previews use readable sample labels; the functional
       // tests below still exercise the original hostile-name/XSS fixture.
@@ -298,7 +316,7 @@ const server=http.createServer(async(req,res)=>{
     assert.equal(await page.locator('#files-pagination').isVisible(),false);
     const legacy=operations.filter(op=>op.op==='files'&&op.action.action==='list').at(-1).action;
     assert.equal(legacy.offset,undefined);assert.equal(legacy.length,undefined);fileListMode='legacy';
-    await page.locator('[data-view="devices"]').click();
+    await page.goto(base+'/#devices');
     await page.locator('#device-search').fill('no-such-device');
     assert.equal(await page.locator('#all-devices .device-row:not(.hidden)').count(),0);
     assert.match(await page.locator('#device-search-empty').textContent(),/No matching devices/);
@@ -306,14 +324,14 @@ const server=http.createServer(async(req,res)=>{
     assert.equal(await page.locator('#all-devices .device-row:not(.hidden)').count(),1);
     await page.locator('#device-search').fill('');
     assert.equal(await page.locator('#all-devices .device-row:not(.hidden)').count(),2);
-    await page.locator('[data-view="sessions"]').click();await page.locator('#session-kind').selectOption('job');
+    await page.goto(base+'/#sessions');await page.locator('#session-kind').selectOption('job');
     assert.equal(await page.locator('#all-sessions .session-row').count(),1);
     await page.locator('#session-kind').selectOption('transfer');await page.locator('#all-sessions [data-session]').click();
     await page.waitForFunction(()=>document.querySelector('#session-output').textContent.includes('build.zip'));
     assert.equal(await page.locator('#session-stop').isDisabled(),false);
     page.once('dialog',dialog=>dialog.accept());await page.locator('#session-stop').click();await page.waitForTimeout(100);
     assert(operations.some(o=>o.op==='transfer'&&o.action.action==='cancel'&&o.action.transfer_id===transferId));
-    await page.locator('[data-view="sessions"]').click();
+    await page.goto(base+'/#sessions');
     await page.locator('#session-kind').selectOption('terminal');await page.locator('#all-sessions [data-session]').click();
     await page.locator('.xterm-screen').waitFor();await page.waitForFunction(()=>document.querySelector('#session-read-state').textContent.includes('bytes read'));
     assert(await page.locator('#terminal-screen').evaluate(node=>
@@ -336,7 +354,7 @@ const server=http.createServer(async(req,res)=>{
     assert.equal(operations.filter(o=>o.action?.action==='write').length,writes);
     failWrite=false;await page.locator('#session-resume').click();await page.locator('.xterm-helper-textarea').focus();await page.keyboard.type('Z');await page.waitForTimeout(150);
     assert.equal(operations.filter(o=>o.action?.action==='write').at(-1).action.data,'Z');
-    await page.locator('[data-view="devices"]').click();assert.equal(operations.filter(o=>o.action?.action==='close').length,0);
+    await page.goto(base+'/#devices');assert.equal(operations.filter(o=>o.action?.action==='close').length,0);
     await page.locator('#all-devices [data-device="offline"]').click();
     await page.waitForFunction(()=>document.querySelector('#device-summary').textContent.includes('No heartbeat was received'));
     assert.match(await page.locator('#device-summary').textContent(),/No heartbeat was received/);
@@ -353,12 +371,11 @@ const server=http.createServer(async(req,res)=>{
     if(process.env.INFRA_QA_SCREENSHOT)await page.screenshot({path:process.env.INFRA_QA_SCREENSHOT,fullPage:true});
     // Global responsive gate, including tiny phones and dark OS preference.
     for(const width of [320,390,768,1280]){
-      const navNames=await page.locator('.sidebar button.nav').evaluateAll(nodes=>nodes.map(node=>node.getAttribute('aria-label')));
-      assert.deepEqual(navNames,['Overview','Devices','Sessions','Activity','Settings']);
+      assert(await page.locator('#settings-gear').isVisible());
+      assert(await page.locator('#add-device').isVisible());
 
       await page.setViewportSize({width,height:810});
       await page.goto(base+'/#overview');
-      if(width<=650){assert(await page.locator('.sidebar .nav').first().evaluate(node=>node.getBoundingClientRect().height>=44));assert(await page.locator('.sidebar .nav>span').last().isVisible());}
       await page.locator('#overview-devices .device-row').first().waitFor();
       assert(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth+1),'Overview overflowed at '+width+'px: '+JSON.stringify(await page.evaluate(()=>[...document.querySelectorAll('body *')].filter(e=>e.getBoundingClientRect().right>innerWidth+1).slice(0,16).map(e=>[e.tagName,e.id,e.className,Math.round(e.getBoundingClientRect().right),e.parentElement?.outerHTML.slice(0,260)]))));
       await page.goto(base+'/#devices');
@@ -498,7 +515,7 @@ const server=http.createServer(async(req,res)=>{
     assert.equal(enrollmentCalls,mutationsBefore+1);
 
     await page.setViewportSize({width:1280,height:900});
-    await page.locator('[data-view="settings"]').click();await page.locator('#logout-session').click();
+    await page.goto(base+'/#settings');await page.locator('#logout-session').click();
     await page.waitForFunction(()=>document.querySelector('#all-devices').textContent.includes('No devices'));
     assert.equal(await page.locator('#app-shell').isVisible(),false);assert.equal(await page.locator('#signin').isVisible(),true);
     assert.equal(await page.locator('#file-content').textContent(),'');assert.equal(await page.locator('#session-output').textContent(),'');

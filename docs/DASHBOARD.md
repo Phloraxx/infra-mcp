@@ -276,7 +276,7 @@ Locally embedded SVG icons replaced placeholder letters for device platforms, se
 
 ![Mobile](previews/icons/overview-mobile.png)
 
-### Dark edition — current visual system
+### Dark edition — v3 visual system
 
 A dark visual system for the existing minimal, list-first dashboard. Layout, information hierarchy, device/session controls, owner pairing and authentication are unchanged. Graphite-black backgrounds (#101312), restrained raised surfaces (#181c1a / #1e2420), warm white text (#eef2ee), subdued green accents (#8fc3a0) and soft status colors across dialogs, inputs, empty states, inventory rows, files, settings, terminal and mobile navigation. The browser announces a dark color scheme regardless of OS theme preference; there is no light-mode toggle.
 
@@ -289,6 +289,18 @@ A dark visual system for the existing minimal, list-first dashboard. Layout, inf
 ![Device detail, mobile](previews/dark/device-mobile.png)
 
 Browser regression checks cover dark login and input surfaces, the dark owner-pairing dialog, the near-black terminal, layout at 320/390/768/1280 px, dark appearance even under an OS light preference, and all existing device/session/auth/XSS interactions. Screenshots use fixture data, not private live device data. The frontend is embedded in the Rust gateway; updating the repository or releasing the CLI/agent does not automatically deploy it.
+
+### Console edition — current layout
+
+One screen instead of five views. The sidebar is replaced by a sticky topbar: brand, a live gateway chip, device search, Add device and a settings popover (change password, session and keys, sign out). The four summary cards collapse into one 56-px KPI line with an amber needs-attention chip that jumps straight to the offline device. Devices, active work and activity become zones on a single 5/4/3 grid. The device page becomes a 500-px drawer with the same tabs (a bottom sheet on mobile); the session page becomes a full-screen overlay; Esc closes anything. Sign-in keeps the v3 surfaces with friendlier copy: "Welcome back.", a live gateway status chip before you type, an example username placeholder, and "Just you, your keys and your machines."
+
+![Console, desktop](previews/dark/overview-desktop.png)
+
+![Console, mobile](previews/dark/overview-mobile.png)
+
+![Device drawer, mobile](previews/dark/device-mobile.png)
+
+The browser gate additionally covers the attention chip jumping into the drawer, the settings popover, topbar zone search and the friendlier sign-in copy. Screenshots use fixture data, not private live device data. The frontend is embedded in the Rust gateway; updating the repository or releasing the CLI/agent does not automatically deploy it.
 
 ## Deployment audit trail — infra.drbijoy.in
 
