@@ -265,7 +265,10 @@ pub(crate) async fn dispatch_to_device(
     };
     let id = Uuid::new_v4();
     let (_pending, reply_rx) = state.pending.register(id, device_id.clone(), generation);
-    permit.send(GatewayToAgent::Request(AgentRequest { id, operation }));
+    permit.send(Outbound::Json(GatewayToAgent::Request(AgentRequest {
+        id,
+        operation,
+    })));
     let error = match tokio::time::timeout_at(deadline, reply_rx).await {
         Ok(Ok(response)) => return Ok(response),
         Ok(Err(_)) => "device connection closed after dispatch; operation was not replayed",

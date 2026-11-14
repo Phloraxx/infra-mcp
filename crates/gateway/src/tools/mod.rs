@@ -380,10 +380,32 @@ impl InfraMcp {
                 offset,
                 length,
             },
-            McpTerminalActionInput::Write { session_id, data } => TerminalAction::Write {
-                session_id: parse_uuid(Some(session_id), "session_id")?,
-                data,
-            },
+            McpTerminalActionInput::Write { session_id, data } => {
+                let session_id = parse_uuid(Some(session_id), "session_id")?;
+                let device = resolve_device(&self.state, &input.device)
+                    .await
+                    .map_err(dispatch_error)?;
+                if supports_capability(
+                    &self.state,
+                    &device,
+                    infra_protocol::TERMINAL_BINARY_CAPABILITY,
+                )
+                .await
+                {
+                    // Raw input on the agent link; the MCP surface stays a string.
+                    let response = terminal_write_binary(
+                        &self.state,
+                        &device,
+                        session_id,
+                        data.as_bytes(),
+                        65_000,
+                    )
+                    .await?;
+                    record_operation(&self.state, &device, "terminal", &response);
+                    return Ok(McpJson(response_json(response)));
+                }
+                TerminalAction::Write { session_id, data }
+            }
             McpTerminalActionInput::Resize {
                 session_id,
                 rows,
@@ -447,13 +469,118 @@ impl InfraMcp {
             },
             _ => return Err("unknown transfer action".into()),
         };
-        tool_operation(
-            &self.state,
-            input.device,
-            AgentOperation::Transfer(TransferRequest { action }),
-            300_000,
-        )
-        .await
+        // Payload-bearing actions use a bulk frame when the device negotiated it.
+        // The MCP surface itself stays JSON, so a binary download is re-encoded
+        // once here instead of on the agent link.
+        match action {
+            TransferAction::UploadChunk {
+                transfer_id,
+                offset,
+                data_base64,
+            } => {
+                let device = resolve_device(&self.state, &input.device)
+                    .await
+                    .map_err(dispatch_error)?;
+                if supports_capability(
+                    &self.state,
+                    &device,
+                    infra_protocol::TRANSFER_BINARY_CAPABILITY,
+                )
+                .await
+                {
+                    let data = STANDARD
+                        .decode(data_base64)
+                        .map_err(|_| ToolError::invalid("data_base64 is invalid"))?;
+                    let response = upload_chunk_binary(
+                        &self.state,
+                        &device,
+                        transfer_id,
+                        offset,
+                        &data,
+                        300_000,
+                    )
+                    .await?;
+                    record_operation(&self.state, &device, "transfer", &response);
+                    return Ok(McpJson(response_json(response)));
+                }
+                tool_operation(
+                    &self.state,
+                    input.device,
+                    AgentOperation::Transfer(TransferRequest {
+                        action: TransferAction::UploadChunk {
+                            transfer_id,
+                            offset,
+                            data_base64,
+                        },
+                    }),
+                    300_000,
+                )
+                .await
+            }
+            TransferAction::DownloadChunk {
+                transfer_id,
+                offset,
+                length,
+            } => {
+                let device = resolve_device(&self.state, &input.device)
+                    .await
+                    .map_err(dispatch_error)?;
+                if supports_capability(
+                    &self.state,
+                    &device,
+                    infra_protocol::TRANSFER_BINARY_CAPABILITY,
+                )
+                .await
+                {
+                    let (response, frame) = download_chunk_binary(
+                        &self.state,
+                        &device,
+                        transfer_id,
+                        offset,
+                        length,
+                        300_000,
+                    )
+                    .await?;
+                    record_operation(&self.state, &device, "transfer", &response);
+                    let mut value = response_json(response);
+                    if let Some(frame) = frame
+                        && let Some(body) = value
+                            .get_mut("body")
+                            .and_then(serde_json::Value::as_object_mut)
+                    {
+                        body.insert(
+                            "data_base64".into(),
+                            serde_json::json!(STANDARD.encode(&frame.payload)),
+                        );
+                        body.remove("data_binary");
+                        body.remove("length");
+                    }
+                    return Ok(McpJson(value));
+                }
+                tool_operation(
+                    &self.state,
+                    input.device,
+                    AgentOperation::Transfer(TransferRequest {
+                        action: TransferAction::DownloadChunk {
+                            transfer_id,
+                            offset,
+                            length,
+                        },
+                    }),
+                    300_000,
+                )
+                .await
+            }
+            action => {
+                tool_operation(
+                    &self.state,
+                    input.device,
+                    AgentOperation::Transfer(TransferRequest { action }),
+                    300_000,
+                )
+                .await
+            }
+        }
     }
 
     #[tool(

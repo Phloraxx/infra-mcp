@@ -23,8 +23,10 @@ pub(crate) fn agent_heartbeat_timeout() -> Duration {
 pub(crate) struct DeviceConnection {
     pub(crate) hello: DeviceHello,
     pub(crate) generation: u64,
-    pub(crate) tx: mpsc::Sender<GatewayToAgent>,
+    pub(crate) tx: mpsc::Sender<Outbound>,
     pub(crate) retire: mpsc::Sender<()>,
+    /// Readers waiting for a bulk payload on this connection.
+    pub(crate) bulk: BulkWaiters,
     pub(crate) reconcile: ReconcileSnapshot,
     /// Content hash of `reconcile`, used to suppress redundant
     /// `sessions_changed` events. Reset with the connection, so the first
@@ -72,8 +74,10 @@ pub(crate) async fn handle_agent(mut socket: WebSocket, state: AppState) {
         .capabilities
         .iter()
         .any(|cap| cap == infra_protocol::TERMINAL_BINARY_CAPABILITY);
+    let binary_frames = supports_transfer_binary || supports_terminal_binary;
     let generation = state.next_generation.fetch_add(1, Ordering::Relaxed);
-    let (out_tx, mut out_rx) = mpsc::channel::<GatewayToAgent>(64);
+    let bulk_waiters = BulkWaiters::default();
+    let (out_tx, mut out_rx) = mpsc::channel::<Outbound>(64);
     let (retire_tx, mut retire_rx) = mpsc::channel::<()>(1);
     let ack = GatewayToAgent::HelloAck(HelloAck {
         protocol: PROTOCOL_VERSION,
@@ -82,7 +86,7 @@ pub(crate) async fn handle_agent(mut socket: WebSocket, state: AppState) {
         control_frame_limit: DEFAULT_CONTROL_FRAME_LIMIT,
         reconcile_requested: true,
         reconcile_hash: supports_reconcile_hash,
-        binary_frames: supports_transfer_binary || supports_terminal_binary,
+        binary_frames,
     });
     if send_json(&mut socket, &ack).await.is_err() {
         return;
@@ -103,6 +107,7 @@ pub(crate) async fn handle_agent(mut socket: WebSocket, state: AppState) {
                     generation,
                     tx: out_tx.clone(),
                     retire: retire_tx,
+                    bulk: bulk_waiters.clone(),
                     reconcile: ReconcileSnapshot::default(),
                     reconcile_hash: None,
                 },
@@ -134,9 +139,8 @@ pub(crate) async fn handle_agent(mut socket: WebSocket, state: AppState) {
     heartbeat.tick().await;
     let mut readiness = readiness::ProbeState::default();
     if supports_readiness {
-        let _ = out_tx.try_send(GatewayToAgent::ConnectionProbe(
-            readiness.challenge(generation),
-        ));
+        let _ = out_tx
+            .try_send(GatewayToAgent::ConnectionProbe(readiness.challenge(generation)).into());
     }
     let mut last_inbound = Instant::now();
     let mut disconnect_reason = "connection_closed";
@@ -158,7 +162,7 @@ pub(crate) async fn handle_agent(mut socket: WebSocket, state: AppState) {
                 let heartbeat_message = if supports_readiness {
                     GatewayToAgent::ConnectionProbe(readiness.challenge(generation))
                 } else { GatewayToAgent::Ping };
-                if out_tx.try_send(heartbeat_message).is_err() {
+                if out_tx.try_send(heartbeat_message.into()).is_err() {
                     warn!(device_id=%hello.device_id,generation,"agent heartbeat queue unavailable");
                     disconnect_reason = "heartbeat_queue_full";
                     break;
@@ -178,8 +182,17 @@ pub(crate) async fn handle_agent(mut socket: WebSocket, state: AppState) {
                 }
                 break;
             },
-            maybe_out=out_rx.recv()=>match maybe_out{Some(message)=>{
-                match tokio::time::timeout(Duration::from_secs(5),send_json(&mut socket,&message)).await {
+            maybe_out=out_rx.recv()=>match maybe_out{Some(outbound)=>{
+                let sent = async {
+                    match outbound {
+                        Outbound::Json(message) => send_json(&mut socket, &message).await,
+                        Outbound::Binary(bytes) => socket
+                            .send(Message::Binary(bytes.into()))
+                            .await
+                            .map_err(anyhow::Error::from),
+                    }
+                };
+                match tokio::time::timeout(Duration::from_secs(5),sent).await {
                     Ok(Ok(()))=>{},
                     Ok(Err(e))=>{warn!(device_id=%hello.device_id,error=%e,"failed to send to agent");disconnect_reason="send_error";break},
                     Err(_)=>{warn!(device_id=%hello.device_id,generation,"timed out sending to agent");disconnect_reason="send_timeout";break},
@@ -247,7 +260,10 @@ pub(crate) async fn handle_agent(mut socket: WebSocket, state: AppState) {
                                 // a cached/superseded socket cannot certify itself as active.
                                 let devices = state.devices.read().await;
                                 if devices.get(&hello.device_id).is_some_and(|device| device.generation == generation) {
-                                    if out_tx.try_send(GatewayToAgent::ConnectionReady(reply)).is_err() {
+                                    if out_tx
+                                        .try_send(GatewayToAgent::ConnectionReady(reply).into())
+                                        .is_err()
+                                    {
                                         disconnect_reason = "readiness_queue_full";
                                         break;
                                     }
@@ -260,13 +276,29 @@ pub(crate) async fn handle_agent(mut socket: WebSocket, state: AppState) {
                         Ok(AgentToGateway::Pong)=>{}, Ok(_)=>warn!(device_id=%hello.device_id,"unexpected post-auth agent frame"), Err(e)=>warn!(device_id=%hello.device_id,error=%e,"invalid agent frame")
                     }
                 },
+                Some(Ok(Message::Binary(bytes)))=>{
+                    last_inbound=Instant::now();
+                    if !binary_frames {
+                        warn!(device_id=%hello.device_id,generation,"binary frame on a connection that did not negotiate bulk frames");
+                        disconnect_reason="unexpected_binary_frame";
+                        break;
+                    }
+                    match deliver_frame(&bulk_waiters,&bytes) {
+                        Ok(true)=>{},
+                        // A frame whose request already timed out is dropped: the
+                        // relay resumes from the last confirmed offset.
+                        Ok(false)=>warn!(device_id=%hello.device_id,generation,"bulk frame had no waiting reader"),
+                        Err(e)=>{warn!(device_id=%hello.device_id,error=%e,"malformed bulk frame");disconnect_reason="malformed_binary_frame";break},
+                    }
+                },
                 Some(Ok(Message::Ping(payload)))=>{last_inbound=Instant::now();if socket.send(Message::Pong(payload)).await.is_err(){break}},
                 Some(Ok(Message::Pong(_)))=>{last_inbound=Instant::now();},
-                Some(Ok(Message::Close(_)))|None=>{disconnect_reason="socket_closed";break},Some(Ok(_))=>{},Some(Err(e))=>{warn!(device_id=%hello.device_id,error=%e,"agent websocket error");disconnect_reason="socket_error";break}
+                Some(Ok(Message::Close(_)))|None=>{disconnect_reason="socket_closed";break},Some(Err(e))=>{warn!(device_id=%hello.device_id,error=%e,"agent websocket error");disconnect_reason="socket_error";break}
             }
         }
     }
     state.pending.disconnect(&hello.device_id, generation);
+    bulk_waiters.clear();
     let mut devices = state.devices.write().await;
     if devices
         .get(&hello.device_id)

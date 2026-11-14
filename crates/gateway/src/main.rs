@@ -1,6 +1,7 @@
 mod agent_ws;
 mod auth;
 mod browser_auth;
+mod bulk;
 mod copy;
 mod dashboard_http;
 mod hermes_bridge;
@@ -18,6 +19,7 @@ mod version;
 
 use agent_ws::*;
 use browser_auth::*;
+use bulk::*;
 use dashboard_http::*;
 use oauth_http::*;
 use pairing_http::*;
@@ -38,7 +40,10 @@ use axum::{
     },
     routing::{get, post},
 };
-use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
+use base64::{
+    Engine as _,
+    engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD},
+};
 use ed25519_dalek::{Signature, VerifyingKey};
 use hermes_bridge::{HermesBridge, HermesInput, HermesMemoryInput};
 use hmac::{Hmac, KeyInit, Mac};

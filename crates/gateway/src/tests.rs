@@ -647,9 +647,7 @@ async fn timed_out_operation_does_not_disconnect_healthy_agent() {
     server.abort();
 }
 
-async fn queued_test_device(
-    state: &AppState,
-) -> (mpsc::Receiver<GatewayToAgent>, mpsc::Receiver<()>) {
+async fn queued_test_device(state: &AppState) -> (mpsc::Receiver<Outbound>, mpsc::Receiver<()>) {
     let (tx, rx) = mpsc::channel(1);
     let (retire, retire_rx) = mpsc::channel(1);
     state.devices.write().await.insert(
@@ -659,6 +657,7 @@ async fn queued_test_device(
             generation: 1,
             tx,
             retire,
+            bulk: BulkWaiters::default(),
             reconcile: ReconcileSnapshot::default(),
             reconcile_hash: None,
         },
@@ -733,7 +732,7 @@ async fn legacy_lists_and_advertised_pages_use_the_existing_request_lifecycle() 
         let caller = tokio::spawn(async move {
             dispatch_to_device(&caller_state, "queued-device".into(), operation, 1000).await
         });
-        let Some(GatewayToAgent::Request(request)) =
+        let Some(Outbound::Json(GatewayToAgent::Request(request))) =
             tokio::time::timeout(Duration::from_secs(1), rx.recv())
                 .await
                 .unwrap()
@@ -766,7 +765,7 @@ async fn full_queue_expires_without_dispatch_or_connection_retirement() {
     let (mut rx, mut retire) = queued_test_device(&state).await;
     state.devices.read().await["queued-device"]
         .tx
-        .send(GatewayToAgent::Ping)
+        .send(GatewayToAgent::Ping.into())
         .await
         .unwrap();
     let result = tokio::time::timeout(
@@ -777,7 +776,10 @@ async fn full_queue_expires_without_dispatch_or_connection_retirement() {
     .expect("queue admission must be bounded");
     assert!(matches!(result, Err(DispatchError::QueueBusy)));
     assert!(state.pending.is_empty());
-    assert!(matches!(rx.recv().await, Some(GatewayToAgent::Ping)));
+    assert!(matches!(
+        rx.recv().await,
+        Some(Outbound::Json(GatewayToAgent::Ping))
+    ));
     assert!(
         rx.try_recv().is_err(),
         "expired operation was unexpectedly queued"
@@ -807,7 +809,7 @@ async fn abort_after_dispatch_removes_waiter_and_does_not_replay() {
         .await
         .unwrap()
         .unwrap();
-    let GatewayToAgent::Request(request) = request else {
+    let Outbound::Json(GatewayToAgent::Request(request)) = request else {
         panic!("expected request")
     };
     assert!(!state.pending.is_empty());
@@ -836,7 +838,7 @@ async fn abort_while_waiting_for_queue_does_not_dispatch() {
     let (mut rx, _retire) = queued_test_device(&state).await;
     state.devices.read().await["queued-device"]
         .tx
-        .send(GatewayToAgent::Ping)
+        .send(GatewayToAgent::Ping.into())
         .await
         .unwrap();
     let caller_state = state.clone();
@@ -853,7 +855,10 @@ async fn abort_while_waiting_for_queue_does_not_dispatch() {
     caller.abort();
     assert!(caller.await.unwrap_err().is_cancelled());
     assert!(state.pending.is_empty());
-    assert!(matches!(rx.recv().await, Some(GatewayToAgent::Ping)));
+    assert!(matches!(
+        rx.recv().await,
+        Some(Outbound::Json(GatewayToAgent::Ping))
+    ));
     assert!(rx.try_recv().is_err());
     server.abort();
 }
