@@ -456,6 +456,17 @@ async fn a_second_connection_wins_and_the_old_socket_close_does_not_go_offline()
         "a supersession is not a recovery: {:?}",
         fixture.store.audit_rows()
     );
+    // The superseded connection must be classified as a supersession, not as a
+    // failed control-path health check: the soak analysis reads these lines.
+    let log = fixture.gateway.log();
+    assert!(
+        log.contains("superseded by a newer connection"),
+        "the supersession must be logged as such"
+    );
+    assert!(
+        !log.contains("failed control-path health check"),
+        "a supersession must not be reported as a health failure"
+    );
     second.stop();
 }
 

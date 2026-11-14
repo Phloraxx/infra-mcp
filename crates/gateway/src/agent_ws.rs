@@ -153,9 +153,18 @@ pub(crate) async fn handle_agent(mut socket: WebSocket, state: AppState) {
                     break;
                 }
             },
-            _ = retire_rx.recv() => {
-                warn!(device_id=%hello.device_id,generation,"agent connection retired after failed control-path health check");
-                disconnect_reason = "control_path_timeout";
+            maybe_retire = retire_rx.recv() => {
+                match maybe_retire {
+                    Some(()) => {
+                        warn!(device_id=%hello.device_id,generation,"agent connection retired after failed control-path health check");
+                        disconnect_reason = "control_path_timeout";
+                    }
+                    // The sender is dropped when a newer connection replaces this
+                    // entry in the device map. That is a supersession, not a
+                    // failed health check, and the generation guard below keeps
+                    // it from touching the replacement.
+                    None => info!(device_id=%hello.device_id,generation,"agent connection superseded by a newer connection"),
+                }
                 break;
             },
             maybe_out=out_rx.recv()=>match maybe_out{Some(message)=>{
