@@ -302,6 +302,18 @@ One screen instead of five views. The sidebar is replaced by a sticky topbar: br
 
 The browser gate additionally covers the attention chip jumping into the drawer, the settings popover, topbar zone search and the friendlier sign-in copy. Screenshots use fixture data, not private live device data. The frontend is embedded in the Rust gateway; updating the repository or releasing the CLI/agent does not automatically deploy it.
 
+### Console refinements — current polish
+
+Feedback pass over the console layout, still in the v3 design language:
+
+- The KPI line is now real stat cards: icon tile, big tabular figure and a quiet caption, with a hover lift.
+- Whole rows are the click target. A device row or session row opens directly; rows are keyboard-focusable and answer Enter and Space.
+- The device drawer floats in over a whisper of a scrim instead of dimming the whole screen; rounded corners, soft cast shadow, spring easing.
+- Sessions and terminals open as a centred pop-up over the console instead of taking over the page. Esc, the dimmed backdrop or Close returns to the console; the interactive terminal itself keeps raw Esc for vim and shells.
+- Activity entries carry a right-aligned relative time and clamp long identifiers, so nothing leaves its zone.
+- The settings control is an unmistakable cog that turns on hover; its popover springs from the gear.
+- Zones rise in sequence on load; motion respects prefers-reduced-motion.
+
 ## Deployment audit trail — infra.drbijoy.in
 
 | Rollout | Gateway commit | Deployed gateway SHA-256 | Rollback/staging snapshot |

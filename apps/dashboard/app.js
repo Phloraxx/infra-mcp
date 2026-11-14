@@ -36,7 +36,7 @@ logout:'<path d="M10 3H5a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h5M14 16l4-4-4-4m4 4H9"/>
 close:'<path d="M6 6l12 12M18 6 6 18"/>',
 copy:'<rect x="8" y="8" width="12" height="12" rx="2"/><path d="M16 8V5a2 2 0 0 0-2-2H5a2 2 0 0 0-2 2v9a2 2 0 0 0 2 2h3"/>',
 key:'<circle cx="8" cy="15" r="4"/><path d="M11 12 21 2l1 4-3 1-1 3-3 1-4 4"/>',
-gear:'<circle cx="12" cy="12" r="3.2"/><path d="M12 2.8v2.4M12 18.8v2.4M2.8 12h2.4M18.8 12h2.4M5.5 5.5l1.7 1.7M16.8 16.8l1.7 1.7M18.5 5.5l-1.7 1.7M7.2 16.8l-1.7 1.7"/>'
+gear:'<circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09a1.65 1.65 0 0 0-1-1.51 1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09a1.65 1.65 0 0 0 1.51-1 1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33h.01a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51h.01a1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82v.01a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/>'
 });
 function icon(name){
   const safe=Object.hasOwn(iconShapes,name)?name:'devices';
@@ -146,22 +146,22 @@ function reconnectExplanation(d){
 function deviceRow(d){
   const status=deviceState(d),work=(d.active_jobs||0)+(d.active_terminals||0)+(d.active_transfers||0),caps=d.capabilities||[];
   const shown=caps.slice(0,3).map(c=>`<span class="pill">${esc(capabilityLabel(c))}</span>`).join(''),more=caps.length>3?`<span class="pill more">+${caps.length-3}</span>`:'';
-  return `<div class="device-row"><div class="device-primary"><div class="device-avatar ${d.online&&!d.revoked?'online':''}">${platformIcon(d.platform)}</div><div class="device-primary-text"><button class="device-link" data-device="${esc(d.device_id)}">${esc(d.device_name)}</button><div class="device-meta">${esc(d.platform)} · ${esc(d.arch)} · ${d.online?'connected now':`seen ${relative(d.last_seen_unix_ms)}`}</div></div></div><div class="caps">${shown}${more}</div><div class="work-count">${work?`${work} active`:'—'}</div><div class="status ${status}">${status[0].toUpperCase()+status.slice(1)}</div></div>`;
+  return `<div class="device-row" data-device="${esc(d.device_id)}" role="button" tabindex="0"><div class="device-primary"><div class="device-avatar ${d.online&&!d.revoked?'online':''}">${platformIcon(d.platform)}</div><div class="device-primary-text"><span class="device-link">${esc(d.device_name)}</span><div class="device-meta">${esc(d.platform)} · ${esc(d.arch)} · ${d.online?'connected now':`seen ${relative(d.last_seen_unix_ms)}`}</div></div></div><div class="caps">${shown}${more}</div><div class="work-count">${work?`${work} active`:'—'}</div><div class="status ${status}">${status[0].toUpperCase()+status.slice(1)}</div></div>`;
 }
 function sessionRow(s){
   const kind=String(s.kind||'session'),status=String(s.status||'unknown');
-  return `<div class="session-row"><div class="session-kind-icon ${esc(kind)}">${kindIcon(kind)}</div><div><button class="device-link" data-session="${esc(s.id)}" data-device="${esc(s.device_id)}" data-kind="${esc(kind)}">${esc(s.device_name)} · ${esc(kind)}</button><div class="session-meta">${esc(status)} · started ${relative(s.started_at_unix_ms)}${s.device_online?'':' · device offline'} · ${esc(s.id)}</div></div><span class="pill">${esc(status)}</span></div>`;
+  return `<div class="session-row" data-session="${esc(s.id)}" data-device="${esc(s.device_id)}" data-kind="${esc(kind)}" role="button" tabindex="0"><div class="session-kind-icon ${esc(kind)}">${kindIcon(kind)}</div><div><span class="session-title">${esc(s.device_name)} · ${esc(kind)}</span><div class="session-meta">${esc(status)} · started ${relative(s.started_at_unix_ms)}${s.device_online?'':' · device offline'} · ${esc(s.id)}</div></div><span class="pill">${esc(status)}</span></div>`;
 }
 function activityRow(a){
   const outcome=String(a.outcome||'');const state=outcome==='ok'||outcome==='success'?'ok':outcome.includes('fail')||outcome.includes('error')?'failed':'';
-  return `<div class="activity-row"><div class="activity-dot ${state}"></div><div><div class="session-title">${esc(a.action)}${a.device_name?` · ${esc(a.device_name)}`:''}</div><div class="session-meta">${relative(a.at_unix_ms)} · ${esc(outcome)}${a.request_id?` · ${esc(a.request_id)}`:''}</div></div></div>`;
+  const when=relative(a.at_unix_ms);return `<div class="activity-row"><div class="activity-dot ${state}"></div><div class="activity-main"><div class="session-title">${esc(a.action)}${a.device_name?` · ${esc(a.device_name)}`:''}</div><div class="session-meta">${esc(outcome)}${a.request_id?` · ${esc(a.request_id)}`:''}</div></div><time class="activity-when">${esc(when)}</time></div>`;
 }
 function activeSession(s){return ['running','starting','canceling','uploading','downloading','ready'].includes(s.status);}
 function render(){
   const online=state.devices.filter(d=>d.online&&!d.revoked).length,offline=state.devices.filter(d=>!d.online&&!d.revoked).length,revoked=state.devices.filter(d=>d.revoked).length,active=state.sessions.filter(activeSession).length;
-  const metrics=[['Connected',online,'online','check'],['Offline',offline,'offline','offline'],['Active sessions',active,'work','terminal'],['Total devices',state.devices.length-revoked,'enrolled','devices']];
+  const metrics=[['Connected',online,'online','check',(state.devices.length-revoked)+' enrolled'],['Offline',offline,'offline','offline',offline?offline+' to check':'all healthy'],['Active sessions',active,'work','terminal','running now'],['Total devices',state.devices.length-revoked,'enrolled','devices',revoked?revoked+' revoked':'whole fleet']];
   const offlineDevices=state.devices.filter(d=>!d.revoked&&!d.online);
-  $('#summary').innerHTML=metrics.map(([k,v,c,i])=>`<div class="summary-card ${c}"><div class="metric-top"><span>${k}</span><span class="metric-icon">${icon(i)}</span></div><strong>${v}</strong></div>`).join('')+(offlineDevices.length?`<button type="button" class="attention-chip" data-device="${esc(offlineDevices[0].device_id)}"><i></i>needs attention &rarr;</button>`:'');
+  $('#summary').innerHTML=metrics.map(([k,v,c,i,s])=>`<div class="summary-card ${c}"><div class="metric-top"><span>${k}</span><span class="metric-icon">${icon(i)}</span></div><strong>${v}</strong><em class="metric-sub">${esc(s)}</em></div>`).join('')+(offlineDevices.length?`<button type="button" class="attention-chip" data-device="${esc(offlineDevices[0].device_id)}"><i></i>needs attention &rarr;</button>`:'');
   const devices=state.devices.length?state.devices.map(deviceRow).join(''):emptyState('No devices enrolled yet.','devices');
   $('#all-devices').innerHTML=devices;applyDeviceSearch();
   $('#overview-devices').innerHTML=state.devices.length?state.devices.map(deviceRow).join(''):'<div class="first-device">'+icon('devices')+'<h3>Add your first computer</h3><p>Install Infra, compare the pairing codes, and approve it here.</p><button class="primary" data-add-device>Add a device</button></div>';
@@ -482,7 +482,7 @@ function applyDeviceSearch(){
   const rows=$$('#all-devices .device-row');
   let found=0;
   rows.forEach(row=>{
-    const id=row.querySelector('[data-device]')?.dataset.device;
+    const id=row.dataset.device;
     const device=state.devices.find(d=>d.device_id===id);
     const text=[device?.device_name,device?.platform,device?.arch,...(device?.capabilities||[])].join(' ').toLocaleLowerCase();
     const match=!query||text.includes(query);
@@ -504,7 +504,7 @@ function applyZoneSearch(){
   const query=search.value.trim().toLocaleLowerCase();
   let found=0;
   $$('#overview-devices .device-row').forEach(row=>{
-    const id=row.querySelector('[data-device]')?.dataset.device;
+    const id=row.dataset.device;
     const device=state.devices.find(d=>d.device_id===id);
     const text=[device?.device_name,device?.platform,device?.arch,...(device?.capabilities||[])].join(' ').toLocaleLowerCase();
     const match=!query||text.includes(query);
@@ -527,11 +527,20 @@ document.addEventListener('keydown',event=>{
   event.preventDefault();setView('overview');$('#zone-search').focus();
 });
 document.addEventListener('keydown',event=>{
+  if((event.key!=='Enter'&&event.key!==' ')||event.metaKey||event.ctrlKey||event.altKey||event.isComposing)return;
+  if(!(event.target instanceof Element)||event.target!==event.target.closest('.device-row[data-device],.session-row[data-session]'))return;
+  event.preventDefault();
+  const row=event.target;
+  if(row.dataset.session)navigateSession(row.dataset.device,row.dataset.kind,row.dataset.session);else navigateDevice(row.dataset.device);
+});
+document.addEventListener('keydown',event=>{
   if(event.key!=='Escape')return;
   if($('#enroll-dialog')?.open)return;
+  // The interactive terminal keeps raw Esc (vim, shells); everywhere else Esc backs out.
+  if(event.target instanceof Element&&event.target.closest('.xterm'))return;
   const hash=location.hash;
   if(hash.startsWith('#device/')||hash.startsWith('#session/'))setView('overview');
-});
+},{capture:true});
 const settingsPop=$('#settings-pop');
 $('#settings-gear').addEventListener('click',event=>{event.stopPropagation();settingsPop.hidden=!settingsPop.hidden;});
 document.addEventListener('click',event=>{if(!settingsPop.hidden&&!settingsPop.contains(event.target))settingsPop.hidden=true;});
@@ -540,6 +549,7 @@ $('#pop-keys').addEventListener('click',()=>{settingsPop.hidden=true;setView('se
 $('#drawer-close').addEventListener('click',()=>setView('overview'));
 $('#drawer-scrim').addEventListener('click',()=>setView('overview'));
 $('#session-close').addEventListener('click',()=>setView('overview'));
+$('#session-detail').addEventListener('click',event=>{if(event.target.id==='session-detail')setView('overview');});
 function renderSessionList(){
   const select=$('#session-device'),chosen=select.value;
   select.innerHTML='<option value="">All devices</option>'+state.devices.map(d=>`<option value="${esc(d.device_id)}">${esc(d.device_name)}</option>`).join('');select.value=chosen;

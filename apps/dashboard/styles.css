@@ -1126,3 +1126,98 @@ main{max-width:1180px;padding:26px clamp(20px,3.4vw,56px) 90px}
   #session-detail{padding:12px 12px 24px}
 }
 @keyframes sheet-in{from{transform:translateY(48px)}to{transform:none}}
+
+/* ==========================================================================
+   Infra v4.1 - console refinements: stat cards, floating drawer, session
+   pop-up, spring motion, whole-row targets, overflow discipline. Over v4.
+   ========================================================================== */
+:root{--ease-spring:cubic-bezier(.3,1.12,.36,1)}
+main{max-width:1280px}
+
+/* Motion vocabulary. Frames settle once per view change, never per refresh. */
+@keyframes view-in{from{opacity:0;transform:translateY(8px)}to{opacity:1;transform:none}}
+@keyframes rise{from{opacity:0;transform:translateY(14px)}to{opacity:1;transform:none}}
+@keyframes pop-in{from{opacity:0;transform:scale(.97) translateY(-6px)}to{opacity:1;transform:none}}
+@keyframes scrim-in{from{opacity:0}to{opacity:1}}
+@keyframes attention-breathe{0%,100%{opacity:1}50%{opacity:.3}}
+#overview.active,#devices.active,#sessions.active,#activity.active,#settings.active{animation:view-in .3s var(--ease)}
+
+/* Ambient canopy behind the console: barely there, clipped so it never scrolls. */
+#overview{position:relative;overflow:clip}
+#overview::before{content:"";position:absolute;left:50%;top:-80px;width:min(900px,100%);height:360px;transform:translateX(-50%);background:radial-gradient(50% 60% at 50% 40%,rgba(174,189,244,.055),transparent 72%);pointer-events:none}
+
+/* KPI line grows into real stat cards. */
+#summary{display:flex;flex-wrap:wrap;gap:12px;align-items:stretch;background:none;border:0;border-radius:0;padding:6px 0 14px;margin:14px 0 18px;min-height:0}
+.summary-card{position:relative;display:flex;flex-direction:column;align-items:stretch;justify-content:space-between;gap:10px;flex:1 1 0;min-width:150px;background:var(--surface);border:1px solid var(--line);border-radius:14px;padding:14px 16px 13px;transition:border-color .2s var(--ease),transform .2s var(--ease),box-shadow .2s var(--ease)}
+.summary-card:hover{border-color:var(--line-2);transform:translateY(-1px);box-shadow:0 16px 34px -20px rgba(0,0,0,.65)}
+.summary-card .metric-top{display:flex;justify-content:space-between;align-items:center;gap:8px}
+.summary-card span{font-size:11.5px;color:var(--ink-3);white-space:nowrap}
+.summary-card .metric-icon,.summary-card.online .metric-icon,.summary-card.offline .metric-icon{display:flex;align-items:center;justify-content:center;width:26px;height:26px;border-radius:8px;background:var(--surface-2);border:1px solid var(--line);color:var(--ink-3);flex:none}
+.summary-card .metric-icon .ui-icon{width:14px;height:14px;stroke-width:1.8}
+.summary-card.online .metric-icon{color:var(--green);border-color:rgba(126,217,168,.25);background:rgba(126,217,168,.07)}
+.summary-card.offline .metric-icon{color:var(--amber);border-color:rgba(217,181,117,.22);background:rgba(217,181,117,.06)}
+.summary-card strong{font-size:27px;margin:0;color:var(--ink);letter-spacing:-.03em;line-height:1;font-variant-numeric:tabular-nums}
+.summary-card.online strong{color:var(--ink)}
+.summary-card .metric-sub{font-style:normal;font-size:10.5px;color:var(--ink-4);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.attention-chip{align-self:center;min-height:34px;padding:7px 14px;transition:background .15s var(--ease),border-color .15s var(--ease)}
+.attention-chip i{animation:attention-breathe 2.4s ease-in-out infinite}
+
+/* Zones: panels settle in sequence. */
+.overview-stack{gap:16px}
+.overview-stack>section{background:var(--surface);border:1px solid var(--line);border-radius:16px;padding:15px 16px 10px;box-shadow:0 14px 34px -26px rgba(0,0,0,.55);animation:rise .5s var(--ease) both}
+.overview-stack>section:nth-child(2){animation-delay:.07s}
+.overview-stack>section:nth-child(3){animation-delay:.14s}
+.overview-stack .section-head{margin:0 0 4px;padding:2px 4px 10px;border-bottom:1px solid var(--line)}
+.overview-stack .section-head h2{color:var(--ink-2)}
+.overview-stack .section-head p{color:var(--ink-4)}
+#devices>.panel,#sessions>.panel,#activity>.panel{border-radius:16px}
+.settings-card{border-radius:16px}
+
+/* Whole rows are the click target; content never escapes its zone. */
+.device-row,.session-row{cursor:pointer}
+.device-row,.session-row,.activity-row{transition:background .16s var(--ease),transform .16s var(--ease)}
+.overview-stack .device-row:hover,.overview-stack .session-row:hover{background:var(--accent-soft);transform:translateX(2px)}
+.overview-stack .device-row:hover .device-link,.overview-stack .session-row:hover .session-title{color:var(--brand-strong)}
+.device-row:focus-visible,.session-row:focus-visible{outline:2px solid var(--brand);outline-offset:-2px}
+.overview-stack .device-link{display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.overview-stack .device-meta,.overview-stack .session-title,.overview-stack .session-meta{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.session-row>div{min-width:0}
+.activity-main{flex:1;min-width:0}
+.activity-row .session-title,.activity-row .session-meta{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.activity-when{color:var(--ink-4);font-size:10.5px;white-space:nowrap;align-self:center;padding-left:4px}
+.device-avatar{position:relative}
+.device-avatar::after{content:"";position:absolute;right:-2px;bottom:-2px;width:9px;height:9px;border-radius:50%;background:var(--ink-4);border:2px solid var(--surface)}
+.device-avatar.online::after{background:var(--green)}
+
+/* Settings popover arrives from its anchor; the cog turns. */
+.settings-pop{transform-origin:top right;animation:pop-in .18s var(--ease)}
+#settings-gear .ui-icon{transition:transform .5s var(--ease-spring)}
+#settings-gear:hover .ui-icon{transform:rotate(60deg)}
+
+/* Drawer: floats in with a whisper of a scrim instead of dimming the room. */
+.drawer-scrim{background:linear-gradient(to right,rgba(4,6,10,0) 34%,rgba(4,6,10,.18));backdrop-filter:none;-webkit-backdrop-filter:none;animation:scrim-in .28s var(--ease)}
+.drawer-body{width:min(520px,100%);border-radius:18px 0 0 18px;box-shadow:-34px 0 90px -28px rgba(0,0,0,.6);animation:drawer-in .42s var(--ease-spring)}
+@keyframes drawer-in{from{transform:translateX(64px);opacity:0}to{transform:none;opacity:1}}
+
+/* Sessions open as a centred pop-up over the console. */
+#session-detail{display:none;place-items:center;background:rgba(4,6,10,.44);backdrop-filter:blur(5px);-webkit-backdrop-filter:blur(5px);padding:18px;animation:scrim-in .22s var(--ease)}
+#session-detail.active{display:grid}
+#session-detail .session-workspace{width:min(1020px,100%);max-height:calc(100dvh - 36px);overflow:auto;margin:0;border-radius:16px;border:1px solid var(--line-2);box-shadow:0 46px 110px -26px rgba(0,0,0,.78);animation:pop-in .34s var(--ease-spring)}
+#session-detail .session-workspace-head{position:sticky;top:0;background:var(--surface);z-index:1}
+#terminal-screen{height:clamp(280px,44vh,430px)}
+
+/* Narrow screens. */
+@media(max-width:720px){
+  #summary{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px;padding:2px 0 12px}
+  .summary-card{min-width:0;padding:13px 14px 12px}
+  .attention-chip{grid-column:1/-1;justify-self:start;align-self:auto;margin:0}
+}
+@media(max-width:650px){
+  main{padding:18px 14px 60px}
+  .overview-stack>section{padding:13px 12px 8px;border-radius:14px}
+  .overview-stack .device-row:hover,.overview-stack .session-row:hover{transform:none}
+  .drawer-body{border-radius:16px 16px 0 0;box-shadow:0 -26px 70px -22px rgba(0,0,0,.55)}
+  #session-detail{padding:10px}
+  #session-detail .session-workspace{max-height:calc(100dvh - 20px);border-radius:14px}
+  .activity-when{display:none}
+}

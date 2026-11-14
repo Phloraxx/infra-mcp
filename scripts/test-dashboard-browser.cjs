@@ -165,6 +165,15 @@ const server=http.createServer(async(req,res)=>{
     assert.equal(await page.locator('#overview-devices .device-row:not(.hidden)').count(),1);
     await page.locator('#zone-search').fill('');
     assert.equal(await page.locator('#overview-devices .device-row:not(.hidden)').count(),2);
+    // Whole rows are click targets: a row opens its drawer; a session row opens the pop-up.
+    await page.locator('#overview-devices .device-row').first().click();
+    await page.waitForFunction(()=>document.querySelector('#device-detail').classList.contains('active'));
+    await page.locator('#drawer-close').click();
+    await page.waitForFunction(()=>document.querySelector('#overview').classList.contains('active'));
+    await page.locator('#overview-sessions .session-row').first().click();
+    await page.waitForFunction(()=>document.querySelector('#session-detail').classList.contains('active'));
+    await page.locator('#session-close').click();
+    await page.waitForFunction(()=>document.querySelector('#overview').classList.contains('active'));
     if(process.env.INFRA_QA_OVERVIEW_SCREENSHOT||process.env.INFRA_QA_MOBILE_OVERVIEW_SCREENSHOT){
       // Public design previews use readable sample labels; the functional
       // tests below still exercise the original hostile-name/XSS fixture.
