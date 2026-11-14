@@ -43,6 +43,24 @@ impl From<String> for RelayError {
     }
 }
 
+/// Which side of the relay an RPC went to. An uncertain chunk names it in the
+/// pause reason, so an operator can tell whether the source or the destination
+/// went away without reading the transfer IDs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum Endpoint {
+    Source,
+    Destination,
+}
+
+impl Endpoint {
+    fn role(self) -> &'static str {
+        match self {
+            Self::Source => "source",
+            Self::Destination => "destination",
+        }
+    }
+}
+
 /// Everything one relay needs to keep going. `source_id`/`destination_id` are
 /// filled in as [`begin`] progresses, so a caller that fails halfway still knows
 /// which transfers exist and can resume or cancel them.
@@ -100,7 +118,12 @@ fn classify_dispatch(error: DispatchError) -> RelayError {
     }
 }
 
-async fn step(state: &AppState, device: &str, action: TransferAction) -> Result<Value, RelayError> {
+async fn step(
+    state: &AppState,
+    device: &str,
+    endpoint: Endpoint,
+    action: TransferAction,
+) -> Result<Value, RelayError> {
     let response = dispatch_to_device(
         state,
         device.to_owned(),
@@ -109,21 +132,22 @@ async fn step(state: &AppState, device: &str, action: TransferAction) -> Result<
     )
     .await
     .map_err(classify_dispatch)?;
-    body_of(response)
+    body_of(response, endpoint)
 }
 
-fn body_of(response: AgentResponse) -> Result<Value, RelayError> {
+fn body_of(response: AgentResponse, endpoint: Endpoint) -> Result<Value, RelayError> {
+    let role = endpoint.role();
     match response.result {
         OperationResult::Ok { body } => Ok(body),
         OperationResult::Failed { error } => Err(RelayError::Failed(error)),
         OperationResult::Canceled { error } => Err(RelayError::Failed(
             error.unwrap_or_else(|| "transfer canceled".into()),
         )),
-        OperationResult::DeadlineExceeded => Err(RelayError::Uncertain(
-            "transfer deadline exceeded; inspect status before retrying".into(),
-        )),
+        OperationResult::DeadlineExceeded => Err(RelayError::Uncertain(format!(
+            "transfer deadline exceeded; inspect status before retrying ({role} endpoint)"
+        ))),
         OperationResult::OutcomeUnknown { error } => Err(RelayError::Uncertain(format!(
-            "transfer outcome unknown (do not assume chunk failed); resume with the returned transfer IDs: {error}"
+            "transfer outcome unknown (do not assume chunk failed); resume with the returned transfer IDs: {error} ({role} endpoint)"
         ))),
         OperationResult::Unsupported { operation } => Err(RelayError::Failed(format!(
             "transfer unsupported: {operation}"
@@ -168,7 +192,7 @@ pub(super) async fn begin(
         && relay.destination_id.is_none()
         && let Some(id) = relay.source_id
     {
-        cancel_transfer(state, &relay.from, id).await;
+        cancel_transfer(state, &relay.from, Endpoint::Source, id).await;
     }
     outcome
 }
@@ -183,6 +207,7 @@ async fn begin_inner(
         step(
             state,
             request.from,
+            Endpoint::Source,
             TransferAction::Status { transfer_id: id },
         )
         .await?
@@ -190,6 +215,7 @@ async fn begin_inner(
         step(
             state,
             request.from,
+            Endpoint::Source,
             TransferAction::DownloadBegin {
                 path: request.source_path.to_owned(),
             },
@@ -212,6 +238,7 @@ async fn begin_inner(
         step(
             state,
             request.to,
+            Endpoint::Destination,
             TransferAction::Status { transfer_id: id },
         )
         .await?
@@ -219,6 +246,7 @@ async fn begin_inner(
         step(
             state,
             request.to,
+            Endpoint::Destination,
             TransferAction::UploadBegin {
                 path: request.destination_path.to_owned(),
                 size: relay.size,
@@ -286,12 +314,13 @@ pub(super) async fn relay_chunk(
         )
         .await
         .map_err(classify_dispatch)?;
-        (body_of(response)?, frame)
+        (body_of(response, Endpoint::Source)?, frame)
     } else {
         (
             step(
                 state,
                 &relay.from,
+                Endpoint::Source,
                 TransferAction::DownloadChunk {
                     transfer_id: source_id,
                     offset,
@@ -354,11 +383,13 @@ pub(super) async fn relay_chunk(
             )
             .await
             .map_err(classify_dispatch)?,
+            Endpoint::Destination,
         )?
     } else {
         step(
             state,
             &relay.to,
+            Endpoint::Destination,
             TransferAction::UploadChunk {
                 transfer_id: destination_id,
                 offset,
@@ -383,6 +414,7 @@ pub(super) async fn commit(state: &AppState, relay: &Relay) -> Result<(), RelayE
     let commit = step(
         state,
         &relay.to,
+        Endpoint::Destination,
         TransferAction::UploadCommit {
             transfer_id: destination_id,
         },
@@ -398,8 +430,14 @@ pub(super) async fn commit(state: &AppState, relay: &Relay) -> Result<(), RelayE
 
 /// Best-effort cancel of one transfer. Used for cleanup, so a failure here must
 /// not mask the error that triggered it.
-pub(super) async fn cancel_transfer(state: &AppState, device: &str, id: Uuid) {
-    let _ = step(state, device, TransferAction::Cancel { transfer_id: id }).await;
+pub(super) async fn cancel_transfer(state: &AppState, device: &str, endpoint: Endpoint, id: Uuid) {
+    let _ = step(
+        state,
+        device,
+        endpoint,
+        TransferAction::Cancel { transfer_id: id },
+    )
+    .await;
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -563,20 +601,45 @@ mod tests {
 
     #[test]
     fn an_uncertain_chunk_is_not_a_failure() {
-        let uncertain = body_of(AgentResponse {
-            id: Uuid::new_v4(),
-            result: OperationResult::OutcomeUnknown {
-                error: "socket closed".into(),
+        let uncertain = body_of(
+            AgentResponse {
+                id: Uuid::new_v4(),
+                result: OperationResult::OutcomeUnknown {
+                    error: "socket closed".into(),
+                },
             },
-        })
+            Endpoint::Destination,
+        )
         .unwrap_err();
         assert!(matches!(uncertain, RelayError::Uncertain(_)));
-        let failed = body_of(AgentResponse {
-            id: Uuid::new_v4(),
-            result: OperationResult::Failed {
-                error: "no such file".into(),
+        // The pause reason keeps its structure and names the side the chunk was
+        // heading to, so an operator can tell which endpoint went away.
+        assert_eq!(
+            uncertain.message(),
+            "transfer outcome unknown (do not assume chunk failed); resume with the returned transfer IDs: socket closed (destination endpoint)"
+        );
+        let source_side = body_of(
+            AgentResponse {
+                id: Uuid::new_v4(),
+                result: OperationResult::DeadlineExceeded,
             },
-        })
+            Endpoint::Source,
+        )
+        .unwrap_err();
+        assert!(
+            source_side.message().ends_with("(source endpoint)"),
+            "{}",
+            source_side.message()
+        );
+        let failed = body_of(
+            AgentResponse {
+                id: Uuid::new_v4(),
+                result: OperationResult::Failed {
+                    error: "no such file".into(),
+                },
+            },
+            Endpoint::Source,
+        )
         .unwrap_err();
         assert!(matches!(failed, RelayError::Failed(_)));
         assert_eq!(failed.message(), "no such file");

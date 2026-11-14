@@ -235,10 +235,10 @@ async fn both_online(state: &AppState, from: &str, to: &str) -> bool {
 
 async fn cancel_transfers(state: &AppState, relay: &Relay) {
     if let Some(id) = relay.destination_id {
-        copy::cancel_transfer(state, &relay.to, id).await;
+        copy::cancel_transfer(state, &relay.to, copy::Endpoint::Destination, id).await;
     }
     if let Some(id) = relay.source_id {
-        copy::cancel_transfer(state, &relay.from, id).await;
+        copy::cancel_transfer(state, &relay.from, copy::Endpoint::Source, id).await;
     }
 }
 
