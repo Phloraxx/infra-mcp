@@ -2,9 +2,10 @@
 
 This file is the starting context for coding agents working in this repository.
 
-n## Implementation work order — 2026-11-14
+## Implementation work order — 2026-11-14
 
 The current planned work is in [docs/IMPROVEMENT_PLAN_2026-11.md](docs/IMPROVEMENT_PLAN_2026-11.md): a self-contained handoff covering binary bulk frames, a durable cross-device copy queue, an end-to-end fault-injection harness, signed-release provisioning, reconcile chatter reduction, audit retention, reconnect jitter and the soak program. Read it together with CURRENT_REALITY.md and NEXT_STEPS.md; standing repo rules (no PRs, QA gate, deploy gotchas) are recorded in its section 0.
+
 ## Agent-friendly MCP contract — November 2026
 
 Read [the agent integration guide](docs/AGENT_CLIENT_GUIDE.md) before editing MCP schemas, job lifecycle, or compact responses. The source branch adds per-action schema alternatives for files/jobs/terminal, capability-gated job waiting and opt-in compact listings. The legacy response defaults remain. Keep long-poll work off the async heartbeat loop, never blindly restart uncertain jobs, and never claim source changes are deployed.
