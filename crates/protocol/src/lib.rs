@@ -779,4 +779,343 @@ mod tests {
         assert_eq!(first, second);
         assert_ne!(first, signed_auth_message("other", epoch, &h));
     }
+    #[test]
+    fn operation_result_wire_shapes_match_contract() {
+        let cases: Vec<(OperationResult, serde_json::Value)> = vec![
+            (
+                OperationResult::Ok {
+                    body: serde_json::json!({"answer": 42}),
+                },
+                serde_json::json!({"status": "ok", "body": {"answer": 42}}),
+            ),
+            (
+                OperationResult::Failed {
+                    error: "boom".into(),
+                },
+                serde_json::json!({"status": "failed", "error": "boom"}),
+            ),
+            (
+                OperationResult::Canceled { error: None },
+                serde_json::json!({"status": "canceled", "error": null}),
+            ),
+            (
+                OperationResult::Canceled {
+                    error: Some("stop".into()),
+                },
+                serde_json::json!({"status": "canceled", "error": "stop"}),
+            ),
+            (
+                OperationResult::DeadlineExceeded,
+                serde_json::json!({"status": "deadline_exceeded"}),
+            ),
+            (
+                OperationResult::OutcomeUnknown {
+                    error: "lost".into(),
+                },
+                serde_json::json!({"status": "outcome_unknown", "error": "lost"}),
+            ),
+            (
+                OperationResult::Unsupported {
+                    operation: "desktop.screenshot".into(),
+                },
+                serde_json::json!({"status": "unsupported", "operation": "desktop.screenshot"}),
+            ),
+            (
+                OperationResult::Unauthorized,
+                serde_json::json!({"status": "unauthorized"}),
+            ),
+        ];
+        for (result, expected) in cases {
+            let wire = serde_json::to_value(&result).unwrap();
+            assert_eq!(wire, expected);
+            assert_eq!(
+                serde_json::from_value::<OperationResult>(wire).unwrap(),
+                result
+            );
+        }
+    }
+
+    #[test]
+    fn agent_response_envelope_roundtrips_result_bodies() {
+        let response = AgentResponse {
+            id: Uuid::parse_str("22222222-2222-4222-8222-222222222222").unwrap(),
+            result: OperationResult::Ok {
+                body: serde_json::json!({"exit_code": 0, "stdout": "ok"}),
+            },
+        };
+        let json = serde_json::to_value(&response).unwrap();
+        assert_eq!(json["result"]["status"], "ok");
+        assert_eq!(json["result"]["body"]["stdout"], "ok");
+        assert_eq!(
+            serde_json::from_value::<AgentResponse>(json).unwrap(),
+            response
+        );
+    }
+
+    #[test]
+    fn agent_operation_envelope_tags_match_wire_contract() {
+        let cases: Vec<(&str, AgentOperation)> = vec![
+            ("status", AgentOperation::Status),
+            (
+                "exec",
+                AgentOperation::Exec {
+                    command: "true".into(),
+                    cwd: None,
+                    timeout_ms: None,
+                },
+            ),
+            (
+                "search",
+                AgentOperation::Search(SearchRequest {
+                    root: "/".into(),
+                    query: "q".into(),
+                    mode: SearchMode::Files,
+                    literal: false,
+                    ignore_case: false,
+                    include_hidden: false,
+                    file_pattern: None,
+                    max_results: None,
+                    context_lines: None,
+                }),
+            ),
+            (
+                "processes",
+                AgentOperation::Processes(ProcessRequest {
+                    action: ProcessAction::List { query: None },
+                }),
+            ),
+            (
+                "jobs",
+                AgentOperation::Jobs(JobRequest {
+                    action: JobAction::List,
+                }),
+            ),
+            (
+                "terminal",
+                AgentOperation::Terminal(TerminalRequest {
+                    action: TerminalAction::List,
+                }),
+            ),
+            (
+                "transfer",
+                AgentOperation::Transfer(TransferRequest {
+                    action: TransferAction::List,
+                }),
+            ),
+            (
+                "system",
+                AgentOperation::System(SystemRequest {
+                    action: SystemAction::Summary,
+                }),
+            ),
+            (
+                "network",
+                AgentOperation::Network(NetworkRequest {
+                    action: NetworkAction::Listeners,
+                }),
+            ),
+            (
+                "services",
+                AgentOperation::Services(ServiceRequest {
+                    action: ServiceAction::List { query: None },
+                }),
+            ),
+            (
+                "containers",
+                AgentOperation::Containers(ContainerRequest {
+                    action: ContainerAction::List,
+                }),
+            ),
+            (
+                "git",
+                AgentOperation::Git(GitRequest {
+                    action: GitAction::Branches { repo: ".".into() },
+                }),
+            ),
+            (
+                "desktop",
+                AgentOperation::Desktop(DesktopRequest {
+                    action: DesktopAction::Permissions,
+                }),
+            ),
+        ];
+        for (tag, operation) in cases {
+            let request = AgentRequest {
+                id: Uuid::new_v4(),
+                operation,
+            };
+            let json = serde_json::to_value(&request).unwrap();
+            assert_eq!(json["operation"]["op"], *tag);
+            assert_eq!(
+                serde_json::from_value::<AgentRequest>(json).unwrap(),
+                request
+            );
+        }
+    }
+
+    #[test]
+    fn search_request_wire_shape_and_mode_tags() {
+        let request = AgentRequest {
+            id: Uuid::new_v4(),
+            operation: AgentOperation::Search(SearchRequest {
+                root: "/srv".into(),
+                query: "needle".into(),
+                mode: SearchMode::Content,
+                literal: true,
+                ignore_case: true,
+                include_hidden: false,
+                file_pattern: Some("*.rs".into()),
+                max_results: Some(10),
+                context_lines: Some(2),
+            }),
+        };
+        let json = serde_json::to_value(&request).unwrap();
+        assert_eq!(json["operation"]["op"], "search");
+        assert_eq!(json["operation"]["mode"], "content");
+        assert_eq!(
+            serde_json::from_value::<AgentRequest>(json).unwrap(),
+            request
+        );
+        let legacy: SearchRequest = serde_json::from_value(serde_json::json!({
+            "root": "/srv",
+            "query": "q",
+            "mode": "files"
+        }))
+        .unwrap();
+        assert!(!legacy.literal && !legacy.ignore_case && !legacy.include_hidden);
+        assert_eq!(legacy.file_pattern, None);
+        assert_eq!(legacy.max_results, None);
+    }
+
+    #[test]
+    fn auth_and_hello_ack_frames_roundtrip() {
+        let epoch = Uuid::parse_str("00000000-0000-4000-8000-000000000004").unwrap();
+        let challenge = GatewayToAgent::AuthChallenge(AuthChallenge {
+            nonce: "nonce".into(),
+            gateway_epoch: epoch,
+            expires_at_unix_ms: 123,
+        });
+        let ack = GatewayToAgent::HelloAck(HelloAck {
+            protocol: PROTOCOL_VERSION,
+            connection_generation: 9,
+            gateway_epoch: epoch,
+            control_frame_limit: DEFAULT_CONTROL_FRAME_LIMIT,
+            reconcile_requested: false,
+        });
+        for message in [challenge.clone(), ack.clone()] {
+            let value = serde_json::to_value(&message).unwrap();
+            assert_eq!(
+                serde_json::from_value::<GatewayToAgent>(value).unwrap(),
+                message
+            );
+        }
+        assert_eq!(
+            serde_json::to_value(&challenge).unwrap()["type"],
+            "auth_challenge"
+        );
+        assert_eq!(serde_json::to_value(&ack).unwrap()["type"], "hello_ack");
+        assert_eq!(
+            serde_json::to_value(&ack).unwrap()["body"]["control_frame_limit"],
+            DEFAULT_CONTROL_FRAME_LIMIT
+        );
+    }
+
+    #[test]
+    fn reconcile_snapshot_roundtrips_with_snake_case_kinds() {
+        let item = ReconcileItem {
+            id: Uuid::new_v4(),
+            kind: ReconcileKind::Job,
+            status: "running".into(),
+            boot_id: "boot".into(),
+            started_at_unix_ms: 5,
+        };
+        let snapshot = ReconcileSnapshot {
+            items: vec![item.clone()],
+        };
+        let wire = serde_json::to_value(&snapshot).unwrap();
+        assert_eq!(wire["items"][0]["kind"], "job");
+        assert_eq!(
+            serde_json::from_value::<ReconcileSnapshot>(wire).unwrap(),
+            snapshot
+        );
+    }
+
+    #[test]
+    fn exec_output_roundtrips() {
+        let output = ExecOutput {
+            exit_code: Some(0),
+            stdout: "out".into(),
+            stderr: String::new(),
+            truncated: false,
+        };
+        let wire = serde_json::to_value(&output).unwrap();
+        assert_eq!(wire["exit_code"], 0);
+        assert_eq!(wire["truncated"], false);
+        assert_eq!(serde_json::from_value::<ExecOutput>(wire).unwrap(), output);
+    }
+
+    #[test]
+    fn protocol_constants_pin_the_wire_contract() {
+        assert_eq!(PROTOCOL_VERSION, 1);
+        assert_eq!(DEFAULT_CONTROL_FRAME_LIMIT, 8 * 1024 * 1024);
+        assert_eq!(DEFAULT_READ_LIMIT, 64 * 1024);
+        assert_eq!(MAX_READ_LIMIT, 1024 * 1024);
+        const _: () = assert!(DEFAULT_READ_LIMIT <= MAX_READ_LIMIT);
+        assert_eq!(FILE_LIST_PAGINATION_CAPABILITY, "files.list_page");
+        assert_eq!(CONNECTION_READINESS_CAPABILITY, "connection.readiness_v1");
+        assert_eq!(MAX_DIRECTORY_PAGE_SIZE, 1000);
+        assert_eq!(MAX_DIRECTORY_ENTRIES, 100_000);
+        assert_eq!(MAX_DIRECTORY_PAGE_BYTES, 512 * 1024);
+        const _: () = assert!(MAX_DIRECTORY_PAGE_SIZE <= MAX_DIRECTORY_ENTRIES);
+    }
+
+    #[test]
+    fn device_hello_metadata_defaults_preserve_legacy_frames() {
+        let wire = serde_json::json!({
+            "protocol": PROTOCOL_VERSION,
+            "device_id": "device-id",
+            "device_name": "Test",
+            "agent_version": "0.1.0",
+            "platform": "linux",
+            "arch": "aarch64",
+            "boot_id": "boot",
+            "agent_instance_id": Uuid::nil().to_string(),
+            "capabilities": ["exec"]
+        });
+        let decoded: DeviceHello = serde_json::from_value(wire).unwrap();
+        assert!(decoded.metadata.is_empty());
+        assert_eq!(
+            decoded,
+            DeviceHello {
+                protocol: PROTOCOL_VERSION,
+                device_id: "device-id".into(),
+                device_name: "Test".into(),
+                agent_version: "0.1.0".into(),
+                platform: "linux".into(),
+                arch: "aarch64".into(),
+                boot_id: "boot".into(),
+                agent_instance_id: Uuid::nil(),
+                capabilities: vec!["exec".into()],
+                metadata: BTreeMap::new(),
+            }
+        );
+    }
+
+    #[test]
+    fn signed_auth_message_fields_are_length_prefixed() {
+        let mut h = hello();
+        h.device_id = "cd".into();
+        let epoch = Uuid::parse_str("00000000-0000-4000-8000-000000000003").unwrap();
+        let payload = signed_auth_message("ab", epoch, &h);
+        assert!(payload.starts_with(b"infra-v1-device-auth\0"));
+        assert_eq!(&payload[21..25], &2u32.to_be_bytes()[..]);
+        assert_eq!(&payload[25..27], b"ab");
+        assert_eq!(&payload[27..31], &16u32.to_be_bytes()[..]);
+        assert_eq!(&payload[31..47], &epoch.as_bytes()[..]);
+        assert_eq!(&payload[47..51], &2u32.to_be_bytes()[..]);
+        assert_eq!(&payload[51..53], &PROTOCOL_VERSION.to_be_bytes()[..]);
+        let mut shifted = hello();
+        shifted.device_id = "bcd".into();
+        assert_ne!(payload, signed_auth_message("a", epoch, &shifted));
+    }
 }
