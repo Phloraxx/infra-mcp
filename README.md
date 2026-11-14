@@ -2,7 +2,7 @@
 
 <div align="center">
 
-**A private, self-hosted control plane that lets AI clients operate your computers.**
+<img src="docs/assets/readme-banner.jpg" alt="Infra MCP, a private multi-device control plane" width="720">
 
 One Rust gateway, signed native agents on every desktop OS, an embedded dashboard, and MCP-native tools whose terminals, jobs and transfers survive disconnects.
 
