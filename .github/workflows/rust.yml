@@ -106,6 +106,17 @@ jobs:
           python3 -m venv "$RUNNER_TEMP/infra-release-fixture"
           "$RUNNER_TEMP/infra-release-fixture/bin/pip" install --disable-pip-version-check cryptography
           "$RUNNER_TEMP/infra-release-fixture/bin/python" scripts/test-release-signing.py
+      # The same verifier the release workflow runs, against a fixture release
+      # signed with the public deterministic test seed. Nothing is activated.
+      - name: Signed release cycle acceptance
+        if: matrix.os == 'ubuntu-latest'
+        run: |
+          "$RUNNER_TEMP/infra-release-fixture/bin/python" scripts/fixture-release.py \
+            --binaries target/debug --directory "$RUNNER_TEMP/release" \
+            --manifests "$RUNNER_TEMP/manifests" > "$RUNNER_TEMP/release-public-key.txt"
+          "$RUNNER_TEMP/infra-release-fixture/bin/python" scripts/verify-release-cycle.py \
+            --release-dir "$RUNNER_TEMP/release" --manifests "$RUNNER_TEMP/manifests" \
+            --public-key-b64 "$(cat "$RUNNER_TEMP/release-public-key.txt")"
       - name: Native installer transaction acceptance
         if: matrix.os == 'ubuntu-latest'
         run: python3 scripts/test-install-safety.py

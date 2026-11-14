@@ -38,6 +38,9 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@1.99.0
       - uses: Swatinem/rust-cache@v2
+      # Owner placeholder: a tagged release refuses to build until the
+      # production public key is set as repository variable
+      # INFRA_RELEASE_PUBLIC_KEY_B64. See docs/RELEASE_PUBLISHER_KEY.md.
       - name: Ensure a release trust key is provisioned
         if: startsWith(github.ref, 'refs/tags/v')
         shell: pwsh
@@ -81,15 +84,16 @@ jobs:
           path: dist/*
           if-no-files-found: error
 
-  release:
-    if: startsWith(github.ref, 'refs/tags/v')
+  producer:
+    name: Sign the release manifest
     needs: build
     runs-on: ubuntu-latest
-    permissions:
-      contents: write
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@1.99.0
+        with:
+          # The release index is derived from the commit count, so the whole
+          # history must be present.
+          fetch-depth: 0
       - uses: actions/setup-python@v7
         with:
           python-version: '3.12'
@@ -100,13 +104,98 @@ jobs:
           merge-multiple: true
       - name: Install manifest signing dependency
         run: python3 -m pip install --disable-pip-version-check cryptography
-      - name: Sign checksummed release manifest
+      # A tagged release is signed with the owner's offline publisher key. Any
+      # other run generates a throwaway CI test key so the whole cycle is
+      # exercised without touching the publisher credential. Neither key is
+      # ever printed.
+      - name: Sign the release manifest
         env:
-          INFRA_RELEASE_SIGNING_KEY_B64: ${{ secrets.INFRA_RELEASE_SIGNING_KEY_B64 }}
-          INFRA_RELEASE_PUBLIC_KEY_B64: ${{ vars.INFRA_RELEASE_PUBLIC_KEY_B64 }}
+          PRODUCTION_SIGNING_KEY: ${{ secrets.INFRA_RELEASE_SIGNING_KEY_B64 }}
+          PRODUCTION_PUBLIC_KEY: ${{ vars.INFRA_RELEASE_PUBLIC_KEY_B64 }}
         run: |
-          INFRA_SOURCE_COMMIT="$(git rev-parse HEAD)"
-          python3 scripts/sign-release.py --directory release --version "$GITHUB_REF_NAME" --source-commit "$INFRA_SOURCE_COMMIT"
+          set -euo pipefail
+          index=$(git rev-list --count HEAD)
+          if [ "$index" -lt 2 ]; then
+            echo "::error::A shallow checkout cannot derive a monotonic release index; fetch full history."
+            exit 1
+          fi
+          if [ "${{ startsWith(github.ref, 'refs/tags/v') }}" = "true" ]; then
+            if [ -z "${PRODUCTION_SIGNING_KEY:-}" ] || [ -z "${PRODUCTION_PUBLIC_KEY:-}" ]; then
+              echo "::error::Tagged releases need secret INFRA_RELEASE_SIGNING_KEY_B64 and variable INFRA_RELEASE_PUBLIC_KEY_B64."
+              exit 1
+            fi
+            INFRA_RELEASE_SIGNING_KEY_B64="$PRODUCTION_SIGNING_KEY"
+            INFRA_RELEASE_PUBLIC_KEY_B64="$PRODUCTION_PUBLIC_KEY"
+            version="$GITHUB_REF_NAME"
+            echo "Signing $version with the owner publisher key."
+          else
+            python3 scripts/ci-test-key.py "$RUNNER_TEMP/test-key.txt"
+            read -r INFRA_RELEASE_SIGNING_KEY_B64 INFRA_RELEASE_PUBLIC_KEY_B64 < "$RUNNER_TEMP/test-key.txt"
+            rm -f "$RUNNER_TEMP/test-key.txt"
+            version="v$(PYTHONPATH=scripts python3 -c 'from release_contract import package_version; print(package_version())')"
+            echo "Signing $version with a throwaway CI test key."
+          fi
+          export INFRA_RELEASE_SIGNING_KEY_B64 INFRA_RELEASE_PUBLIC_KEY_B64
+          for spec in "current:$index" "next:$((index + 1))" "old:$((index - 1))"; do
+            label=${spec%%:*}
+            value=${spec##*:}
+            python3 scripts/sign-release.py --directory release --version "$version" \
+              --source-commit "$(git rev-parse HEAD)" --release-index "$value"
+            mkdir -p "signed/$label"
+            cp release/infra-release.json release/infra-release.json.sig "signed/$label/"
+          done
+          # Publish the current manifest, not the last variant that was signed.
+          cp signed/current/infra-release.json signed/current/infra-release.json.sig release/
+          printf '%s\n' "$INFRA_RELEASE_PUBLIC_KEY_B64" > signed/public-key.txt
+      - uses: actions/upload-artifact@v7
+        with:
+          name: infra-release-assets
+          path: release/*
+          if-no-files-found: error
+      - uses: actions/upload-artifact@v7
+        with:
+          name: infra-release-manifests
+          path: signed/**
+          if-no-files-found: error
+
+  verify:
+    name: Verify the published artifacts
+    needs: producer
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.12'
+      - uses: actions/download-artifact@v8
+        with:
+          name: infra-release-assets
+          path: release
+      - uses: actions/download-artifact@v8
+        with:
+          name: infra-release-manifests
+          path: signed
+      # The CLI verifier runs against exactly the bytes that would be
+      # published: signature, release index, digests and binary pinning.
+      - name: Run the CLI verifier against the published artifacts
+        run: |
+          chmod +x release/infra-linux-x86_64 release/infra-agent-linux-x86_64
+          python3 scripts/verify-release-cycle.py \
+            --release-dir release --manifests signed \
+            --public-key-b64 "$(cat signed/public-key.txt)"
+
+  release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [producer, verify]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v8
+        with:
+          name: infra-release-assets
+          path: release
       - name: Publish GitHub release
         env:
           GH_TOKEN: ${{ github.token }}
