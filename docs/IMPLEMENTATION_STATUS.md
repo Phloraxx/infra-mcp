@@ -33,7 +33,7 @@ This file records what exists in code. Product intent remains in the other desig
 - Local `config.json` and `runtime.json` state shared by agent and CLI. Runtime status records PID, connection state, stable device identity, generation, last successful connection, sanitized last error, and a non-secret credential-storage verification timestamp written only after successful signed gateway authentication.
 - `infra` CLI: `status`, `doctor`, `install`, `repair`, `reconnect`, `update`, and `uninstall`, including JSON status/doctor output.
 - Startup adapters implemented for Linux systemd user services, macOS LaunchAgents, and Windows logon Scheduled Tasks. Linux startup reconstructs the standard user-bus environment for non-login/remote shells, and idempotent reinstall/repair reloads and restarts the controller so a replaced binary actually becomes active. Linux uses `KillMode=process` so durable PTY/job workers outlive controller-only restarts; `infra uninstall` explicitly terminates persisted Infra worker trees to avoid leaking them.
-- Native bootstrap installers: `scripts/install.sh` and `scripts/install.ps1`. Development/source mode is testable without releases; release mode verifies SHA-256 sidecars before installing binaries.
+- Native bootstrap installers: `scripts/install.sh` and `scripts/install.ps1`. Development/source mode is testable without releases; `install.sh` release mode verifies the signed release manifest against the pinned publisher key before executing a downloaded binary, while `install.ps1` still verifies SHA-256 sidecars only.
 - GitHub tag-release workflow defined for Linux x64/ARM64, macOS Intel/ARM64, and Windows x64/ARM64 assets plus SHA-256 sidecars.
 - Embedded minimal dashboard served by the gateway with Overview, Devices, Sessions, Activity and Settings, Add Device enrollment flow, generated OS install commands, responsive layout, SSE refresh, polling fallback, and private-mode browser authentication.
 - Dashboard APIs expose persisted devices, reconciled active work and bounded audit metadata. In private mode, MCP requires the admin bearer credential while the browser exchanges that credential once for a short-lived HMAC-signed `HttpOnly; SameSite=Strict` session cookie; cookie-authenticated state-changing API calls also require the `X-Infra-CSRF` header. The admin credential is not stored in Web Storage. Audit records action/outcome/request IDs only, not stdout, file contents, enrollment secrets, or private keys.
@@ -390,3 +390,31 @@ negotiation, un-negotiated rejection, both chunk directions, terminal input and 
 full copy on both paths, and a W3 harness scenario that cuts a real cross-device
 copy mid-chunk and resumes it with an identical digest. Nothing was deployed; no
 live gateway, agent or burn-in directory was touched.
+
+## 2026-11-15 — W4 signed release provisioning
+
+The signed update path is now provisioned end to end in CI, without the owner
+publisher key.
+
+- `infra-release.json` carries a monotonic `release_index`. The CLI records the
+  highest index it has verified in `<state-dir>/release-index.json` and refuses
+  anything below it with `update_rollback_blocked` before requesting an asset.
+  Manifests without an index are treated as `0`; an unreadable floor fails
+  closed.
+- `infra update --verify-only` runs the whole verification chain (pinned key,
+  signature, version, floor, digests, binary pinning) and stops before
+  installing anything. It never advances the floor.
+- `release.yml` gained a producer job that signs the manifest and a verification
+  job that runs the CLI verifier against exactly the bytes that would be
+  published. Tagged releases use the owner key and fail closed without it; every
+  other run uses a throwaway CI test key. Publishing waits for verification.
+  `rust.yml` runs the same cycle on every push with the public test seed.
+- `scripts/install.sh` verifies the signed manifest, the requested tag and both
+  asset digests before executing a downloaded binary. The verifier is embedded
+  and standard-library only. `--allow-checksum-only` remains as an explicitly
+  unsafe, temporary path; `install.ps1` is still checksum-only.
+- Owner steps for the real publisher key and the first real signed update on a
+  Linux agent are documented in [RELEASE_SIGNING.md](RELEASE_SIGNING.md) and
+  [RELEASE_PUBLISHER_KEY.md](RELEASE_PUBLISHER_KEY.md). That device step was not
+  performed here: no production key was generated or handled, and nothing was
+  deployed.
