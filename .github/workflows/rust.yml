@@ -16,6 +16,21 @@ permissions:
   contents: read
 
 jobs:
+  syntax:
+    name: Dashboard syntax
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '22'
+      # Cheap early warning: a parse error in the dashboard or the gate must not
+      # wait for the Playwright install to surface.
+      - name: Parse the dashboard and the browser gate
+        run: |
+          node --check apps/dashboard/app.js
+          node --check scripts/test-dashboard-browser.cjs
+          node --check scripts/snapshot-overview-fixture.cjs
   dashboard:
     name: Dashboard browser
     runs-on: ubuntu-latest
@@ -30,6 +45,22 @@ jobs:
         run: node "$RUNNER_TEMP/infra-dashboard-browser/node_modules/playwright/cli.js" install --with-deps chromium
       - name: Test dashboard interactions
         run: NODE_PATH="$RUNNER_TEMP/infra-dashboard-browser/node_modules" node scripts/test-dashboard-browser.cjs
+  cross-check:
+    name: Cross-compile smoke
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.99.0
+        with:
+          targets: x86_64-pc-windows-gnu
+      - uses: Swatinem/rust-cache@v2
+      # rustls pulls in aws-lc-sys, which needs a C toolchain for the target.
+      - name: Install the mingw-w64 linker
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends gcc-mingw-w64-x86-64
+      # Keeps the Windows agent and CLI compiling on every push without waiting
+      # for the slow windows-latest runner in windows-release-check.yml.
+      - name: Check the agent and CLI for Windows x64
+        run: cargo check --target x86_64-pc-windows-gnu -p infra-agent -p infra-cli
   check:
     name: ${{ matrix.os }}
     strategy:
@@ -69,6 +100,14 @@ jobs:
       - name: MCP schema and error contract smoke
         if: matrix.os == 'ubuntu-latest'
         run: python3 scripts/smoke-mcp-contract.py
+      # The darwin half of the cross-compile smoke. It runs on the macOS runner
+      # because aws-lc-sys needs an Apple C toolchain, which a Linux runner does
+      # not have; the Windows half runs in the cross-check job above.
+      - name: Check the agent and CLI for macOS ARM64
+        if: matrix.os == 'macos-latest'
+        run: |
+          rustup target add aarch64-apple-darwin
+          cargo check --target aarch64-apple-darwin -p infra-agent -p infra-cli
       - name: Build native acceptance binaries
         if: matrix.os == 'macos-latest'
         run: cargo build --release -p infra-agent -p infra-cli
