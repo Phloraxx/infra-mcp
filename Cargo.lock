@@ -1365,7 +1365,7 @@ dependencies = [
 
 [[package]]
 name = "infra-agent"
-version = "0.1.1-rc.3"
+version = "0.1.1-rc.4"
 dependencies = [
  "anyhow",
  "base64 0.23.1",
@@ -1396,7 +1396,7 @@ dependencies = [
 
 [[package]]
 name = "infra-cli"
-version = "0.1.1-rc.3"
+version = "0.1.1-rc.4"
 dependencies = [
  "anyhow",
  "base64 0.23.1",
@@ -1418,7 +1418,7 @@ dependencies = [
 
 [[package]]
 name = "infra-gateway"
-version = "0.1.1-rc.3"
+version = "0.1.1-rc.4"
 dependencies = [
  "anyhow",
  "argon2",
@@ -1448,7 +1448,7 @@ dependencies = [
 
 [[package]]
 name = "infra-local-state"
-version = "0.1.1-rc.3"
+version = "0.1.1-rc.4"
 dependencies = [
  "anyhow",
  "hex",
@@ -1461,7 +1461,7 @@ dependencies = [
 
 [[package]]
 name = "infra-platform"
-version = "0.1.1-rc.3"
+version = "0.1.1-rc.4"
 dependencies = [
  "anyhow",
  "keyring",
@@ -1474,7 +1474,7 @@ dependencies = [
 
 [[package]]
 name = "infra-protocol"
-version = "0.1.1-rc.3"
+version = "0.1.1-rc.4"
 dependencies = [
  "hex",
  "serde",
