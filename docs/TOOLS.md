@@ -321,7 +321,7 @@ Available through the Rust MCP gateway now: `devices`, `exec`, `files`, `search`
 - `search`: filename or content mode, regex/literal, case control, hidden-file control, git-ignore-aware walking, glob file filtering, bounded results and bounded context.
 - `jobs`: start/list/read/cancel with worker process and byte-offset spool.
 - `terminal`: open/list/read/write/resize/close using persistent PTY/ConPTY workers.
-- `transfer`: persistent upload/download begin/chunk/commit/status/list/cancel, explicit byte offsets, idempotent upload retries, bounded base64 chunks, staging files and SHA-256 verification. Device-to-device relay is orchestration on top of the two device endpoints and is not optimized yet.
+- `transfer`: persistent upload/download begin/chunk/commit/status/list/cancel, explicit byte offsets, idempotent upload retries, 256 KiB chunks, staging files and SHA-256 verification. The MCP surface stays base64 JSON; on the agent link a device that advertises `transfer.binary_v1` carries the same chunks in raw bulk frames, and the cross-device `copy` relay moves them from source frame to destination frame without re-encoding. `copy` reports which path each side used in `transport`.
 
 - `system`: summary, disks/filesystems and network-interface counters/addresses.
 - `network`: listener discovery, DNS resolution and TCP reachability. Listener PID/process metadata is returned when the platform utility exposes it.

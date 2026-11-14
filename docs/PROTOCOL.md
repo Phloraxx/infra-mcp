@@ -235,11 +235,11 @@ The current Rust implementation uses the following signed path:
 
 Enrollment codes are short-lived and stored hashed. The gateway retains an explicitly separate legacy bearer-token handshake only for migration/development. Non-idempotent requests are not automatically replayed after connection loss.
 
-The current PTY/job streams use byte-offset reads over typed RPC rather than the future general multiplexed binary-stream envelope. Binary/resumable transfer is still pending.
+The current PTY/job streams use byte-offset reads over typed RPC rather than the future general multiplexed binary-stream envelope. Transfer chunks can already travel in capability-gated bulk frames (section 18); a general multiplexed stream envelope is still pending.
 
 ### Current transfer RPC mapping
 
-The first implementation maps resumable transfer semantics onto bounded control RPCs: `upload_begin`, `upload_chunk`, `upload_commit`, `download_begin`, `download_chunk`, `status`, `list`, and `cancel`. Chunks are capped so their base64 representation remains comfortably below the control-frame limit. The persistent transfer ID and byte offsets provide resume semantics now; a later dedicated binary stream transport may replace base64 chunks without changing the higher-level lifecycle.
+The first implementation maps resumable transfer semantics onto bounded control RPCs: `upload_begin`, `upload_chunk`, `upload_commit`, `download_begin`, `download_chunk`, `status`, `list`, and `cancel`. Chunks are capped at 256 KiB. The persistent transfer ID and byte offsets provide resume semantics; a later dedicated binary stream transport may replace the chunk RPCs without changing the higher-level lifecycle.
 
 ## 17. Additive directory-list pagination (2 November 2026)
 
@@ -257,3 +257,36 @@ admission; no request or pending waiter is created. Requests without either
 field retain the old operation. New results add continuation/count/order fields
 without removing `entries` or `truncated`. No new session, spool, daemon or
 automatic retry is introduced; normal cancellation/generation rules apply.
+
+## 18. Additive bulk binary frames (14 November 2026)
+
+Payload-bearing operations can carry their bytes in a binary WebSocket frame
+instead of base64 inside JSON. Control stays JSON, `PROTOCOL_VERSION` stays 1,
+and every existing JSON shape is unchanged.
+
+- Capabilities: `transfer.binary_v1` and `terminal.binary_v1`, advertised in
+  `DeviceHello.capabilities`. `HelloAck.binary_frames` (serde default `false`)
+  tells the agent the gateway will use them on this connection. An agent that
+  does not advertise them, or a gateway that does not acknowledge them, keeps
+  the base64 path exactly as before.
+- Frame layout, all integers big-endian: magic `I` (u8), version 1 (u8), kind
+  (u8: 0 `upload_chunk`, 1 `download_chunk`, 2 `terminal_data`, 3 reserved),
+  flags (u8), the transfer or terminal id as 16 raw UUID bytes, offset (u64),
+  payload length (u32), then the payload. The header is 32 bytes; the
+  improvement plan's "16-byte header" wording conflicts with its own field list,
+  and the field list is what both sides implement. Nothing inside a bulk frame
+  is JSON.
+- Pairing: a payload frame always follows a JSON announcement on the same
+  socket, so request/response correlation, the pending registry and the audit
+  trail are unchanged. Uploads and terminal input announce with
+  `upload_chunk_binary` / `write_binary` and then send the payload; a download
+  chunk answers with JSON metadata (`data_binary: true`, `length`) and then the
+  payload frame.
+- Rejection: a binary frame on a connection that did not negotiate bulk frames,
+  a malformed frame, a frame without its announcement, or a frame that
+  disagrees with its announcement is a protocol error and closes the socket. A
+  frame whose request already timed out is dropped and the relay resumes from
+  the last confirmed offset.
+- The MCP surface is unchanged: `transfer` still takes and returns base64, and
+  the gateway re-encodes once at the edge. The cross-device `copy` relay moves
+  raw chunks from the source frame straight into the destination frame.
