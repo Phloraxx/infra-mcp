@@ -120,6 +120,10 @@ jobs:
       - name: Native installer transaction acceptance
         if: matrix.os == 'ubuntu-latest'
         run: python3 scripts/test-install-safety.py
+      - name: Bootstrap manifest acceptance
+        if: matrix.os == 'ubuntu-latest'
+        run: |
+          "$RUNNER_TEMP/infra-release-fixture/bin/python" scripts/test-install-manifest.py
       - if: matrix.os == 'ubuntu-latest'
         run: ./scripts/smoke-dashboard-password.sh
       - if: matrix.os == 'ubuntu-latest'
