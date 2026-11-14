@@ -4,13 +4,86 @@ use anyhow::{Context, Result, anyhow, bail};
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use ed25519_dalek::{Signature, VerifyingKey};
 use semver::Version;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::path::Path;
 
 #[derive(Debug, Deserialize)]
 pub struct ReleaseManifest {
     pub version: String,
     pub assets: HashMap<String, String>,
+    /// Monotonic release counter signed into the manifest. Manifests published
+    /// before the counter existed have none and are treated as index 0.
+    #[serde(default)]
+    pub release_index: Option<u64>,
+}
+
+/// The highest signed release index this device has verified and installed.
+/// It only ever increases, so a replayed older release cannot be served as
+/// current even when its signature is still valid.
+#[derive(Debug, Serialize, Deserialize)]
+struct ReleaseFloor {
+    release_index: u64,
+    version: String,
+    recorded_unix_ms: u64,
+}
+
+fn floor_path(state: &Path) -> std::path::PathBuf {
+    state.join("release-index.json")
+}
+
+/// A missing floor means this device has never installed an indexed release.
+/// An unreadable floor fails closed instead of silently resetting to zero.
+pub fn read_release_floor(state: &Path) -> Result<u64> {
+    let path = floor_path(state);
+    let bytes = match std::fs::read(&path) {
+        Ok(bytes) => bytes,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(0),
+        Err(error) => {
+            return Err(error)
+                .with_context(|| format!("release_index_floor_unreadable: {}", path.display()));
+        }
+    };
+    let floor: ReleaseFloor = serde_json::from_slice(&bytes).with_context(|| {
+        format!(
+            "release_index_floor_unreadable: {} is not a valid release index record",
+            path.display()
+        )
+    })?;
+    Ok(floor.release_index)
+}
+
+/// Records the floor after a release has been fully verified. The value never
+/// decreases, so a stale or replayed record cannot lower it.
+pub fn record_release_floor(state: &Path, release_index: u64, version: &str) -> Result<u64> {
+    let current = read_release_floor(state)?;
+    let release_index = current.max(release_index);
+    let value = ReleaseFloor {
+        release_index,
+        version: version.to_owned(),
+        recorded_unix_ms: infra_local_state::now_ms(),
+    };
+    let path = floor_path(state);
+    let temporary = state.join(".release-index.json.tmp");
+    std::fs::create_dir_all(state)?;
+    std::fs::write(&temporary, serde_json::to_vec(&value)?)
+        .with_context(|| format!("write release index floor {}", temporary.display()))?;
+    std::fs::rename(&temporary, &path)
+        .with_context(|| format!("record release index floor {}", path.display()))?;
+    Ok(release_index)
+}
+
+/// A valid old signature does not authorize serving an older release as
+/// current. Manifests without a counter are index 0 and can therefore never
+/// follow an indexed release on the same device.
+pub fn authorize_release_index(manifest: Option<u64>, floor: u64) -> Result<u64> {
+    let release_index = manifest.unwrap_or(0);
+    if release_index < floor {
+        bail!(
+            "update_rollback_blocked: signed release index {release_index} is below the recorded floor {floor}; an older signed release cannot be installed as current"
+        );
+    }
+    Ok(release_index)
 }
 
 fn release_version(value: &str) -> Result<Version> {
@@ -75,6 +148,9 @@ pub fn verify_manifest(
     if manifest.version.is_empty() || manifest.assets.is_empty() {
         bail!("signed release manifest is missing version/assets");
     }
+    if manifest.release_index == Some(0) {
+        bail!("signed release manifest has an invalid release index 0");
+    }
     for (name, digest) in &manifest.assets {
         if name.is_empty() || digest.len() != 64 || !digest.bytes().all(|b| b.is_ascii_hexdigit()) {
             bail!("signed manifest contains invalid asset name or SHA-256");
@@ -137,8 +213,64 @@ mod tests {
         let pubkey = STANDARD.encode(signer.verifying_key().to_bytes());
         let manifest = verify_manifest(json, &sig, &pubkey).unwrap();
         assert_eq!(manifest.version, "v1");
+        assert_eq!(manifest.release_index, None);
         assert!(verify_manifest(b"{}", &sig, &pubkey).is_err());
         assert!(verify_manifest(json, &sig, &STANDARD.encode([9u8; 32])).is_err());
         assert!(verify_manifest(json, "invalid", &pubkey).is_err());
+    }
+    #[test]
+    fn a_signed_release_index_is_parsed_and_zero_is_rejected() {
+        let signer = SigningKey::from_bytes(&[12u8; 32]);
+        let pubkey = STANDARD.encode(signer.verifying_key().to_bytes());
+        let sign = |json: &[u8]| STANDARD.encode(signer.sign(json).to_bytes());
+        let indexed = br#"{"version":"v1","release_index":7,"assets":{"infra-linux-aarch64":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}}"#;
+        assert_eq!(
+            verify_manifest(indexed, &sign(indexed), &pubkey)
+                .unwrap()
+                .release_index,
+            Some(7)
+        );
+        let zero = br#"{"version":"v1","release_index":0,"assets":{"infra-linux-aarch64":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}}"#;
+        assert!(
+            verify_manifest(zero, &sign(zero), &pubkey)
+                .unwrap_err()
+                .to_string()
+                .contains("invalid release index 0")
+        );
+    }
+    #[test]
+    fn an_older_signed_release_index_cannot_be_served_as_current() {
+        assert_eq!(authorize_release_index(None, 0).unwrap(), 0);
+        assert_eq!(authorize_release_index(Some(3), 0).unwrap(), 3);
+        assert_eq!(authorize_release_index(Some(5), 5).unwrap(), 5);
+        assert_eq!(authorize_release_index(Some(6), 5).unwrap(), 6);
+        for (manifest, floor) in [(Some(4), 5), (None, 1), (Some(0), 1)] {
+            assert!(
+                authorize_release_index(manifest, floor)
+                    .unwrap_err()
+                    .to_string()
+                    .starts_with("update_rollback_blocked:")
+            );
+        }
+    }
+    #[test]
+    fn the_recorded_floor_only_increases_and_fails_closed_when_unreadable() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = dir.path();
+        assert_eq!(read_release_floor(state).unwrap(), 0);
+        assert_eq!(record_release_floor(state, 4, "v1.0.0").unwrap(), 4);
+        assert_eq!(read_release_floor(state).unwrap(), 4);
+        assert_eq!(record_release_floor(state, 2, "v0.9.0").unwrap(), 4);
+        assert_eq!(read_release_floor(state).unwrap(), 4);
+        assert_eq!(record_release_floor(state, 9, "v1.1.0").unwrap(), 9);
+        assert_eq!(read_release_floor(state).unwrap(), 9);
+        assert!(!state.join(".release-index.json.tmp").exists());
+        std::fs::write(state.join("release-index.json"), b"not json").unwrap();
+        assert!(
+            read_release_floor(state)
+                .unwrap_err()
+                .to_string()
+                .contains("release_index_floor_unreadable")
+        );
     }
 }

@@ -164,13 +164,15 @@ pub(crate) async fn update_command(
         env!("CARGO_PKG_VERSION"),
         &version,
     )?;
+    let floor = release_verify::read_release_floor(state_dir)?;
+    let release_index = release_verify::authorize_release_index(manifest.release_index, floor)?;
 
-    let staged_cli = install_dir.join(format!(".infra.update.{}{}", std::process::id(), extension));
-    let staged_agent = install_dir.join(format!(
-        ".infra-agent.update.{}{}",
-        std::process::id(),
-        extension
-    ));
+    // Stage under canonical names in a private directory so the preflight
+    // probes exactly the pair activation would install.
+    let staging = install_dir.join(format!(".infra-stage-{}", std::process::id()));
+    fs::create_dir_all(&staging)?;
+    let staged_cli = staging.join(format!("infra{extension}"));
+    let staged_agent = staging.join(format!("infra-agent{extension}"));
     download_verified_release_asset(
         &client,
         &base,
@@ -192,13 +194,23 @@ pub(crate) async fn update_command(
     )
     .await
     {
-        let _ = fs::remove_file(&staged_cli);
+        let _ = fs::remove_dir_all(&staging);
         return Err(error);
     }
     make_executable_like(&staged_cli, &cli_path)?;
     make_executable_like(&staged_agent, &agent_path)?;
 
-    update_handoff::apply(
+    if let Err(error) = update_handoff::preflight(&staging, &release_version).await {
+        let _ = fs::remove_dir_all(&staging);
+        return Err(error).context(
+            "selected release does not support safe paired activation; installed files unchanged",
+        );
+    }
+    // The floor records the highest release this device has verified and begun
+    // installing. It is monotonic, so a failed activation can never lower it.
+    release_verify::record_release_floor(state_dir, release_index, &release_version)?;
+
+    let result = update_handoff::apply(
         state_dir,
         install_dir,
         &staged_cli,
@@ -206,7 +218,9 @@ pub(crate) async fn update_command(
         &release_version,
         guard,
     )
-    .await
+    .await;
+    let _ = fs::remove_dir_all(&staging);
+    result
 }
 pub(crate) fn release_asset_descriptor() -> anyhow::Result<(String, &'static str)> {
     let os = match std::env::consts::OS {

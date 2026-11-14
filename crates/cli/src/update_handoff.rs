@@ -89,6 +89,15 @@ fn record_owner(state: &Path, id: Uuid, phase: &str, detail: &str, owner_pid: u3
     Ok(())
 }
 
+/// Probes a staged pair and pins both components to the signed release
+/// version. Shared by the real handoff and `infra update --verify-only` so a
+/// preflight cannot drift from what activation enforces.
+pub async fn preflight(source: &Path, release_version: &str) -> Result<()> {
+    let cli_version = install::probe(&source.join(activation::CLI), "infra").await?;
+    let agent_version = install::probe(&source.join(activation::AGENT), "infra-agent").await?;
+    super::release_verify::verify_binary_versions(release_version, &cli_version, &agent_version)
+}
+
 pub async fn apply(
     state: &Path,
     install_dir: &Path,
@@ -107,17 +116,7 @@ pub async fn apply(
     }
     fs::copy(cli, source.join(activation::CLI))?;
     fs::copy(agent, source.join(activation::AGENT))?;
-    let preflight: Result<()> = async {
-        let cli_version = install::probe(&source.join(activation::CLI), "infra").await?;
-        let agent_version = install::probe(&source.join(activation::AGENT), "infra-agent").await?;
-        super::release_verify::verify_binary_versions(
-            release_version,
-            &cli_version,
-            &agent_version,
-        )?;
-        Ok(())
-    }
-    .await;
+    let preflight = preflight(&source, release_version).await;
     if let Err(error) = preflight {
         let _ = fs::remove_dir_all(&source);
         let _ = fs::remove_file(cli);
