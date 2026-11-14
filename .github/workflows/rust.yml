@@ -45,6 +45,22 @@ jobs:
         run: node "$RUNNER_TEMP/infra-dashboard-browser/node_modules/playwright/cli.js" install --with-deps chromium
       - name: Test dashboard interactions
         run: NODE_PATH="$RUNNER_TEMP/infra-dashboard-browser/node_modules" node scripts/test-dashboard-browser.cjs
+  fault-injection:
+    name: Fault injection harness
+    runs-on: ubuntu-latest
+    # The scenarios include a real 30s heartbeat deadline; the whole job stays
+    # well inside this budget.
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.99.0
+      - uses: Swatinem/rust-cache@v2
+      # The harness spawns the real binaries, so build them once up front and
+      # keep the timed section to the scenarios themselves.
+      - name: Build the gateway and agent binaries
+        run: cargo build --locked -p infra-gateway -p infra-agent
+      - name: Run the fault-injection scenarios
+        run: cargo test --locked -p infra-e2e -- --test-threads=1
   cross-check:
     name: Cross-compile smoke
     runs-on: ubuntu-latest
