@@ -155,6 +155,12 @@ The dashboard should update device state, enrollment progress, active sessions, 
 
 The gateway no longer retires an agent at the first missed pong window: the heartbeat deadline now tolerates stalls up to 90 seconds (override with INFRA_HEARTBEAT_TIMEOUT_SECS, floor 30s), so laptop sleep transitions and brief Wi-Fi/Tailscale hiccups no longer flap a device offline that would have recovered on its own.
 
+## Serving assets from disk
+
+The dashboard is compiled into the gateway binary, so a CSS or JS edit normally needs a rebuild and a restart that drops every agent link for a minute or more. `INFRA_DASHBOARD_DIR` is an override for iterating on the UI without either: when it points at a directory holding `index.html`, `app.js`, `styles.css` and `vendor/xterm.{js,css}`, those files are served from disk with a content-hash `ETag` and `Cache-Control: no-cache`, so a browser revalidates on every load and an edit appears on refresh.
+
+The override is never required. With the variable unset the gateway serves the embedded bytes exactly as before, and any missing, unreadable, oversized or non-file entry silently falls back to the embedded copy per request — a broken directory degrades to the shipped UI instead of a broken one. The override changes no version metadata: `healthz` keeps reporting the binary's own version and commit.
+
 ## Mobile behavior
 
 Mobile dashboard should support monitoring, approving enrollment, reconnect/repair/update actions, session inspection, and basic terminal attachment. File management and advanced diagnostics can remain desktop-optimized.

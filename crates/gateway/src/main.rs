@@ -94,6 +94,7 @@ struct AppState {
     events: broadcast::Sender<DashboardEvent>,
     store: Store,
     hermes: Option<Arc<HermesBridge>>,
+    dashboard: DashboardAssets,
 }
 
 impl AppState {
@@ -111,6 +112,7 @@ impl AppState {
             events,
             store,
             hermes: HermesBridge::from_env(),
+            dashboard: DashboardAssets::embedded(),
         }
     }
 
@@ -204,6 +206,13 @@ async fn main() -> anyhow::Result<()> {
     let mut state = AppState::new(store, legacy, admin);
     if let Ok(path) = std::env::var("INFRA_DASHBOARD_AUTH_FILE") {
         state.owner_auth = Some(Arc::new(auth::OwnerAuth::load(PathBuf::from(path))?));
+    }
+    state.dashboard = DashboardAssets::from_env();
+    if let Some(root) = state.dashboard.root() {
+        info!(
+            dashboard_dir = %root.display(),
+            "serving dashboard assets from disk with embedded fallback"
+        );
     }
     let app = build_app(state.clone());
     let listener = tokio::net::TcpListener::bind(bind).await?;
