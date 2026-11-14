@@ -31,10 +31,11 @@ class ReleaseSigning(unittest.TestCase):
             (self.directory / name).write_bytes(data)
             (self.directory / (name + '.sha256')).write_text(hashlib.sha256(data).hexdigest() + '  ' + name)
 
-    def sign(self, success=True, version=None, source_commit=None):
+    def sign(self, success=True, version=None, source_commit=None, release_index=7):
         result = subprocess.run([sys.executable, str(ROOT / 'scripts/sign-release.py'),
                                  '--directory', str(self.directory), '--version', version or 'v' + package_version(),
-                                 '--source-commit', source_commit or '1' * 40],
+                                 '--source-commit', source_commit or '1' * 40,
+                                 '--release-index', str(release_index)],
                                 env=self.environment, capture_output=True, text=True, timeout=15)
         self.assertEqual(result.returncode == 0, success, result.stderr)
         if not success:
@@ -51,6 +52,7 @@ class ReleaseSigning(unittest.TestCase):
         self.assertEqual(set(data['assets']), expected_assets())
         self.assertEqual(data['version'], 'v' + package_version())
         self.assertEqual(data['source_commit'], '1' * 40)
+        self.assertEqual(data['release_index'], 7)
         for name, digest in data['assets'].items():
             self.assertEqual(digest, hashlib.sha256((self.directory / name).read_bytes()).hexdigest())
         self.sign()
@@ -80,6 +82,19 @@ class ReleaseSigning(unittest.TestCase):
 
     def test_tag_must_match_built_package(self):
         self.assertIn('must match workspace package version', self.sign(False, 'v999.0.0').stderr)
+
+    def test_release_index_must_be_positive(self):
+        self.assertIn('release index must be a positive integer', self.sign(False, release_index=0).stderr)
+        self.assertIn('release index must be a positive integer', self.sign(False, release_index=-3).stderr)
+
+    def test_release_index_is_required(self):
+        result = subprocess.run([sys.executable, str(ROOT / 'scripts/sign-release.py'),
+                                 '--directory', str(self.directory), '--version', 'v' + package_version(),
+                                 '--source-commit', '1' * 40],
+                                env=self.environment, capture_output=True, text=True, timeout=15)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn('--release-index', result.stderr)
+        self.assertFalse((self.directory / 'infra-release.json').exists())
 
     def test_abbreviated_source_commit_is_rejected(self):
         self.assertIn('full 40-character Git SHA', self.sign(False, source_commit='1234').stderr)

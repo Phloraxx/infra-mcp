@@ -20,8 +20,14 @@ fn main() {
     let version = std::env::args()
         .nth(2)
         .unwrap_or_else(|| format!("v{}", env!("CARGO_PKG_VERSION")));
-    let manifest =
-        serde_json::to_vec(&serde_json::json!({"version":version,"assets":assets})).unwrap();
+    let release_index: u64 = std::env::args()
+        .nth(3)
+        .map(|value| value.parse().expect("fixture release index"))
+        .unwrap_or(1);
+    let manifest = serde_json::to_vec(
+        &serde_json::json!({"version":version,"release_index":release_index,"assets":assets}),
+    )
+    .unwrap();
     let key = SigningKey::from_bytes(&[31; 32]);
     std::fs::write(dir.join("infra-release.json"), &manifest).unwrap();
     std::fs::write(
