@@ -191,11 +191,7 @@ impl MnemosyneBridge {
         self.call_tool("mnemosyne_recall", args).await
     }
 
-    async fn with_id(
-        &self,
-        input: MemoryInput,
-        tool: &'static str,
-    ) -> Result<Value, ToolError> {
+    async fn with_id(&self, input: MemoryInput, tool: &'static str) -> Result<Value, ToolError> {
         let id = Self::checked_id(&input)?;
         self.call_tool(tool, json!({ "memory_id": id })).await
     }
@@ -269,12 +265,15 @@ impl MnemosyneBridge {
         // dropped: aborting the stream mid-read makes the server tear down
         // the fresh session and every follow-up request returns 404.
         let _ = response.text().await;
-        session.ok_or_else(|| {
-            ToolError::new("mnemosyne_protocol", "Mnemosyne returned no session ID")
-        })
+        session
+            .ok_or_else(|| ToolError::new("mnemosyne_protocol", "Mnemosyne returned no session ID"))
     }
 
-    async fn post(&self, session: Option<&str>, body: Value) -> Result<reqwest::Response, ToolError> {
+    async fn post(
+        &self,
+        session: Option<&str>,
+        body: Value,
+    ) -> Result<reqwest::Response, ToolError> {
         let mut request = self
             .client
             .post(self.base.as_str())
@@ -297,7 +296,9 @@ impl MnemosyneBridge {
         let status = response.status();
         if !status.is_success() {
             return Err(match status.as_u16() {
-                401 | 403 => ToolError::new("mnemosyne_auth", "Mnemosyne rejected the gateway token"),
+                401 | 403 => {
+                    ToolError::new("mnemosyne_auth", "Mnemosyne rejected the gateway token")
+                }
                 404 => ToolError::new("mnemosyne_protocol", "Mnemosyne MCP endpoint not found"),
                 429 => ToolError::new("mnemosyne_busy", "Mnemosyne is rate-limiting the gateway"),
                 _ => ToolError::new("mnemosyne_unreachable", "Mnemosyne request failed"),
@@ -308,10 +309,9 @@ impl MnemosyneBridge {
 
     async fn post_body(&self, session: Option<&str>, body: Value) -> Result<String, ToolError> {
         let response = self.post(session, body).await?;
-        let text = response
-            .text()
-            .await
-            .map_err(|_| ToolError::new("mnemosyne_protocol", "Mnemosyne response could not be read"))?;
+        let text = response.text().await.map_err(|_| {
+            ToolError::new("mnemosyne_protocol", "Mnemosyne response could not be read")
+        })?;
         if text.len() > MAX_RESPONSE_BYTES {
             return Err(ToolError::new(
                 "mnemosyne_protocol",
@@ -341,7 +341,10 @@ impl MnemosyneBridge {
             .find_map(|line| line.strip_prefix("data: "))
             .unwrap_or(text);
         let value: Value = serde_json::from_str(payload.trim()).map_err(|_| {
-            ToolError::new("mnemosyne_protocol", "Mnemosyne returned an unparseable response")
+            ToolError::new(
+                "mnemosyne_protocol",
+                "Mnemosyne returned an unparseable response",
+            )
         })?;
         if let Some(error) = value.get("error") {
             let message = error
@@ -351,7 +354,10 @@ impl MnemosyneBridge {
             return Err(ToolError::new("mnemosyne_error", message));
         }
         let Some(result) = value.get("result") else {
-            return Err(ToolError::new("mnemosyne_protocol", "Mnemosyne returned no result"));
+            return Err(ToolError::new(
+                "mnemosyne_protocol",
+                "Mnemosyne returned no result",
+            ));
         };
         let mut parts: Vec<&str> = Vec::new();
         if let Some(items) = result.get("content").and_then(Value::as_array) {
@@ -362,7 +368,11 @@ impl MnemosyneBridge {
             }
         }
         let joined = parts.join("\n");
-        if result.get("isError").and_then(Value::as_bool).unwrap_or(false) {
+        if result
+            .get("isError")
+            .and_then(Value::as_bool)
+            .unwrap_or(false)
+        {
             let message: String = if joined.is_empty() {
                 "Mnemosyne tool call failed".into()
             } else {

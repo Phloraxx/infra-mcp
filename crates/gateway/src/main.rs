@@ -5,9 +5,9 @@ mod bulk;
 mod copy;
 mod copy_queue;
 mod dashboard_http;
-mod mnemosyne_bridge;
 mod mcp_actions;
 mod mcp_result;
+mod mnemosyne_bridge;
 mod oauth;
 mod oauth_http;
 mod pairing;
@@ -47,7 +47,6 @@ use base64::{
     engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD},
 };
 use ed25519_dalek::{Signature, VerifyingKey};
-use mnemosyne_bridge::{MemoryInput, MnemosyneBridge};
 use hmac::{Hmac, KeyInit, Mac};
 use infra_protocol::{
     AgentOperation, AgentRequest, AgentResponse, AgentToGateway, AuthChallenge, ContainerAction,
@@ -61,6 +60,7 @@ use infra_protocol::{
 };
 use mcp_actions::*;
 use mcp_result::{ToolError, ToolJson as McpJson};
+use mnemosyne_bridge::{MemoryInput, MnemosyneBridge};
 use pending::PendingRequests;
 use rmcp::{
     handler::server::wrapper::Parameters,
