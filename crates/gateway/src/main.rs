@@ -52,11 +52,11 @@ use infra_protocol::{
     AgentOperation, AgentRequest, AgentResponse, AgentToGateway, AuthChallenge, ContainerAction,
     ContainerRequest, DEFAULT_CONTROL_FRAME_LIMIT, DesktopAction, DesktopRequest, DeviceAuthStart,
     DeviceHello, ExecOutput, FILE_LIST_PAGINATION_CAPABILITY, FileAction, FileRequest,
-    GatewayToAgent, GitAction, GitRequest, HelloAck, JobAction, JobRequest, LegacyDeviceHello,
-    MAX_DIRECTORY_ENTRIES, MAX_DIRECTORY_PAGE_SIZE, NetworkAction, NetworkRequest, OperationResult,
-    PROTOCOL_VERSION, ProcessAction, ProcessRequest, ReconcileSnapshot, SearchMode, SearchRequest,
-    ServiceAction, ServiceRequest, SignedDeviceHello, SystemAction, SystemRequest, TerminalAction,
-    TerminalRequest, TransferAction, TransferRequest, signed_auth_message,
+    GatewayToAgent, HelloAck, JobAction, JobRequest, LegacyDeviceHello, MAX_DIRECTORY_ENTRIES,
+    MAX_DIRECTORY_PAGE_SIZE, NetworkAction, NetworkRequest, OperationResult, PROTOCOL_VERSION,
+    ProcessAction, ProcessRequest, ReconcileSnapshot, ServiceAction, ServiceRequest,
+    SignedDeviceHello, SystemAction, SystemRequest, TerminalAction, TerminalRequest,
+    TransferAction, TransferRequest, signed_auth_message,
 };
 use mcp_actions::*;
 use mcp_result::{ToolError, ToolJson as McpJson};

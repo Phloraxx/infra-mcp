@@ -12,7 +12,6 @@ macro_rules! actions {
         }
     };
 }
-actions!(SearchModeName { Files=>"files", Content=>"content" });
 actions!(ProcessActionName { List=>"list", Terminate=>"terminate" });
 actions!(TransferActionName { UploadBegin=>"upload_begin", UploadChunk=>"upload_chunk", UploadCommit=>"upload_commit", DownloadBegin=>"download_begin", DownloadChunk=>"download_chunk", Status=>"status", List=>"list", Cancel=>"cancel" });
 actions!(DesktopActionName { Permissions=>"permissions", Displays=>"displays", Windows=>"windows", Screenshot=>"screenshot", Focus=>"focus", Click=>"click", TypeText=>"type_text", Key=>"key", ClipboardGet=>"clipboard_get", ClipboardSet=>"clipboard_set" });
@@ -20,4 +19,3 @@ actions!(SystemActionName { Summary=>"summary", Disks=>"disks", Networks=>"netwo
 actions!(NetworkActionName { Listeners=>"listeners", Resolve=>"resolve", TcpCheck=>"tcp_check" });
 actions!(ServiceActionName { List=>"list", Status=>"status", Start=>"start", Stop=>"stop", Restart=>"restart" });
 actions!(ContainerActionName { List=>"list", Inspect=>"inspect", Logs=>"logs", Start=>"start", Stop=>"stop", Restart=>"restart" });
-actions!(GitActionName { Status=>"status", Diff=>"diff", Log=>"log", Branches=>"branches", Remotes=>"remotes", Fetch=>"fetch", Pull=>"pull", Push=>"push" });

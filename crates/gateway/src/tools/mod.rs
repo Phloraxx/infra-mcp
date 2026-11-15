@@ -7,11 +7,9 @@ mod devices;
 mod dispatch;
 mod exec;
 mod files;
-mod git;
 mod jobs;
 mod network;
 mod processes;
-mod search;
 mod services;
 mod system;
 mod terminal;
@@ -24,11 +22,9 @@ pub(crate) use devices::*;
 pub(crate) use dispatch::*;
 pub(crate) use exec::*;
 pub(crate) use files::*;
-pub(crate) use git::*;
 pub(crate) use jobs::*;
 pub(crate) use network::*;
 pub(crate) use processes::*;
-pub(crate) use search::*;
 pub(crate) use services::*;
 pub(crate) use system::*;
 pub(crate) use terminal::*;
@@ -193,38 +189,6 @@ impl InfraMcp {
             &self.state,
             input.device,
             AgentOperation::Files(FileRequest { action }),
-            65_000,
-        )
-        .await
-    }
-
-    #[tool(
-        name = "search",
-        description = "Search filenames or text content efficiently on an Infra device. mode: files or content."
-    )]
-    async fn search(
-        &self,
-        Parameters(input): Parameters<McpSearchInput>,
-    ) -> Result<McpJson<serde_json::Value>, ToolError> {
-        let mode = match input.mode.as_str() {
-            "files" => SearchMode::Files,
-            "content" => SearchMode::Content,
-            _ => return Err("search mode must be files or content".into()),
-        };
-        tool_operation(
-            &self.state,
-            input.device,
-            AgentOperation::Search(SearchRequest {
-                root: input.root,
-                query: input.query,
-                mode,
-                literal: input.literal.unwrap_or(false),
-                ignore_case: input.ignore_case.unwrap_or(true),
-                include_hidden: input.include_hidden.unwrap_or(false),
-                file_pattern: input.file_pattern,
-                max_results: input.max_results,
-                context_lines: input.context_lines,
-            }),
             65_000,
         )
         .await
@@ -810,51 +774,6 @@ impl InfraMcp {
             input.device,
             AgentOperation::Containers(ContainerRequest { action }),
             90_000,
-        )
-        .await
-    }
-
-    #[tool(
-        name = "git",
-        description = "Structured Git operations without a shell. Actions: status, diff, log, branches, remotes, fetch, pull, push."
-    )]
-    async fn git(
-        &self,
-        Parameters(input): Parameters<McpGitInput>,
-    ) -> Result<McpJson<serde_json::Value>, ToolError> {
-        let action = match input.action.as_str() {
-            "status" => GitAction::Status { repo: input.repo },
-            "diff" => GitAction::Diff {
-                repo: input.repo,
-                staged: input.staged.unwrap_or(false),
-            },
-            "log" => GitAction::Log {
-                repo: input.repo,
-                limit: input.limit,
-            },
-            "branches" => GitAction::Branches { repo: input.repo },
-            "remotes" => GitAction::Remotes { repo: input.repo },
-            "fetch" => GitAction::Fetch {
-                repo: input.repo,
-                remote: input.remote,
-            },
-            "pull" => GitAction::Pull {
-                repo: input.repo,
-                remote: input.remote,
-                branch: input.branch,
-            },
-            "push" => GitAction::Push {
-                repo: input.repo,
-                remote: input.remote,
-                branch: input.branch,
-            },
-            _ => return Err("unknown git action".into()),
-        };
-        tool_operation(
-            &self.state,
-            input.device,
-            AgentOperation::Git(GitRequest { action }),
-            130_000,
         )
         .await
     }
