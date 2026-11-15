@@ -5,7 +5,7 @@ mod bulk;
 mod copy;
 mod copy_queue;
 mod dashboard_http;
-mod hermes_bridge;
+mod mnemosyne_bridge;
 mod mcp_actions;
 mod mcp_result;
 mod oauth;
@@ -47,7 +47,7 @@ use base64::{
     engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD},
 };
 use ed25519_dalek::{Signature, VerifyingKey};
-use hermes_bridge::{HermesBridge, HermesInput, HermesMemoryInput};
+use mnemosyne_bridge::{MemoryInput, MnemosyneBridge};
 use hmac::{Hmac, KeyInit, Mac};
 use infra_protocol::{
     AgentOperation, AgentRequest, AgentResponse, AgentToGateway, AuthChallenge, ContainerAction,
@@ -100,7 +100,7 @@ struct AppState {
     pending: PendingRequests,
     events: broadcast::Sender<DashboardEvent>,
     store: Store,
-    hermes: Option<Arc<HermesBridge>>,
+    memory: Option<Arc<MnemosyneBridge>>,
     dashboard: DashboardAssets,
     copy_queue: CopyQueue,
 }
@@ -119,7 +119,7 @@ impl AppState {
             pending: PendingRequests::default(),
             events,
             store,
-            hermes: HermesBridge::from_env(),
+            memory: MnemosyneBridge::from_env(),
             dashboard: DashboardAssets::embedded(),
             copy_queue: CopyQueue::default(),
         }

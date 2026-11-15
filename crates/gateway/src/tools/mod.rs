@@ -586,31 +586,17 @@ impl InfraMcp {
     }
 
     #[tool(
-        name = "hermes",
-        description = "Delegate a task to the configured Hermes profile (start), inspect/cancel runs (status/stop), or list/read its API-owned sessions (sessions/messages). Start requires a stable request_id for idempotency. Capabilities checks are cheap; actual tasks may invoke models and Infra tools."
+        name = "memory",
+        description = "Persistent agent memory backed by the local Mnemosyne store. Actions: remember (store any fact, preference, identity, insight or context that should persist across sessions; importance 0.0-1.0; valid_until YYYY-MM-DD for time-bound facts), recall (hybrid semantic search over stored memories), get (fetch one memory by memory_id), update (replace content by memory_id), invalidate (mark a memory outdated when a newer fact supersedes it), forget (delete by memory_id), stats (store statistics), sleep (run consolidation; operator opt-in). Prefer remember for durable user or project facts over restating them in prose, and recall before answering questions about prior sessions."
     )]
-    async fn hermes(
+    async fn memory(
         &self,
-        Parameters(input): Parameters<HermesInput>,
+        Parameters(input): Parameters<MemoryInput>,
     ) -> Result<McpJson<serde_json::Value>, ToolError> {
-        let bridge = self.state.hermes.as_ref().ok_or_else(|| {
-            ToolError::new("unsupported", "Hermes bridge is disabled or misconfigured")
+        let bridge = self.state.memory.as_ref().ok_or_else(|| {
+            ToolError::new("unsupported", "Memory bridge is disabled or misconfigured")
         })?;
         Ok(McpJson(bridge.run(input).await?))
-    }
-
-    #[tool(
-        name = "hermes_memory",
-        description = "Read or change the configured Hermes profile's built-in memory (MEMORY.md / USER.md). Uses Hermes MemoryStore for locked validated writes. Actions: read, add, patch, remove. Writes are disabled unless separately enabled by the operator. Read before changing an entry."
-    )]
-    async fn hermes_memory(
-        &self,
-        Parameters(input): Parameters<HermesMemoryInput>,
-    ) -> Result<McpJson<serde_json::Value>, ToolError> {
-        let bridge = self.state.hermes.as_ref().ok_or_else(|| {
-            ToolError::new("unsupported", "Hermes bridge is disabled or misconfigured")
-        })?;
-        Ok(McpJson(bridge.memory(input).await?))
     }
 
     #[tool(
